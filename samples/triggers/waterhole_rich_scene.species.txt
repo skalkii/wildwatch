@@ -1,0 +1,198 @@
+# slug=waterhole_rich_scene kind=species model=google/gemma-4-31B-it
+# index_id=11011ff14d15a06c
+# scenes=30
+
+[t=0.0-10.0]
+[SCENE] light_mode=dusk; total=4; state=mixed_species
+[ANIMAL] species=elephant; count=2; age_sex=adult; position=foreground left and center
+[ANIMAL] species=giraffe; count=2; age_sex=unknown; position=center background and right background
+[NOTES] Animals are silhouetted against the sunset.
+
+[t=10.0-20.0]
+[SCENE] light_mode=dusk; total=4; state=mixed_species
+[ANIMAL] species=elephant; count=2; age_sex=adult; position=foreground, at water edge
+[ANIMAL] species=giraffe; count=2; age_sex=unknown; position=background, center and right
+[NOTES] Silhouetted animals against sunset.
+
+[t=20.0-30.0]
+[SCENE] light_mode=dusk; total=5; state=mixed_species
+[ANIMAL] species=zebra; count=3; age_sex=unknown; position=at water edge, drinking
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background, right of center
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=background, far right
+[NOTES] Animals are dispersed around the waterhole perimeter.
+
+[t=30.0-40.0]
+[SCENE] light_mode=dusk; total=5; state=mixed_species
+[ANIMAL] species=zebra; count=3; age_sex=unknown; position=at water edge, left and center-left
+[ANIMAL] species=oryx; count=1; age_sex=unknown; position=at water edge, center-right
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=drinking, right side
+[NOTES] Mixed group of herbivores gathered at the waterhole during sunset.
+
+[t=40.0-50.0]
+[SCENE] light_mode=dawn; total=4; state=mixed_species
+[ANIMAL] species=zebra; count=2; age_sex=unknown; position=at water edge
+[ANIMAL] species=oryx; count=1; age_sex=unknown; position=at water edge
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[NOTES] Animals are dispersed around the waterhole perimeter.
+
+[t=50.0-60.0]
+[SCENE] light_mode=dusk; total=4; state=mixed_species
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=zebra; count=2; age_sex=unknown; position=background, at water edge
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background, right of center
+[NOTES] Animals are dispersed around the perimeter of the waterhole.
+
+[t=60.0-70.0]
+[SCENE] light_mode=dusk; total=4; state=mixed_species
+[ANIMAL] species=zebra; count=2; age_sex=unknown; position=left and center background, near water
+[ANIMAL] species=possibly oryx; count=1; age_sex=unknown; position=right background
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=far right, standing at water edge
+[NOTES] Animals are dispersed around the perimeter of the waterhole.
+
+[t=70.0-80.0]
+[SCENE] light_mode=dawn; total=3; state=mixed_species
+[ANIMAL] species=giraffe; count=1; age_sex=adult; position=right side, standing
+[ANIMAL] species=oryx; count=1; age_sex=unknown; position=mid-ground right, walking left
+[ANIMAL] species=possibly oryx; count=1; age_sex=unknown; position=background left, distant
+[NOTES] Low visibility for distant animals due to lighting and distance.
+
+[t=80.0-90.0]
+[SCENE] light_mode=dawn; total=3; state=mixed_species
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=background left, drinking
+[ANIMAL] species=possibly black-backed jackal; count=1; age_sex=unknown; position=background center, walking
+[NOTES] Low light conditions; jackal identification based on silhouette and size.
+
+[t=90.0-100.0]
+[SCENE] light_mode=dawn; total=2; state=small_group
+[ANIMAL] species=possibly gemsbok; count=1; age_sex=unknown; position=background right, near water edge
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=far background left
+[NOTES] Low visibility for distant animals due to lighting and distance.
+
+[t=100.0-110.0]
+[SCENE] light_mode=dawn; total=3; state=small_group
+[ANIMAL] species=giraffe; count=2; age_sex=unknown; position=background left
+[ANIMAL] species=possibly oryx; count=1; age_sex=unknown; position=background right
+[NOTES] Animals are distant and silhouettes are minimal due to lighting.
+
+[t=110.0-120.0]
+[SCENE] light_mode=dawn; total=0; state=empty
+
+[t=120.0-130.0]
+[SCENE] light_mode=dusk; total=3; state=mixed_species
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=possibly oryx; count=1; age_sex=unknown; position=background center
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=far left background
+[NOTES] Low visibility for background animals due to distance and lighting.
+
+[t=130.0-140.0]
+[SCENE] light_mode=dusk; total=1; state=single_animal
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing by water edge
+[NOTES] Single giraffe silhouetted against the sunset.
+
+[t=140.0-150.0]
+[SCENE] light_mode=dusk; total=1; state=single_animal
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing near water edge
+[NOTES] Single giraffe visible against the sunset horizon.
+
+[t=150.0-160.0]
+[SCENE] light_mode=dusk; total=2; state=small_group
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=possibly oryx; count=1; age_sex=unknown; position=background, center-left
+[NOTES] Distant animal in background is small and silhouette-only.
+
+[t=160.0-170.0]
+[SCENE] light_mode=dusk; total=1; state=single_animal
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing at water edge
+[NOTES] Single giraffe visible on the right side of the frame.
+
+[t=170.0-180.0]
+[SCENE] light_mode=dusk; total=3; state=small_group
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right foreground
+[ANIMAL] species=possibly zebra; count=2; age_sex=unknown; position=background left
+[NOTES] Two animals in the far background are indistinct due to distance and lighting.
+
+[t=180.0-190.0]
+[SCENE] light_mode=dusk; total=2; state=small_group
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background left, near scrub
+[NOTES] Low visibility for the animal in the background due to distance and lighting.
+
+[t=190.0-200.0]
+[SCENE] light_mode=dawn; total=2; state=small_group
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background left, near scrub
+[NOTES] Low light conditions; second animal is distant and partially obscured.
+
+[t=200.0-210.0]
+[SCENE] light_mode=dusk; total=1; state=single_animal
+[ANIMAL] species=giraffe; count=1; age_sex=unknown; position=right side, standing near water edge
+[NOTES] Animal is silhouetted against the sunset.
+
+[t=210.0-220.0]
+[SCENE] light_mode=daylight; total=8; state=mixed_species
+[ANIMAL] species=giraffe; count=4; age_sex=unknown; position=at water edge and background
+[ANIMAL] species=unidentified antelope; count=2; age_sex=unknown; position=background under trees
+[ANIMAL] species=unidentified ungulate; count=1; age_sex=unknown; position=drinking at left water edge
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground water edge
+[NOTES] Giraffes are actively drinking at the waterhole.
+
+[t=220.0-230.0]
+[SCENE] light_mode=daylight; total=7; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=at water edge
+[ANIMAL] species=zebra; count=2; age_sex=unknown; position=drinking at left edge
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background near brush
+[ANIMAL] species=unidentified bird; count=1; age_sex=unknown; position=at water edge foreground
+[NOTES] One bird is partially obscured/out of focus in the foreground.
+
+[t=230.0-240.0]
+[SCENE] light_mode=daylight; total=7; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=at water edge
+[ANIMAL] species=warthog; count=2; age_sex=unknown; position=at water edge, left
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=background, center-left
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground, water edge
+[NOTES] Giraffes are actively drinking at the waterhole.
+
+[t=240.0-250.0]
+[SCENE] light_mode=daylight; total=7; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=drinking at water edge
+[ANIMAL] species=unidentified antelope; count=2; age_sex=unknown; position=background near brush
+[ANIMAL] species=unidentified antelope; count=2; age_sex=unknown; position=at water edge, left
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground water edge
+[NOTES] Mixed group gathered at the waterhole.
+
+[t=250.0-260.0]
+[SCENE] light_mode=daylight; total=7; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=drinking at water edge
+[ANIMAL] species=unidentified suid; count=2; age_sex=unknown; position=drinking at water edge
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=at water edge
+[ANIMAL] species=possibly kudu; count=1; age_sex=unknown; position=background near brush
+[NOTES] Mixed group gathered at the waterhole.
+
+[t=260.0-270.0]
+[SCENE] light_mode=daylight; total=9; state=mixed_species
+[ANIMAL] species=giraffe; count=4; age_sex=unknown; position=three drinking at water edge, one standing in background
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=far left background
+[ANIMAL] species=warthog; count=2; age_sex=unknown; position=at water edge
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground at water edge
+[NOTES] Giraffes are utilizing the splayed-leg posture to drink.
+
+[t=270.0-280.0]
+[SCENE] light_mode=daylight; total=8; state=mixed_species
+[ANIMAL] species=giraffe; count=4; age_sex=unknown; position=at water edge and background
+[ANIMAL] species=zebra; count=2; age_sex=unknown; position=at water edge left
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground water edge
+[NOTES] Giraffes are utilizing the waterhole while zebras are present on the opposite bank.
+
+[t=280.0-290.0]
+[SCENE] light_mode=daylight; total=6; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=right side, near water edge
+[ANIMAL] species=unidentified antelope; count=1; age_sex=unknown; position=far left, edge of frame
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=foreground, at water edge
+[NOTES] Three giraffes are congregating on the right side of the waterhole.
+
+[t=290.0-300.0]
+[SCENE] light_mode=daylight; total=5; state=mixed_species
+[ANIMAL] species=giraffe; count=3; age_sex=unknown; position=right side, near water edge
+[ANIMAL] species=unidentified bird; count=2; age_sex=unknown; position=at water edge, foreground
+[NOTES] Three giraffes are gathered near the waterhole with two small birds in the foreground.
