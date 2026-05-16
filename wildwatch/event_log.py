@@ -58,5 +58,29 @@ def read_all() -> list[dict[str, Any]]:
 
 
 def read_since(min_ts: float) -> list[dict[str, Any]]:
-    """Return records whose ``received_at`` is >= ``min_ts`` (Unix seconds)."""
-    return [r for r in read_all() if float(r.get("received_at", 0)) >= min_ts]
+    """Return records whose ``received_at`` is >= ``min_ts`` (Unix seconds).
+
+    Records with a missing, non-numeric, or wrong-type ``received_at`` are
+    skipped (with a single aggregated WARNING) so one corrupt entry can't
+    take down the digest pipeline.
+    """
+    out: list[dict[str, Any]] = []
+    n_skipped = 0
+    for r in read_all():
+        raw = r.get("received_at")
+        if raw is None:
+            n_skipped += 1
+            continue
+        try:
+            ts = float(raw)
+        except (TypeError, ValueError):
+            n_skipped += 1
+            continue
+        if ts >= min_ts:
+            out.append(r)
+    if n_skipped:
+        logger.warning(
+            "event_log.read_since: skipped %s record(s) with bad received_at",
+            n_skipped,
+        )
+    return out
