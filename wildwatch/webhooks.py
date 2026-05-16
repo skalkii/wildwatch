@@ -16,11 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 import time
-from typing import Annotated
+from pathlib import Path as PPath
+from typing import Annotated, Any
 
+import aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI, File, Form, HTTPException, Path, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -28,10 +31,16 @@ from pydantic import BaseModel, Field
 # and other vars without requiring the operator to pre-export them.
 load_dotenv()
 
-from wildwatch import dashboard, event_log  # noqa: E402
+from wildwatch import dashboard, event_log, ingest, sources  # noqa: E402
 from wildwatch.telegram import send_alert  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
+
+# Strong refs to in-flight background dispatch tasks so the GC doesn't drop
+# them mid-flight (RUF006).
+_BG_TASKS: set[asyncio.Task] = set()
 
 # Cache for /api/remote: list_rtstreams + list_sandboxes (10s TTL to avoid
 # hammering the SDK from dashboard polls).
@@ -175,3 +184,145 @@ async def events_stream() -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ──── Source CRUD routes ──────────────────────────────────────────────────
+
+
+class SourceCreate(BaseModel):
+    kind: str = Field(..., description="upload|youtube|hls|rtsp|rtmp")
+    input: str
+    name: str
+
+
+def _get_coll() -> Any:
+    """Lazy-load VideoDB collection per request to avoid global SDK init."""
+    import videodb
+
+    conn = videodb.connect()
+    return conn.get_collection()
+
+
+@app.get("/api/sources")
+def api_list_sources() -> dict:
+    return {"sources": [s.__dict__ for s in sources.list_sources()]}
+
+
+@app.get("/api/sources/{source_id}")
+def api_get_source(source_id: str) -> dict:
+    s = sources.get_source(source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    return s.__dict__
+
+
+@app.post("/api/sources")
+async def api_create_source(payload: SourceCreate) -> dict:
+    """JSON path: create a URL/RTSP/RTMP/YouTube source, kick off ingest."""
+    if payload.kind == "upload":
+        raise HTTPException(
+            status_code=400,
+            detail="use POST /api/sources/upload (multipart) for file uploads",
+        )
+    try:
+        s = sources.add_source(kind=payload.kind, input=payload.input, name=payload.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    coll = _get_coll()
+    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(s.id, coll=coll)))
+    return s.__dict__
+
+
+@app.post("/api/sources/upload")
+async def api_upload_source(
+    file: Annotated[UploadFile, File(...)],
+    name: Annotated[str, Form(...)],
+) -> dict:
+    """Multipart upload path. Streams to a tempfile, then dispatches."""
+    s = sources.add_source(kind="upload", input="", name=name)
+
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, prefix=f"wildwatch-upload-{s.id[:8]}-", suffix=".mp4"
+    )
+    tmp_path = PPath(tmp.name)
+    tmp.close()
+    written = 0
+    try:
+        async with aiofiles.open(tmp_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"upload exceeds {UPLOAD_MAX_BYTES // (1024 * 1024)} MB cap",
+                    )
+                await out.write(chunk)
+        sources.update_source(
+            s.id,
+            input=str(tmp_path),
+            stage_msg=f"received {written} bytes; queued for upload",
+        )
+    except HTTPException:
+        tmp_path.unlink(missing_ok=True)
+        sources.update_source(s.id, status="error", error="upload too large")
+        raise
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        sources.update_source(s.id, status="error", error=str(e))
+        raise
+
+    coll = _get_coll()
+    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(s.id, coll=coll)))
+    return sources.get_source(s.id).__dict__
+
+
+@app.delete("/api/sources/{source_id}")
+def api_delete_source(source_id: str) -> dict:
+    s = sources.get_source(source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    # Best-effort remote cleanup (don't fail the local delete if remote fails)
+    coll = _get_coll()
+    if s.rtstream_id:
+        try:
+            rt = coll.get_rtstream(s.rtstream_id)
+            rt.stop()
+        except Exception as e:
+            logger.warning("delete: rt.stop failed for %s: %s", s.rtstream_id, e)
+    if s.video_id:
+        try:
+            coll.delete_video(s.video_id)
+        except Exception as e:
+            logger.warning("delete: coll.delete_video failed for %s: %s", s.video_id, e)
+    sources.delete_source(source_id)
+    return {"status": "deleted", "id": source_id}
+
+
+@app.post("/api/sources/{source_id}/disconnect")
+def api_disconnect_source(source_id: str) -> dict:
+    s = sources.get_source(source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    if not s.rtstream_id:
+        return {"status": "noop", "reason": "no rtstream attached"}
+    coll = _get_coll()
+    try:
+        rt = coll.get_rtstream(s.rtstream_id)
+        rt.stop()
+        sources.update_source(source_id, status="disconnected", stage_msg="rtstream stopped")
+    except Exception as e:
+        sources.update_source(source_id, status="error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return sources.get_source(source_id).__dict__
+
+
+@app.post("/api/sources/{source_id}/reconnect")
+async def api_reconnect_source(source_id: str) -> dict:
+    s = sources.get_source(source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    sources.update_source(source_id, status="queued", error=None, stage_msg="reconnect requested")
+    coll = _get_coll()
+    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(source_id, coll=coll)))
+    return sources.get_source(source_id).__dict__

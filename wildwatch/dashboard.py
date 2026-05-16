@@ -96,6 +96,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .ev-1 { border-left-color: #16a34a; }
     .ev-2 { border-left-color: #ca8a04; }
     .ev-3 { border-left-color: #dc2626; }
+    .tab-active { background: #1f2937; border-bottom: 2px solid #3b82f6; }
+    .status-queued { background: #6b7280; }
+    .status-connecting { background: #3b82f6; }
+    .status-ingesting { background: #8b5cf6; }
+    .status-indexing { background: #ec4899; }
+    .status-ready { background: #16a34a; }
+    .status-error { background: #dc2626; }
+    .status-disconnected { background: #6b7280; }
     pre { font-size: 11px; }
   </style>
 </head>
@@ -113,8 +121,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </header>
 
-  <main class="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
-    <!-- Stats row across columns -->
+  <nav class="border-b border-gray-800 px-6 flex gap-1 text-sm">
+    <button data-tab="alerts" class="tab-btn px-4 py-2 hover:bg-gray-800 tab-active">Alerts</button>
+    <button data-tab="sources" class="tab-btn px-4 py-2 hover:bg-gray-800">Sources</button>
+    <button data-tab="content" class="tab-btn px-4 py-2 hover:bg-gray-800">Indexed Content</button>
+    <button data-tab="usage" class="tab-btn px-4 py-2 hover:bg-gray-800">Usage</button>
+  </nav>
+
+  <!-- ALERTS TAB -->
+  <main id="tab-alerts" class="tab-pane p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
     <section class="lg:col-span-3 grid grid-cols-4 gap-3">
       <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
         <div class="text-xs text-gray-400">TOTAL ALERTS</div>
@@ -133,8 +148,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="text-3xl font-bold mt-1 text-red-400" id="stat-t3">0</div>
       </div>
     </section>
-
-    <!-- Live event feed (2 cols) -->
     <section class="lg:col-span-2 bg-gray-900 rounded-lg p-4 border border-gray-800">
       <h2 class="text-sm uppercase tracking-wider text-gray-400 mb-2">
         Live event feed
@@ -142,8 +155,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </h2>
       <div id="feed" class="space-y-2 max-h-[600px] overflow-y-auto"></div>
     </section>
-
-    <!-- Side panel: streams + sandboxes -->
     <aside class="space-y-4">
       <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
         <h2 class="text-sm uppercase tracking-wider text-gray-400 mb-2">RTStreams (VideoDB)</h2>
@@ -163,6 +174,60 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </aside>
   </main>
+
+  <!-- SOURCES TAB -->
+  <main id="tab-sources" class="tab-pane p-6 hidden">
+    <div class="flex justify-between items-center mb-4">
+      <h2 class="text-lg font-bold">Sources</h2>
+      <button id="add-source-btn" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm">+ Add source</button>
+    </div>
+    <div id="sources-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      loading...
+    </div>
+  </main>
+
+  <!-- INDEXED CONTENT TAB -->
+  <main id="tab-content" class="tab-pane p-6 hidden">
+    <h2 class="text-lg font-bold mb-4">Indexed Content (TODO T-63)</h2>
+    <p class="text-gray-400 text-sm">Wired in next ticket.</p>
+  </main>
+
+  <!-- USAGE TAB -->
+  <main id="tab-usage" class="tab-pane p-6 hidden">
+    <h2 class="text-lg font-bold mb-4">VideoDB Usage (TODO T-64)</h2>
+    <p class="text-gray-400 text-sm">Wired in next ticket.</p>
+  </main>
+
+  <!-- ADD SOURCE MODAL -->
+  <div id="add-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
+    <div class="bg-gray-900 rounded-lg p-6 w-full max-w-md border border-gray-700">
+      <h3 class="text-lg font-bold mb-4">Add source</h3>
+      <div class="flex gap-1 mb-4 text-xs">
+        <button data-modal-tab="upload" class="modal-tab-btn px-3 py-1 rounded bg-gray-800 tab-active">File upload</button>
+        <button data-modal-tab="url" class="modal-tab-btn px-3 py-1 rounded">URL (YouTube/HLS)</button>
+        <button data-modal-tab="rtsp" class="modal-tab-btn px-3 py-1 rounded">RTSP/RTMP</button>
+      </div>
+      <div class="space-y-3">
+        <input id="modal-name" placeholder="Name (required)" class="w-full px-3 py-2 bg-gray-800 rounded text-sm">
+        <div id="modal-pane-upload">
+          <input id="modal-file" type="file" accept="video/*" class="w-full text-sm">
+          <p class="text-xs text-gray-500 mt-1">Max 500 MB</p>
+        </div>
+        <div id="modal-pane-url" class="hidden">
+          <input id="modal-url" placeholder="https://www.youtube.com/watch?v=... OR https://x/y.m3u8" class="w-full px-3 py-2 bg-gray-800 rounded text-sm">
+          <p class="text-xs text-gray-500 mt-1">YouTube live URLs need bridge — paste RTSP from bore.pub instead</p>
+        </div>
+        <div id="modal-pane-rtsp" class="hidden">
+          <input id="modal-rtsp" placeholder="rtsp://host:port/path  or  rtmp://..." class="w-full px-3 py-2 bg-gray-800 rounded text-sm">
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button id="modal-cancel" class="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded">Cancel</button>
+        <button id="modal-submit" class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 rounded">Add</button>
+      </div>
+      <p id="modal-error" class="text-red-400 text-xs mt-3 hidden"></p>
+    </div>
+  </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -253,16 +318,144 @@ function startSSE() {
     $('conn-text').textContent = 'reconnecting...';
   };
   es.onmessage = (m) => {
-    fetchStats();  // re-render full feed (simpler than dom-prepend)
+    let payload = null;
+    try { payload = JSON.parse(m.data); } catch (e) { /* connect comment */ }
+    if (payload && payload.type === 'source_progress') {
+      fetchSources();  // refresh sources view on every progress event
+    }
+    fetchStats();  // always refresh alert feed (cheap)
   };
+}
+
+// ──── Sources tab ────
+function renderSource(s) {
+  const statusClass = `status-${s.status || 'queued'}`;
+  const errMsg = s.error ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(s.error)}</div>` : '';
+  const stage = s.stage_msg ? `<div class="text-xs text-gray-500 mt-1">${escapeHtml(s.stage_msg)}</div>` : '';
+  const remote = s.video_id ? `video <code class="text-blue-300">${escapeHtml(s.video_id)}</code>` :
+                 s.rtstream_id ? `rtstream <code class="text-blue-300">${escapeHtml(s.rtstream_id)}</code>` : '';
+  const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString() : '';
+  return `<div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+    <div class="flex justify-between items-start">
+      <div>
+        <div class="font-bold">${escapeHtml(s.name)}</div>
+        <div class="text-xs text-gray-500 mt-1">${escapeHtml(s.kind)} · ${created}</div>
+      </div>
+      <span class="${statusClass} text-xs px-2 py-1 rounded">${escapeHtml(s.status || 'queued')}</span>
+    </div>
+    <div class="text-xs text-gray-400 mt-2 truncate" title="${escapeHtml(s.input || '')}">${escapeHtml(s.input || '')}</div>
+    ${stage}
+    ${errMsg}
+    <div class="text-xs text-gray-300 mt-2">${remote}</div>
+    <div class="flex gap-2 mt-3">
+      <button onclick="reconnectSource('${s.id}')" class="text-xs bg-blue-700 hover:bg-blue-600 px-2 py-1 rounded">Reconnect</button>
+      <button onclick="disconnectSource('${s.id}')" class="text-xs bg-yellow-700 hover:bg-yellow-600 px-2 py-1 rounded">Disconnect</button>
+      <button onclick="deleteSource('${s.id}')" class="text-xs bg-red-700 hover:bg-red-600 px-2 py-1 rounded">Delete</button>
+    </div>
+  </div>`;
+}
+
+async function fetchSources() {
+  try {
+    const r = await fetch('/api/sources');
+    const d = await r.json();
+    const grid = $('sources-grid');
+    if (!d.sources || d.sources.length === 0) {
+      grid.innerHTML = '<div class="col-span-3 text-gray-500 text-sm">No sources yet. Click "+ Add source".</div>';
+      return;
+    }
+    grid.innerHTML = d.sources.map(renderSource).join('');
+  } catch (e) { console.warn('sources fetch failed', e); }
+}
+
+async function deleteSource(id) {
+  if (!confirm('Delete this source? Remote video/rtstream will be cleaned up.')) return;
+  await fetch(`/api/sources/${id}`, { method: 'DELETE' });
+  fetchSources();
+}
+
+async function disconnectSource(id) {
+  await fetch(`/api/sources/${id}/disconnect`, { method: 'POST' });
+  fetchSources();
+}
+
+async function reconnectSource(id) {
+  await fetch(`/api/sources/${id}/reconnect`, { method: 'POST' });
+  fetchSources();
+}
+
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
+    btn.classList.add('tab-active');
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
+    $('tab-' + tab).classList.remove('hidden');
+    if (tab === 'sources') fetchSources();
+  });
+});
+
+// Add source modal
+let modalKind = 'upload';
+document.querySelectorAll('.modal-tab-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    modalKind = b.dataset.modalTab;
+    document.querySelectorAll('.modal-tab-btn').forEach(x => x.classList.remove('tab-active'));
+    b.classList.add('tab-active');
+    document.querySelectorAll('[id^="modal-pane-"]').forEach(p => p.classList.add('hidden'));
+    $('modal-pane-' + modalKind).classList.remove('hidden');
+  });
+});
+
+$('add-source-btn').addEventListener('click', () => { $('add-modal').classList.remove('hidden'); $('modal-error').classList.add('hidden'); });
+$('modal-cancel').addEventListener('click', () => $('add-modal').classList.add('hidden'));
+
+$('modal-submit').addEventListener('click', async () => {
+  const name = $('modal-name').value.trim();
+  if (!name) { showModalError('Name required'); return; }
+  try {
+    if (modalKind === 'upload') {
+      const f = $('modal-file').files[0];
+      if (!f) { showModalError('Pick a file'); return; }
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('name', name);
+      const r = await fetch('/api/sources/upload', { method: 'POST', body: fd });
+      if (!r.ok) { showModalError('upload failed: ' + (await r.text()).slice(0,200)); return; }
+    } else if (modalKind === 'url') {
+      const url = $('modal-url').value.trim();
+      if (!url) { showModalError('URL required'); return; }
+      const kind = url.includes('youtube.com') || url.includes('youtu.be') ? 'youtube' : 'hls';
+      const r = await fetch('/api/sources', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kind, input: url, name }) });
+      if (!r.ok) { showModalError('add failed: ' + (await r.text()).slice(0,200)); return; }
+    } else {
+      const url = $('modal-rtsp').value.trim();
+      if (!url) { showModalError('URL required'); return; }
+      const kind = url.startsWith('rtmp://') ? 'rtmp' : 'rtsp';
+      const r = await fetch('/api/sources', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ kind, input: url, name }) });
+      if (!r.ok) { showModalError('add failed: ' + (await r.text()).slice(0,200)); return; }
+    }
+    $('add-modal').classList.add('hidden');
+    $('modal-name').value = ''; $('modal-url').value = ''; $('modal-rtsp').value = ''; $('modal-file').value = '';
+    fetchSources();
+  } catch (e) { showModalError(e.message); }
+});
+
+function showModalError(msg) {
+  const el = $('modal-error');
+  el.textContent = msg;
+  el.classList.remove('hidden');
 }
 
 // Boot
 fetchStats();
 fetchRemote();
+fetchSources();
 startSSE();
 setInterval(fetchStats, 5000);
 setInterval(fetchRemote, 15000);
+setInterval(fetchSources, 10000);
 </script>
 </body>
 </html>
