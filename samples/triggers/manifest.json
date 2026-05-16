@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "description": "Trigger-corpus manifest. Each clip targets one or more events from wildwatch.events.EVENT_DEFINITIONS. Coverage tested by tests/test_corpus_manifest.py. Source URLs left null where operator selection is required (T-15b fills in).",
+  "clips": [
+    {
+      "slug": "waterhole_rich_scene",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "Tony Lewis Wildlife Namibia waterhole elephant giraffe juveniles",
+      "section": "0:00-5:00",
+      "duration_s": 300,
+      "events_expected": [
+        "juvenile_present",
+        "mixed_aggregation",
+        "parental_care",
+        "notable_social",
+        "large_aggregation"
+      ],
+      "stream_context": "namibia_waterhole",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Daytime multi-species waterhole. Expected: calves at water edge, mothers leading young, mixed herd >5 individuals, play behavior among juveniles."
+    },
+    {
+      "slug": "predator_hunt",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "SafariLive WildEarth lion leopard stalk chase alarm calls",
+      "section": "0:00-2:00",
+      "duration_s": 120,
+      "events_expected": [
+        "predator_activity",
+        "predator_vocal",
+        "alarm_call",
+        "rare_species"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Big-cat stalk/chase sequence. Expected: prey fleeing/frozen, alarm snorts from impala/baboon, lion roar or leopard sawing, flagship-species sighting."
+    },
+    {
+      "slug": "vehicle_intrusion",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "safari game drive vehicle approaches wildlife audible engine",
+      "section": "0:00-1:00",
+      "duration_s": 60,
+      "events_expected": [
+        "human_intrusion_visual",
+        "human_intrusion_audio"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Game drive vehicle visibly in frame at night OR human-made object flagged where it should not be; engine + human voices audible."
+    },
+    {
+      "slug": "carcass_aftermath",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "vultures kill site Africa wildlife carcass scavengers",
+      "section": "0:00-0:30",
+      "duration_s": 30,
+      "events_expected": [
+        "mortality_event"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Visible carcass/remains with vultures or blood/drag marks. Environment prompt should set flag=carcass_or_remains_visible."
+    },
+    {
+      "slug": "injured_wildlife",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "wildlife documentary limping injured antelope elephant",
+      "section": "0:00-0:30",
+      "duration_s": 30,
+      "events_expected": [
+        "welfare_concern"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Visibly limping or isolated-from-group animal. Behavior prompt should report anomaly=limping/apparent injury/isolation."
+    },
+    {
+      "slug": "dry_waterhole",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "drought dry waterhole climate Africa wildlife",
+      "section": "0:00-0:20",
+      "duration_s": 20,
+      "events_expected": [
+        "water_critical"
+      ],
+      "stream_context": "namibia_waterhole",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Dry or very-low-drying waterhole. Environment prompt should set water_state=very_low_drying or dry."
+    },
+    {
+      "slug": "pre_storm_silence",
+      "source": "youtube",
+      "source_url": null,
+      "source_search_query": "savanna ambient silence wildlife before storm quiet",
+      "section": "0:00-0:30",
+      "duration_s": 30,
+      "events_expected": [
+        "acoustic_silence"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": null,
+      "license": "fair-use-educational",
+      "notes": "Conspicuously quiet scene with expected biophony absent. Audio prompt should emit SIGNAL=ABNORMAL_SILENCE."
+    },
+    {
+      "slug": "poaching_synth",
+      "source": "synthesized",
+      "source_url": null,
+      "source_search_query": "base: quiet wildlife clip; overlay: FSD50K gunshot + voices",
+      "section": null,
+      "duration_s": 10,
+      "events_expected": [
+        "gunshot"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": {
+        "sound": "gunshot",
+        "source": "FSD50K",
+        "fsd50k_id": null,
+        "mix_filter": "ffmpeg -i base.mp4 -i gunshot.wav -filter_complex \"[1:a]volume=0.6[a1];[0:a][a1]amix=inputs=2:duration=first[a]\" -map 0:v -map \"[a]\" -shortest"
+      },
+      "license": "CC0 (FSD50K) on fair-use base footage",
+      "notes": "Staged synthesis to test poaching detection path. Honest in README + demo writeup."
+    },
+    {
+      "slug": "logging_synth",
+      "source": "synthesized",
+      "source_url": null,
+      "source_search_query": "base: quiet forest clip; overlay: FSD50K chainsaw",
+      "section": null,
+      "duration_s": 10,
+      "events_expected": [
+        "chainsaw"
+      ],
+      "stream_context": "wild_africa_live",
+      "audio_overlay": {
+        "sound": "chainsaw",
+        "source": "FSD50K",
+        "fsd50k_id": null,
+        "mix_filter": "ffmpeg -i base.mp4 -i chainsaw.wav -filter_complex \"[1:a]volume=0.7[a1];[0:a][a1]amix=inputs=2:duration=first[a]\" -map 0:v -map \"[a]\" -shortest"
+      },
+      "license": "CC0 (FSD50K) on fair-use base footage",
+      "notes": "Staged synthesis to test illegal-logging detection path."
+    },
+    {
+      "slug": "camera_failure_synth",
+      "source": "synthesized",
+      "source_url": null,
+      "source_search_query": "ffmpeg nullsrc black frame + white noise",
+      "section": null,
+      "duration_s": 5,
+      "events_expected": [
+        "camera_health"
+      ],
+      "stream_context": "namibia_waterhole",
+      "audio_overlay": null,
+      "license": "synthesized",
+      "notes": "Generate via: ffmpeg -f lavfi -i color=black:s=1280x720:d=5 -f lavfi -i anoisesrc=d=5 ... — frozen/black frame should trigger flag=camera_failure."
+    }
+  ]
+}
