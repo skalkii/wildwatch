@@ -20,11 +20,14 @@ the SDK catches up, every caller MUST explicitly ``stop_sandbox`` (or use
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).resolve().parent.parent / ".state.json"
 
@@ -39,7 +42,11 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    """Atomic write: stage to .tmp, then rename. POSIX rename is atomic so
+    a crash mid-write cannot leave a partial JSON file that breaks resume."""
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(STATE_FILE)
 
 
 def _record_sandbox(sb: Any, tier: Any) -> None:
@@ -53,17 +60,21 @@ def _record_sandbox(sb: Any, tier: Any) -> None:
 
 
 def _try_reuse(conn: Any, sandbox_id: str) -> Any | None:
-    """Return an active sandbox by id, or None if it's gone/stopped."""
+    """Return an active sandbox by id, or None if it's gone/stopped/refresh-failed."""
     try:
         sb = conn.get_sandbox(sandbox_id)
-    except Exception:
+    except Exception as e:
+        logger.warning("get_sandbox(%s) failed: %s", sandbox_id, e)
         return None
     if sb is None:
         return None
     try:
         sb.refresh()
-    except Exception:
-        pass
+    except Exception as e:
+        # Don't return a stale-state sandbox — would let downstream jobs
+        # hit a sandbox the server thinks is dead.
+        logger.warning("sb.refresh() failed for %s: %s — discarding cached id", sandbox_id, e)
+        return None
     return sb if getattr(sb, "is_active", False) else None
 
 
@@ -123,6 +134,10 @@ def managed_sandbox(
             sb.stop()
             sb.wait_for_stop(timeout=120)
         except Exception:
-            # Best-effort teardown; surface via state file inspection instead
-            # of swallowing the original exception (if any).
-            pass
+            # Best-effort teardown; log loudly so a 3am credit-leak gets
+            # surfaced via the log instead of silent .state.json inspection.
+            logger.warning(
+                "managed_sandbox: stop failed for %s — sandbox may still be billing",
+                getattr(sb, "id", "?"),
+                exc_info=True,
+            )

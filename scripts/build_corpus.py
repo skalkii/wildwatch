@@ -167,36 +167,74 @@ def _dispatch_download(url: str, dest: Path) -> bool:
 # ──── per-clip builders ────────────────────────────────────────────────────
 
 
-def _build_live_youtube(clip: dict, out: Path) -> bool:
-    """Capture N seconds from the CURRENT live position of a YouTube live stream.
-
-    Uses streamlink (which understands YouTube live HLS) piped into ffmpeg with
-    -t duration to cap the recording. Avoids yt-dlp --live-from-start which
-    would re-fetch the full archive from broadcast start.
+def _capture_live_stream(url: str, dur: int, out: Path) -> bool:
+    """Stream `url` for `dur` seconds via streamlink->ffmpeg using subprocess
+    pipes (no shell=True — defends against command-injection from manifest URLs).
     """
+    streamlink_cmd = [
+        "streamlink",
+        "--stream-segment-timeout",
+        "30",
+        url,
+        "best",
+        "-O",
+    ]
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        "pipe:0",
+        "-t",
+        str(dur),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        str(out),
+    ]
+    print(f"  $ {' '.join(streamlink_cmd)} | {' '.join(ffmpeg_cmd)}")
+    sl = subprocess.Popen(streamlink_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        ff = subprocess.Popen(ffmpeg_cmd, stdin=sl.stdout, stderr=subprocess.PIPE)
+        # Allow SIGPIPE propagation when ffmpeg closes early on -t cap.
+        if sl.stdout is not None:
+            sl.stdout.close()
+        ff_err = ff.communicate()[1]
+        ff_rc = ff.returncode
+        sl.terminate()
+        sl_err = sl.communicate()[1] if sl.stderr else b""
+        if ff_rc != 0:
+            print(f"  ! ffmpeg exit {ff_rc}")
+            if ff_err:
+                print(f"  ffmpeg stderr: {ff_err.decode('utf-8', 'ignore').strip()[-400:]}")
+            if sl_err:
+                print(f"  streamlink stderr: {sl_err.decode('utf-8', 'ignore').strip()[-400:]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"  ! pipeline error: {e}")
+        sl.kill()
+        return False
+
+
+def _build_live_youtube(clip: dict, out: Path) -> bool:
+    """Capture N seconds from CURRENT live position of a YouTube live stream."""
     url = clip.get("source_url")
     if not url:
         print(f"  skip {clip['slug']}: source_url unset")
         return False
     dur = clip["duration_s"]
-    cmd = (
-        f"streamlink --stream-segment-timeout 30 "
-        f"'{url}' best -O | ffmpeg -y -i pipe:0 -t {dur} "
-        f"-c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac '{out}'"
-    )
-    print(f"  $ {cmd}")
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"  ! exit {res.returncode}")
-        if res.stderr:
-            print(f"  stderr: {res.stderr.strip()[-500:]}")
-        if clip.get("fallback_url"):
-            print(f"  primary live failed; retrying fallback_url for {clip['slug']}")
-            cmd2 = cmd.replace(url, clip["fallback_url"])
-            res2 = subprocess.run(cmd2, shell=True, capture_output=True, text=True)
-            return res2.returncode == 0
-        return False
-    return True
+    if _capture_live_stream(url, dur, out):
+        return True
+    fallback = clip.get("fallback_url")
+    if fallback:
+        print(f"  primary live failed; retrying fallback_url for {clip['slug']}")
+        return _capture_live_stream(fallback, dur, out)
+    return False
 
 
 def _build_youtube(clip: dict, out: Path) -> bool:
