@@ -96,31 +96,86 @@ WildWatch exercises **all 10 VideoDB primitives** across the See / Understand / 
 
 ## Quickstart
 
+### Path A — Docker compose (recommended)
+
 ```bash
-# 1. Clone
 git clone https://github.com/skalkii/wildwatch.git && cd wildwatch
-
-# 2. Python 3.12 venv + install (videodb pinned to hackathon branch)
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# 3. Configure
 cp .env.example .env
-# Edit .env: set VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# Edit .env: VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
-# 4. (Live demo) Start mediamtx bridge for YouTube → RTSP
-docker compose -f bridge/docker-compose.yml up -d
-./bridge/start_bridge.sh "<youtube_url>" wildafrica
-
-# 5. (Live demo) Expose webhook receiver via tunnel
-uvicorn wildwatch.webhooks:app --reload &
-cloudflared tunnel --url http://localhost:8000  # capture public URL → WEBHOOK_BASE_URL
-
-# 6. Bootstrap: connect streams, create events, wire alerts
-python scripts/bootstrap.py
+docker compose up                  # starts mediamtx + wildwatch + bore
+# (or)
+docker compose --profile tunnel up # also brings up cloudflared (needs CLOUDFLARED_TUNNEL_TOKEN in .env)
 ```
 
-State persists to `.state.json`. Re-running `bootstrap.py` is idempotent.
+Then open **http://localhost:8000/** — the live dashboard.
+
+Services spun:
+- `wildwatch` — FastAPI app on `:8000` (dashboard + webhook + REST API)
+- `mediamtx` — RTSP relay on `:8554` for YouTube/HLS-bridged streams
+- `bore` — TCP tunnel exposing `mediamtx:8554` to `bore.pub:<remote_port>` (so VideoDB can reach your local RTSP)
+- `cloudflared` *(optional)* — public HTTPS tunnel for the webhook receiver
+
+### Path B — Local dev (faster iteration)
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env  # fill creds
+
+uvicorn wildwatch.webhooks:app --port 8000 &       # dashboard
+mediamtx bridge/mediamtx.yml &                      # RTSP relay (brew install mediamtx)
+bore local 8554 --to bore.pub &                     # public RTSP tunnel
+cloudflared tunnel --url http://localhost:8000 &    # public webhook URL
+```
+
+---
+
+## Use the dashboard
+
+Open `http://localhost:8000/`. Four tabs:
+
+| Tab | What it does |
+|---|---|
+| **Alerts** | Live SSE feed of every event the webhook receives. Per-tier counters. Manual 🟢🟡🔴 fire buttons. RTStream + Sandbox state panels. |
+| **Sources** | Add any source: file upload (≤500 MB), URL (YouTube / HLS), or RTSP/RTMP. Each card shows live status (`queued` → `connecting` → `ingesting` → `ready`). Per-card Reconnect / Disconnect / Delete. |
+| **Indexed Content** | Browse every uploaded video, its scene indexes, and recent scene records. Cross-scope search (collection / video / rtstream) with score-ranked results. |
+| **Usage** | Local upper-bound credit-burn estimate (hours × rate) + raw `conn.check_usage()` SDK output + recent invoices. |
+
+### Add a source from the UI
+
+1. Sources tab → **+ Add source**
+2. Pick file / URL / RTSP tab
+3. Name it, paste/select, submit
+4. Watch the card progress in real-time
+
+### Manual API examples
+
+```bash
+# RTSP from sample stream
+curl -X POST http://localhost:8000/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"rtsp","input":"rtsp://samples.rts.videodb.io:8554/intruder","name":"sample"}'
+
+# YouTube archive video (live URLs need bridge — paste the bore.pub RTSP)
+curl -X POST http://localhost:8000/api/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"youtube","input":"https://www.youtube.com/watch?v=...","name":"my-clip"}'
+
+# Search across collection
+curl -X POST http://localhost:8000/api/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"elephant OR oryx","scope":"collection"}'
+
+# Usage snapshot
+curl http://localhost:8000/api/usage | jq
+```
+
+---
+
+## State
+
+Everything persists to `.state.json` (atomic .tmp + rename, single-process safe). `data/live_event_log.jsonl` is the append-only alert log used by the digest builder. Re-running `bootstrap.py` is idempotent.
 
 ---
 
