@@ -1,13 +1,14 @@
 {
   "version": 1,
-  "description": "Trigger-corpus manifest. Each clip targets one or more events from wildwatch.events.EVENT_DEFINITIONS. Coverage tested by tests/test_corpus_manifest.py. Source URLs left null where operator selection is required (T-15b fills in).",
+  "description": "Trigger-corpus manifest. Each clip targets one or more events from wildwatch.events.EVENT_DEFINITIONS. Coverage tested by tests/test_corpus_manifest.py.",
   "clips": [
     {
       "slug": "waterhole_rich_scene",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=p7BVelzqmd0",
+      "fallback_url": "https://www.youtube.com/watch?v=-vaE-WlG3dc",
       "source_search_query": "Tony Lewis Wildlife Namibia waterhole elephant giraffe juveniles",
-      "section": "0:00-5:00",
+      "section": "0:30-5:30",
       "duration_s": 300,
       "events_expected": [
         "juvenile_present",
@@ -19,15 +20,16 @@
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Daytime multi-species waterhole. Expected: calves at water edge, mothers leading young, mixed herd >5 individuals, play behavior among juveniles."
+      "notes": "NamibiaCam / Gondwana Collection Namibia — operator of the actual namibia_waterhole livestream. Multi-species (oryx, springbok, wildebeest) documentary. Skip 30s intro. Fallback Okondeka clip reliably shows large mixed herds."
     },
     {
       "slug": "predator_hunt",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=Vvq8goIeXWg",
+      "fallback_url": "https://www.youtube.com/watch?v=3LVktBX88E0",
       "source_search_query": "SafariLive WildEarth lion leopard stalk chase alarm calls",
-      "section": "0:00-2:00",
-      "duration_s": 120,
+      "section": "0:00-0:22",
+      "duration_s": 22,
       "events_expected": [
         "predator_activity",
         "predator_vocal",
@@ -37,14 +39,15 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Big-cat stalk/chase sequence. Expected: prey fleeing/frozen, alarm snorts from impala/baboon, lion roar or leopard sawing, flagship-species sighting."
+      "notes": "Primary: 'Impala alarm call as they see a leopard' (22s, in-region). Tight on alarm_call + predator_vocal + rare_species (leopard). Fallback Love Nature 'Young Lion Stalks Impala' is region-locked in IN."
     },
     {
       "slug": "vehicle_intrusion",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=Q4jbpPiRcTI",
+      "fallback_url": null,
       "source_search_query": "safari game drive vehicle approaches wildlife audible engine",
-      "section": "0:00-1:00",
+      "section": "1:30-2:30",
       "duration_s": 60,
       "events_expected": [
         "human_intrusion_visual",
@@ -53,12 +56,13 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Game drive vehicle visibly in frame at night OR human-made object flagged where it should not be; engine + human voices audible."
+      "notes": "Self-drive Kruger POV with engine + tourist voices audible, vehicle visible. Calm tone, no incidents. If audio insufficient at 1:30-2:30, try other windows in 0:00-5:00."
     },
     {
       "slug": "carcass_aftermath",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=K7aWUnbdnCs",
+      "fallback_url": null,
       "source_search_query": "vultures kill site Africa wildlife carcass scavengers",
       "section": "0:00-0:30",
       "duration_s": 30,
@@ -68,12 +72,13 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Visible carcass/remains with vultures or blood/drag marks. Environment prompt should set flag=carcass_or_remains_visible."
+      "notes": "Nature Bites — 'Vultures Swarm Wildebeest Carcass'. Opens directly on aftermath, no kill scenes. African savanna setting."
     },
     {
       "slug": "injured_wildlife",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=SPVi-alDdI8",
+      "fallback_url": null,
       "source_search_query": "wildlife documentary limping injured antelope elephant",
       "section": "0:00-0:30",
       "duration_s": 30,
@@ -83,12 +88,13 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Visibly limping or isolated-from-group animal. Behavior prompt should report anomaly=limping/apparent injury/isolation."
+      "notes": "BBC Earth — 'Injured Elephant Calf Finds A Supportive Herd'. Limping + isolation both visible. Humane, judge-appropriate."
     },
     {
       "slug": "dry_waterhole",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=8oO3QeAZxPc",
+      "fallback_url": "https://www.youtube.com/watch?v=ZRZKw3bJ85k",
       "source_search_query": "drought dry waterhole climate Africa wildlife",
       "section": "0:00-0:20",
       "duration_s": 20,
@@ -98,14 +104,15 @@
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Dry or very-low-drying waterhole. Environment prompt should set water_state=very_low_drying or dry."
+      "notes": "Direct match: animals at dried-up waterhole during 3-month drought. Fits namibia_waterhole arid context."
     },
     {
       "slug": "pre_storm_silence",
       "source": "youtube",
-      "source_url": null,
+      "source_url": "https://www.youtube.com/watch?v=OcVtCTBTJ-4",
+      "fallback_url": null,
       "source_search_query": "savanna ambient silence wildlife before storm quiet",
-      "section": "0:00-0:30",
+      "section": "1:00-1:30",
       "duration_s": 30,
       "events_expected": [
         "acoustic_silence"
@@ -113,13 +120,14 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Conspicuously quiet scene with expected biophony absent. Audio prompt should emit SIGNAL=ABNORMAL_SILENCE."
+      "notes": "3am South African savanna field recording. Pre-dawn segment with sparse biophony — satisfies ABNORMAL_SILENCE. Visual mostly static; audio is the signal."
     },
     {
       "slug": "poaching_synth",
       "source": "synthesized",
       "source_url": null,
-      "source_search_query": "base: quiet wildlife clip; overlay: FSD50K gunshot + voices",
+      "fallback_url": null,
+      "source_search_query": "Pexels CC0 lioness/savanna + Freesound CC0 gunshot",
       "section": null,
       "duration_s": 10,
       "events_expected": [
@@ -128,18 +136,24 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": {
         "sound": "gunshot",
-        "source": "FSD50K",
-        "fsd50k_id": null,
-        "mix_filter": "ffmpeg -i base.mp4 -i gunshot.wav -filter_complex \"[1:a]volume=0.6[a1];[0:a][a1]amix=inputs=2:duration=first[a]\" -map 0:v -map \"[a]\" -shortest"
+        "source": "Freesound CC0",
+        "base_url": "https://www.pexels.com/video/a-lioness-standing-in-a-field-11760744/",
+        "overlay_url": "https://freesound.org/people/Cloud-10/sounds/632821/",
+        "overlay_trim": null,
+        "overlay_delay_ms": 4000,
+        "base_volume": 0.2,
+        "overlay_volume": 0.9,
+        "mix_filter": "ffmpeg -i base.mp4 -i overlay.mp3 -filter_complex \"[1:a]adelay=4000|4000,volume=0.9[over];[0:a]volume=0.2[base];[base][over]amix=inputs=2:duration=first[mixed]\" -map 0:v -map \"[mixed]\" -t 10 -c:v libx264 -pix_fmt yuv420p -c:a aac out.mp4"
       },
-      "license": "CC0 (FSD50K) on fair-use base footage",
-      "notes": "Staged synthesis to test poaching detection path. Honest in README + demo writeup."
+      "license": "CC0 (Pexels base + Freesound overlay)",
+      "notes": "Pexels: ROMAN ODINTSOV lioness in field. Freesound: Cloud-10 single rifle-style gunshot (1.89s). Both fully CC0 — no fair-use ambiguity."
     },
     {
       "slug": "logging_synth",
       "source": "synthesized",
       "source_url": null,
-      "source_search_query": "base: quiet forest clip; overlay: FSD50K chainsaw",
+      "fallback_url": null,
+      "source_search_query": "Pexels CC0 forest aerial + Freesound CC0 chainsaw",
       "section": null,
       "duration_s": 10,
       "events_expected": [
@@ -148,27 +162,33 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": {
         "sound": "chainsaw",
-        "source": "FSD50K",
-        "fsd50k_id": null,
-        "mix_filter": "ffmpeg -i base.mp4 -i chainsaw.wav -filter_complex \"[1:a]volume=0.7[a1];[0:a][a1]amix=inputs=2:duration=first[a]\" -map 0:v -map \"[a]\" -shortest"
+        "source": "Freesound CC0",
+        "base_url": "https://www.pexels.com/video/drone-footage-of-trees-10070117/",
+        "overlay_url": "https://freesound.org/people/Stefan021/sounds/431738/",
+        "overlay_trim": "10-17",
+        "overlay_delay_ms": 2000,
+        "base_volume": 0.3,
+        "overlay_volume": 0.8,
+        "mix_filter": "ffmpeg -i base.mp4 -i overlay.mp3 -filter_complex \"[1:a]atrim=10:17,asetpts=PTS-STARTPTS,adelay=2000|2000,volume=0.8[over];[0:a]volume=0.3[base];[base][over]amix=inputs=2:duration=first[mixed]\" -map 0:v -map \"[mixed]\" -t 10 -c:v libx264 -pix_fmt yuv420p -c:a aac out.mp4"
       },
-      "license": "CC0 (FSD50K) on fair-use base footage",
-      "notes": "Staged synthesis to test illegal-logging detection path."
+      "license": "CC0 (Pexels base + Freesound overlay)",
+      "notes": "Pexels: Claudiu Ciobanu forest drone aerial. Freesound: Stefan021 real Husqvarna recording (63.7s). Trim 10-17s window for pull-start + rev. Both CC0."
     },
     {
       "slug": "camera_failure_synth",
       "source": "synthesized",
       "source_url": null,
-      "source_search_query": "ffmpeg nullsrc black frame + white noise",
+      "fallback_url": null,
+      "source_search_query": "ffmpeg lavfi pure synthesis: black frame + pink noise",
       "section": null,
-      "duration_s": 5,
+      "duration_s": 10,
       "events_expected": [
         "camera_health"
       ],
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "synthesized",
-      "notes": "Generate via: ffmpeg -f lavfi -i color=black:s=1280x720:d=5 -f lavfi -i anoisesrc=d=5 ... — frozen/black frame should trigger flag=camera_failure."
+      "notes": "Pure ffmpeg recipe (no external assets). Command: ffmpeg -y -f lavfi -i color=black:s=1280x720:r=25:d=10 -f lavfi -i anoisesrc=color=pink:amplitude=0.01:d=10 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -shortest out.mp4. 10s black frame with faint pink noise — what a frozen/disconnected camera outputs."
     }
   ]
 }
