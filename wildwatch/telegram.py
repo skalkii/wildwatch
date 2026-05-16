@@ -26,15 +26,22 @@ def build_message(
     explanation: str | None,
     stream_url: str | None,
 ) -> str:
-    """Return the Markdown body posted to Telegram."""
+    """Return the Markdown body posted to Telegram.
+
+    Note: Markdown link syntax `[label](url)` breaks Telegram's parser when
+    the URL itself contains `?` + `=` (our console-player wrapper). Send raw
+    URLs inline instead; Telegram auto-detects + makes them tappable.
+    """
     emoji = TIER_EMOJI.get(tier, "⚪")
     tier_name = TIER_LABEL.get(tier, "?")
     parts = [f"{emoji} *[{tier_name}]* `{label}`"]
     if explanation:
         parts.append(explanation)
     if stream_url:
-        player = PLAYER_PREFIX + stream_url
-        parts.append(f"[▶ play clip]({player})")
+        # Send raw URL. Wrapping in console.videodb.io/player?url=... created
+        # nested-query parser failures + double-wrap issues. Telegram auto-
+        # detects the URL and mobile browsers route .m3u8 to native player.
+        parts.append(f"▶ {stream_url}")
     return "\n".join(parts)
 
 

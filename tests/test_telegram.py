@@ -31,14 +31,17 @@ def test_build_message_includes_tier_emoji() -> None:
     assert "shot heard" in msg
 
 
-def test_build_message_wraps_stream_url_in_player_link() -> None:
+def test_build_message_includes_raw_stream_url() -> None:
+    # Raw URL: no Markdown link, no console-player wrapping. Telegram auto-
+    # detects + mobile browsers route .m3u8 to native player.
     msg = build_message(
         tier=1,
         label="juvenile_present",
         explanation="calf at water edge",
         stream_url="https://rt.stream.videodb.io/m/foo.m3u8",
     )
-    assert PLAYER_TEMPLATE + "https://rt.stream.videodb.io/m/foo.m3u8" in msg
+    assert "https://rt.stream.videodb.io/m/foo.m3u8" in msg
+    assert "▶" in msg
 
 
 def test_build_message_omits_play_link_when_stream_url_missing() -> None:
