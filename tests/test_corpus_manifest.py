@@ -31,7 +31,7 @@ def manifest() -> dict:
 
 
 def test_manifest_has_version_and_clips(manifest: dict) -> None:
-    assert manifest.get("version") == 1
+    assert manifest.get("version") in (1, 2)
     assert isinstance(manifest.get("clips"), list)
     assert len(manifest["clips"]) >= 1
 
@@ -57,11 +57,15 @@ def test_each_clip_source_is_valid(manifest: dict) -> None:
         assert clip["source"] in VALID_SOURCES, f"{clip['slug']}: bad source {clip['source']!r}"
 
 
-def test_each_clip_duration_positive_int(manifest: dict) -> None:
+def test_each_clip_duration_non_negative_int(manifest: dict) -> None:
+    # duration_s == 0 marks an intentionally-dropped clip (see source_url=null
+    # entries kept as documented gaps in v2).
     for clip in manifest["clips"]:
         d = clip["duration_s"]
         assert isinstance(d, int)
-        assert d > 0, f"{clip['slug']}: duration_s must be > 0"
+        assert d >= 0, f"{clip['slug']}: duration_s must be >= 0"
+        if clip.get("source_url") is not None:
+            assert d > 0, f"{clip['slug']}: live clip must have duration_s > 0"
 
 
 def test_events_expected_reference_real_event_ids(manifest: dict) -> None:
@@ -78,13 +82,26 @@ def test_stream_context_when_set_is_valid_stream_key(manifest: dict) -> None:
             assert ctx in STREAMS, f"{clip['slug']}: unknown stream_context {ctx!r}"
 
 
-def test_coverage_every_event_appears_in_at_least_one_clip(manifest: dict) -> None:
+def test_coverage_every_event_covered_or_intentionally_uncovered(manifest: dict) -> None:
     covered: set[str] = set()
     for clip in manifest["clips"]:
         covered.update(clip["events_expected"])
+    uncovered = set(manifest.get("intentionally_uncovered", []))
     defined = {ev["id_var"] for ev in EVENT_DEFINITIONS}
-    missing = defined - covered
-    assert not missing, f"events with no clip in manifest: {sorted(missing)}"
+    accounted = covered | uncovered
+    missing = defined - accounted
+    assert not missing, (
+        f"events neither covered nor listed in intentionally_uncovered: {sorted(missing)}"
+    )
+    # And no event should be BOTH covered AND uncovered (would be a docs bug).
+    overlap = covered & uncovered
+    assert not overlap, f"events both covered and intentionally_uncovered: {sorted(overlap)}"
+
+
+def test_intentionally_uncovered_ids_are_real_events(manifest: dict) -> None:
+    known = {ev["id_var"] for ev in EVENT_DEFINITIONS}
+    for ev_id in manifest.get("intentionally_uncovered", []):
+        assert ev_id in known, f"intentionally_uncovered references unknown id: {ev_id}"
 
 
 def test_synthesized_clips_have_overlay_or_documented_recipe(manifest: dict) -> None:

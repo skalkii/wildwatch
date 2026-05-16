@@ -314,6 +314,12 @@ def build_clip(clip: dict, force: bool = False) -> dict:
     out = SAMPLES_DIR / f"{slug}.mp4"
     result = {"slug": slug, "path": str(out), "status": "pending", "duration_s": None}
 
+    # Intentionally-dropped clip (manifest v2 marks these source_url=null + duration=0).
+    if clip["source"] == "youtube" and clip.get("source_url") is None:
+        result["status"] = "dropped"
+        print(f"  drop {slug} (intentionally uncovered; source_url=null)")
+        return result
+
     if out.exists() and not force:
         dur = _ffprobe_duration(out)
         result["status"] = "skipped_exists"
@@ -367,7 +373,7 @@ def main() -> int:
     for r in results:
         summary[r["status"]] = summary.get(r["status"], 0) + 1
     print(f"summary: {summary}")
-    return 0 if all(r["status"] in ("ok", "skipped_exists") for r in results) else 1
+    return 0 if all(r["status"] in ("ok", "skipped_exists", "dropped") for r in results) else 1
 
 
 if __name__ == "__main__":

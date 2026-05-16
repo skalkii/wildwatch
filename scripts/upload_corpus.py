@@ -57,9 +57,15 @@ def main() -> int:
     n_uploaded = 0
     n_skipped = 0
     n_missing = 0
+    n_dropped = 0
     for clip in manifest["clips"]:
         slug = clip["slug"]
         if args.only and slug not in args.only:
+            continue
+        # Intentionally-dropped clips (manifest v2: source_url=null + duration=0).
+        if clip["source"] == "youtube" and clip.get("source_url") is None:
+            print(f"  drop   {slug}  (intentionally uncovered; source_url=null)")
+            n_dropped += 1
             continue
         mp4 = SAMPLES_DIR / f"{slug}.mp4"
         if not mp4.exists():
@@ -82,7 +88,10 @@ def main() -> int:
         print(f"         video_id={video.id}  length={corpus[slug]['length']}")
         n_uploaded += 1
 
-    print(f"\nsummary: uploaded={n_uploaded} skipped={n_skipped} missing={n_missing}")
+    print(
+        f"\nsummary: uploaded={n_uploaded} skipped={n_skipped} "
+        f"dropped={n_dropped} missing={n_missing}"
+    )
     return 0 if n_missing == 0 else 1
 
 

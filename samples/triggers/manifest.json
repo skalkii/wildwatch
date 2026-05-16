@@ -1,14 +1,21 @@
 {
-  "version": 1,
-  "description": "Trigger-corpus manifest. Each clip targets one or more events from wildwatch.events.EVENT_DEFINITIONS. Coverage tested by tests/test_corpus_manifest.py.",
+  "version": 2,
+  "description": "Trigger-corpus manifest v2 — STATIC-CAMERA fixtures from Africam/explore.org camera networks matching production RTSP distribution. Documentary footage rejected per operator note: edited cuts/zooms would force prompts to overfit a distribution that doesn't exist in production. See samples/triggers/README.md.",
+  "intentionally_uncovered": [
+    "alarm_call",
+    "mortality_event",
+    "human_intrusion_visual",
+    "human_intrusion_audio"
+  ],
+  "intentionally_uncovered_reason": "These events are documented in production but no public static-camera fixtures exist. Africam/explore.org camera operators frame out safari vehicles (it's a hide). Predator kills happen in bush, not at waterholes. Alarm-call fixtures are mostly edited compilations. human_intrusion_audio is recoverable via Pexels-savanna + Freesound-vehicle synth (deferred to v3). Reserved for live-deployment validation rather than unit testing.",
   "clips": [
     {
       "slug": "waterhole_rich_scene",
       "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=p7BVelzqmd0",
-      "fallback_url": "https://www.youtube.com/watch?v=-vaE-WlG3dc",
-      "source_search_query": "Tony Lewis Wildlife Namibia waterhole elephant giraffe juveniles",
-      "section": "0:30-5:30",
+      "source_url": "https://www.youtube.com/watch?v=AnHs4Tkb5C4",
+      "fallback_url": "https://www.youtube.com/watch?v=DSLw8FPi0Ro",
+      "source_search_query": "Africam waterhole elephants static cam",
+      "section": "0:00-5:00",
       "duration_s": 300,
       "events_expected": [
         "juvenile_present",
@@ -20,75 +27,70 @@
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "NamibiaCam / Gondwana Collection Namibia — operator of the actual namibia_waterhole livestream. Multi-species (oryx, springbok, wildebeest) documentary. Skip 30s intro. Fallback Okondeka clip reliably shows large mixed herds."
+      "notes": "STATIC CAM. Africam 'Elephants At The Waterhole | The Africam Show' — fixed perspective at one of Africam's reserve waterhole cameras, same as our production stream profile. Commentary-over-stream format keeps underlying video single-camera. mixed/large_aggregation depend on section — verify in scrub."
     },
     {
       "slug": "predator_hunt",
       "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=Vvq8goIeXWg",
-      "fallback_url": "https://www.youtube.com/watch?v=3LVktBX88E0",
-      "source_search_query": "SafariLive WildEarth lion leopard stalk chase alarm calls",
-      "section": "0:00-0:22",
-      "duration_s": 22,
+      "source_url": "https://www.youtube.com/watch?v=lsp3KQIaPzk",
+      "fallback_url": "https://www.youtube.com/watch?v=U2mgEFXueLM",
+      "source_search_query": "Africam lions waterhole static fixed camera",
+      "section": "0:00-1:39",
+      "duration_s": 99,
       "events_expected": [
         "predator_activity",
         "predator_vocal",
-        "alarm_call",
         "rare_species"
       ],
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Primary: 'Impala alarm call as they see a leopard' (22s, in-region). Tight on alarm_call + predator_vocal + rare_species (leopard). Fallback Love Nature 'Young Lion Stalks Impala' is region-locked in IN."
+      "notes": "STATIC CAM. Africam 'Two Male Lions Share a Drink at Kwa Maritane Waterhole'. Fixed perspective Kwa Maritane archive. Predator-present-at-waterhole pattern matches production reality better than the rarely-captured hunt. predator_activity weaker than v1 (no chase) — accepted trade for distribution fit. Fallback: leopard at waterhole IR night cam."
     },
     {
       "slug": "vehicle_intrusion",
       "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=Q4jbpPiRcTI",
+      "source_url": null,
       "fallback_url": null,
-      "source_search_query": "safari game drive vehicle approaches wildlife audible engine",
-      "section": "1:30-2:30",
-      "duration_s": 60,
-      "events_expected": [
-        "human_intrusion_visual",
-        "human_intrusion_audio"
-      ],
+      "source_search_query": "Static wildlife cam vehicle intrusion -- DROPPED (intentionally_uncovered)",
+      "section": null,
+      "duration_s": 0,
+      "events_expected": [],
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
-      "license": "fair-use-educational",
-      "notes": "Self-drive Kruger POV with engine + tourist voices audible, vehicle visible. Calm tone, no incidents. If audio insufficient at 1:30-2:30, try other windows in 0:00-5:00."
+      "license": "n/a",
+      "notes": "DROPPED IN v2. Africam/explore.org camera operators frame out safari vehicles by design (it's a hide). No public static-cam vehicle footage. human_intrusion_visual + human_intrusion_audio recorded as intentionally_uncovered at manifest root."
     },
     {
       "slug": "carcass_aftermath",
       "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=K7aWUnbdnCs",
+      "source_url": null,
       "fallback_url": null,
-      "source_search_query": "vultures kill site Africa wildlife carcass scavengers",
-      "section": "0:00-0:30",
-      "duration_s": 30,
-      "events_expected": [
-        "mortality_event"
-      ],
+      "source_search_query": "Static wildlife cam carcass scavengers -- DROPPED (intentionally_uncovered)",
+      "section": null,
+      "duration_s": 0,
+      "events_expected": [],
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
-      "license": "fair-use-educational",
-      "notes": "Nature Bites — 'Vultures Swarm Wildebeest Carcass'. Opens directly on aftermath, no kill scenes. African savanna setting."
+      "license": "n/a",
+      "notes": "DROPPED IN v2. Waterhole cams don't see carcasses (kills happen in bush). Trail-cam channels exist but rarely capture scavenging on a single fixed frame for >30s. mortality_event recorded as intentionally_uncovered."
     },
     {
       "slug": "injured_wildlife",
       "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=SPVi-alDdI8",
+      "source_url": "https://www.youtube.com/watch?v=hvKdEB4R_bU",
       "fallback_url": null,
-      "source_search_query": "wildlife documentary limping injured antelope elephant",
+      "source_search_query": "Africam three-legged elephant calf Hwange static cam",
       "section": "0:00-0:30",
       "duration_s": 30,
       "events_expected": [
-        "welfare_concern"
+        "welfare_concern",
+        "parental_care"
       ],
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "BBC Earth — 'Injured Elephant Calf Finds A Supportive Herd'. Limping + isolation both visible. Humane, judge-appropriate."
+      "notes": "STATIC CAM. Africam 'Three-Legged Elephant Calf Returns' from Hwange Safari Lodge waterhole. Single fixed-camera shot. Hits welfare_concern (abnormal posture + gait) AND parental_care (herd protects calf) in one clip. Strongest fixture in the corpus."
     },
     {
       "slug": "dry_waterhole",

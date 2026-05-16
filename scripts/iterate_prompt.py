@@ -37,17 +37,26 @@ SAMPLES_DIR = REPO_ROOT / "samples" / "triggers"
 MANIFEST = SAMPLES_DIR / "manifest.json"
 
 VISUAL_KINDS = {"species", "behavior", "environment"}
+AUDIO_KINDS = {"audio"}
+ALL_KINDS = VISUAL_KINDS | AUDIO_KINDS
+
+# Visual: gemma-4-31B-it on Medium sandbox.
+# Audio: model_name uses VideoDB's tier strings ('basic'/'pro'/'ultra'), NOT
+# raw model identifiers — server picks the underlying LLM. No sandbox needed
+# (server-side managed compute).
 MODEL_BY_KIND = {
     "species": "google/gemma-4-31B-it",
     "behavior": "google/gemma-4-31B-it",
     "environment": "google/gemma-4-31B-it",
-    "audio": "Qwen/Qwen3.5-9B",
+    "audio": "pro",
 }
 # Per CLAUDE.md sec 13: env is sampled slower than species/behavior.
-EXTRACTION_BY_KIND = {
+# Audio batch_config uses transcript-segmenter shape (time/word/sentence).
+EXTRACTION_BY_KIND: dict[str, dict] = {
     "species": {"time": 10, "select_frames": ["first"], "frame_count": 1},
     "behavior": {"time": 10, "select_frames": ["first"], "frame_count": 1},
     "environment": {"time": 60, "select_frames": ["first"], "frame_count": 1},
+    "audio": {"type": "time", "value": 30},
 }
 
 
@@ -65,7 +74,7 @@ def _find_clip(manifest: dict, slug: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--slug", required=True, help="manifest clip slug")
-    ap.add_argument("--kind", required=True, choices=sorted(VISUAL_KINDS))
+    ap.add_argument("--kind", required=True, choices=sorted(ALL_KINDS))
     ap.add_argument("--tier", default="medium", choices=["small", "medium"], help="sandbox tier")
     args = ap.parse_args()
 
@@ -92,24 +101,35 @@ def main() -> int:
     print(f"tier:     {args.tier}")
     print(f"prompt:   {len(prompt)} chars")
 
-    tier = SandboxTier.medium if args.tier == "medium" else SandboxTier.small
     conn = videodb.connect()
     coll = conn.get_collection()
     video = coll.get_video(corpus_entry["video_id"])
 
-    with managed_sandbox(conn, tier=tier) as sb:
-        print(f"sandbox:  {sb.id}  status={sb.status}")
+    if args.kind in AUDIO_KINDS:
+        # Audio path: server-side managed compute, no sandbox.
+        print("audio:    server-managed (no sandbox)")
         print("indexing ...")
-        index_id = video.index_scenes(
-            extraction_type=SceneExtractionType.time_based,
-            extraction_config=EXTRACTION_BY_KIND[args.kind],
-            model_name=MODEL_BY_KIND[args.kind],
+        index_id = video.index_audio(
             prompt=prompt,
-            sandbox_id=sb.id,
+            model_name=MODEL_BY_KIND[args.kind],
+            batch_config=EXTRACTION_BY_KIND[args.kind],
         )
-        print(f"index_id: {index_id}")
         scenes = video.get_scene_index(index_id)
-        print(f"scenes:   {len(scenes) if scenes else 0}")
+    else:
+        tier = SandboxTier.medium if args.tier == "medium" else SandboxTier.small
+        with managed_sandbox(conn, tier=tier) as sb:
+            print(f"sandbox:  {sb.id}  status={sb.status}")
+            print("indexing ...")
+            index_id = video.index_scenes(
+                extraction_type=SceneExtractionType.time_based,
+                extraction_config=EXTRACTION_BY_KIND[args.kind],
+                model_name=MODEL_BY_KIND[args.kind],
+                prompt=prompt,
+                sandbox_id=sb.id,
+            )
+            scenes = video.get_scene_index(index_id)
+    print(f"index_id: {index_id}")
+    print(f"scenes:   {len(scenes) if scenes else 0}")
 
     out_path = SAMPLES_DIR / f"{args.slug}.{args.kind}.txt"
     with out_path.open("w") as f:
