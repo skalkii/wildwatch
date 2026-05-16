@@ -73,10 +73,17 @@ def _save_state(state: dict) -> None:
         raise
 
 
+def _event_attr(ev, name: str):
+    """list_events may return dicts OR objects; read either shape."""
+    if isinstance(ev, dict):
+        return ev.get(name)
+    return getattr(ev, name, None)
+
+
 def _ensure_events(conn, state: dict) -> dict[str, str]:
     """Create all events idempotently. Returns id_var -> event_id mapping."""
     events_state: dict[str, str] = state.setdefault("events", {})
-    existing = {ev.get("label"): ev.get("event_id") for ev in conn.list_events()}
+    existing = {_event_attr(ev, "label"): _event_attr(ev, "event_id") for ev in conn.list_events()}
 
     for ev_def in EVENT_DEFINITIONS:
         label = ev_def["label"]
@@ -190,21 +197,46 @@ def main() -> int:
     _save_state(state)
 
     # 2. One stream (Path B = FALLBACK_RTSP intruder cam).
+    # rt declared OUTSIDE the try so it's visible to finally even if
+    # _bootstrap_stream raises midway (e.g. one index_visuals fails after
+    # connect_rtstream succeeded -- without this guard we'd leak ingest).
     stream_key = "fallback_intruder"
-    rt, indexes = _bootstrap_stream(coll, stream_key, FALLBACK_RTSP, FALLBACK_CONTEXT)
-    state.setdefault("rtstreams", {})[stream_key] = {
-        "id": rt.id,
-        "url": FALLBACK_RTSP,
-        "indexes": {
-            kind: getattr(idx, "rtstream_index_id", None) or getattr(idx, "id", "?")
-            for kind, idx in indexes.items()
-        },
-        "started_at": datetime.now(UTC).isoformat(),
-    }
-    _save_state(state)
-
-    # 3. Wire 18 alerts (one per INDEX_EVENT_MAP entry).
+    rt = None
     try:
+        # Re-run idempotency: if state has an active rtstream for this key,
+        # reconnect instead of provisioning a new one (avoids leaking the
+        # previous stream when the prior run crashed mid-wire).
+        cached_rt = state.get("rtstreams", {}).get(stream_key, {}).get("id")
+        if cached_rt:
+            try:
+                existing = coll.get_rtstream(cached_rt)
+                if getattr(existing, "status", None) != "stopped":
+                    print(f"[stream {stream_key}] reusing cached rtstream {cached_rt}")
+                    rt, indexes = (
+                        existing,
+                        {
+                            kind: existing.get_scene_index(idx_id)
+                            for kind, idx_id in state["rtstreams"][stream_key]
+                            .get("indexes", {})
+                            .items()
+                        },
+                    )
+            except Exception as e:
+                print(f"[stream {stream_key}] cached rtstream gone ({e}); will provision new")
+        if rt is None:
+            rt, indexes = _bootstrap_stream(coll, stream_key, FALLBACK_RTSP, FALLBACK_CONTEXT)
+        state.setdefault("rtstreams", {})[stream_key] = {
+            "id": rt.id,
+            "url": FALLBACK_RTSP,
+            "indexes": {
+                kind: getattr(idx, "rtstream_index_id", None) or getattr(idx, "id", "?")
+                for kind, idx in indexes.items()
+            },
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+        _save_state(state)
+
+        # 3. Wire 18 alerts (one per INDEX_EVENT_MAP entry).
         _wire_alerts(indexes, events_map, base_url, state, stream_key)
         _save_state(state)
 
@@ -212,7 +244,7 @@ def main() -> int:
             print(f"\nobserving {args.observe}s for any alerts to fire ...")
             time.sleep(args.observe)
     finally:
-        if not args.no_stop:
+        if rt is not None and not args.no_stop:
             try:
                 rt.stop()
                 try:

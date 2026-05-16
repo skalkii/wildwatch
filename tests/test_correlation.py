@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from wildwatch.correlation import (
     CORRELATION_RULES,
+    SEARCH_ERROR,
     CorrelationHit,
     CorrelationState,
     evaluate_rule,
@@ -67,7 +68,8 @@ def test_evaluate_rule_fires_when_all_queries_hit_in_window() -> None:
     assert hit.rule_name == "test_rule"
     assert hit.synthesis_label == "TEST_CONFIRMED"
     assert hit.tier == 3
-    assert set(hit.evidence.keys()) == {"audio", "behavior"}
+    # evidence keyed by (kind, query) tuple
+    assert set(hit.evidence.keys()) == {("audio", "alarm_call"), ("behavior", "fleeing")}
 
 
 def test_evaluate_rule_no_fire_when_one_query_empty() -> None:
@@ -116,3 +118,21 @@ def test_correlation_state_cooldown_per_rule_independent() -> None:
     s.mark_fired("rule_a", at=1000.0)
     # rule_b never fired -> ok
     assert s.should_fire("rule_b", now_ts=1100.0, cooldown=300) is True
+
+
+def test_evaluate_rule_returns_sentinel_on_search_exception() -> None:
+    rule = {
+        "name": "t",
+        "tier": 2,
+        "window_seconds": 60,
+        "queries": [("audio", "x"), ("behavior", "y")],
+        "synthesis_label": "T",
+    }
+
+    def boom(kind: str, query: str) -> list[dict]:
+        raise RuntimeError("SDK exploded")
+
+    result = evaluate_rule(rule, boom, 2000.0)
+    # Distinct from None (legitimate no-match) so the operator can tell a
+    # quiet stream from a broken SDK.
+    assert result is SEARCH_ERROR

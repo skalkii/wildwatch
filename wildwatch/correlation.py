@@ -57,12 +57,17 @@ CORRELATION_RULES: list[dict] = [
 ]
 
 
+SEARCH_ERROR = object()  # sentinel: SDK error during search, distinct from no-match
+
+
 @dataclass
 class CorrelationHit:
     rule_name: str
     synthesis_label: str
     tier: int
-    evidence: dict[str, list[dict]]
+    # evidence keyed by (index_kind, query) tuple so rules with multiple
+    # queries on the same index_kind don't overwrite each other's shots.
+    evidence: dict[tuple[str, str], list[dict]]
     fired_at: float
 
 
@@ -117,12 +122,12 @@ def evaluate_rule(
     nothing keeps the synthesised events precision-over-recall.
     """
     window_start = now_ts - rule["window_seconds"]
-    evidence: dict[str, list[dict]] = {}
+    evidence: dict[tuple[str, str], list[dict]] = {}
     for index_kind, query in rule["queries"]:
         try:
             shots = search_fn(index_kind, query) or []
         except Exception as e:
-            # Network/SDK error on one query — don't fire on partial truth.
+            # Network/SDK error — don't fire on partial truth.
             logger.warning(
                 "search failed for rule=%s index=%s query=%r: %s",
                 rule["name"],
@@ -130,11 +135,11 @@ def evaluate_rule(
                 query,
                 e,
             )
-            return None
+            return SEARCH_ERROR  # type: ignore[return-value]
         in_window = shots_within_window(shots, window_start, now_ts)
         if not in_window:
             return None
-        evidence[index_kind] = in_window
+        evidence[(index_kind, query)] = in_window
     return CorrelationHit(
         rule_name=rule["name"],
         synthesis_label=rule["synthesis_label"],

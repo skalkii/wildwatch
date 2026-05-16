@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -29,7 +30,15 @@ import httpx  # noqa: E402
 import videodb  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from wildwatch.correlation import CORRELATION_RULES, CorrelationState, evaluate_rule  # noqa: E402
+from wildwatch.correlation import (  # noqa: E402
+    CORRELATION_RULES,
+    SEARCH_ERROR,
+    CorrelationState,
+    evaluate_rule,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("wildwatch.correlation_loop")
 
 STATE_FILE = REPO_ROOT / ".state.json"
 
@@ -72,15 +81,18 @@ def _build_search_fn(rt, index_ids_by_kind: dict[str, str]):
     return search
 
 
-def _post_correlation(base_url: str, hit) -> None:
-    """POST synthesised event to our /webhook/{tier} so Telegram lights up."""
+def _post_correlation(base_url: str, hit) -> bool:
+    """POST synthesised event to our /webhook/{tier}. Returns True on 200."""
     payload = {
         "event_id": f"corr-{hit.rule_name}-{int(hit.fired_at)}",
         "label": hit.synthesis_label,
         "confidence": min(1.0, 0.5 + 0.1 * sum(len(v) for v in hit.evidence.values())),
         "explanation": (
             f"Cross-modal correlation '{hit.rule_name}' matched: "
-            + ", ".join(f"{kind}={len(shots)} shot(s)" for kind, shots in hit.evidence.items())
+            + ", ".join(
+                f"{kind}/{query[:30]}={len(shots)} shot(s)"
+                for (kind, query), shots in hit.evidence.items()
+            )
         ),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(hit.fired_at)),
         "stream_url": None,
@@ -89,11 +101,13 @@ def _post_correlation(base_url: str, hit) -> None:
     try:
         resp = httpx.post(url, json=payload, timeout=10.0)
         if resp.status_code == 200:
-            print(f"   ✓ POSTED correlation hit -> {url}")
-        else:
-            print(f"   ! POST {url} returned {resp.status_code}: {resp.text[:200]}")
+            print(f"   POSTED correlation hit -> {url}")
+            return True
+        logger.warning("POST %s returned %s: %s", url, resp.status_code, resp.text[:200])
+        return False
     except Exception as e:
-        print(f"   ! POST {url} failed: {type(e).__name__}: {e}")
+        logger.warning("POST %s failed: %s: %s", url, type(e).__name__, e)
+        return False
 
 
 def main() -> int:
@@ -150,25 +164,36 @@ def main() -> int:
     deadline = time.time() + args.duration if args.duration > 0 else float("inf")
     sweep = 0
     fires = 0
+    post_failures = 0
+    search_errors = 0
     try:
         while time.time() < deadline:
             sweep += 1
-            now = time.time()
-            print(f"[sweep {sweep}] {time.strftime('%H:%M:%S', time.localtime(now))}")
+            print(f"[sweep {sweep}] {time.strftime('%H:%M:%S', time.localtime(time.time()))}")
             for rule in CORRELATION_RULES:
+                # Capture per-rule so search latency across rules doesn't
+                # leave earlier rules' windows stale relative to the last one.
+                now = time.time()
                 if not state_engine.should_fire(rule["name"], now, cooldown=args.cooldown):
                     continue
                 hit = evaluate_rule(rule, search_fn, now)
+                if hit is SEARCH_ERROR:
+                    print(f"  ! SDK ERROR on {rule['name']} (see logger.warning)")
+                    search_errors += 1
+                    continue
                 if hit is not None:
-                    print(f"  ✓ FIRE  {hit.rule_name} -> {hit.synthesis_label} (tier {hit.tier})")
-                    for kind, shots in hit.evidence.items():
+                    print(f"  FIRE  {hit.rule_name} -> {hit.synthesis_label} (tier {hit.tier})")
+                    for (kind, _query), shots in hit.evidence.items():
                         for sh in shots[:2]:
                             print(
-                                f"     [{kind}] {sh.get('start')}-{sh.get('end')}: {sh.get('text', '')[:80]}"
+                                f"     [{kind}] {sh.get('start')}-{sh.get('end')}: "
+                                f"{sh.get('text', '')[:80]}"
                             )
-                    _post_correlation(base_url, hit)
+                    if _post_correlation(base_url, hit):
+                        fires += 1
+                    else:
+                        post_failures += 1
                     state_engine.mark_fired(rule["name"], at=now)
-                    fires += 1
                 else:
                     print(f"  -      {rule['name']} (no all-match)")
             remaining = max(0, deadline - time.time())
@@ -178,7 +203,10 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\ninterrupted.")
 
-    print(f"\ntotal sweeps: {sweep}  fires: {fires}")
+    print(
+        f"\ntotal sweeps: {sweep}  fires: {fires}  "
+        f"post_failures: {post_failures}  search_errors: {search_errors}"
+    )
     return 0
 
 

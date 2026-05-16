@@ -66,13 +66,18 @@ def build_timeline(
     corpus_state: dict[str, dict],
     conn: Any,
     clip_seconds: int = DEFAULT_CLIP_SECONDS,
-) -> Any:
+) -> tuple[Any, int]:
     """Compose a Timeline from the picked events + corpus mapping.
 
-    Returns a videodb.editor.Timeline object ready for generate_stream().
-    Imports are local so this module is importable in test envs that don't
-    have full videodb installed.
+    Returns (Timeline, n_clips). Imports are local so this module is
+    importable in test envs that don't have full videodb installed.
+
+    Raises ValueError if ``clip_seconds <= 0`` -- without per-clip duration
+    the track would accumulate zero-length entries and generate_stream would
+    fire on a malformed timeline.
     """
+    if clip_seconds <= 0:
+        raise ValueError(f"clip_seconds must be > 0, got {clip_seconds}")
     from videodb.editor import Clip, Timeline, Track, VideoAsset
 
     timeline = Timeline(conn)

@@ -33,18 +33,27 @@ def append(record: dict[str, Any]) -> None:
 
 
 def read_all() -> list[dict[str, Any]]:
-    """Return every record. Corrupt lines are skipped (logged at DEBUG)."""
+    """Return every record. Corrupt lines are skipped + counted in a WARNING."""
     if not LOG_FILE.exists():
         return []
     out: list[dict[str, Any]] = []
+    n_skipped = 0
     for line in LOG_FILE.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
-            logger.debug("skipping corrupt line: %r", line[:80])
+            n_skipped += 1
             continue
+    if n_skipped:
+        # Visible in production logs so a partial-write crash doesn't silently
+        # shrink the digest pool.
+        logger.warning(
+            "event_log: skipped %s corrupt line(s) in %s; digest pool may be smaller than expected",
+            n_skipped,
+            LOG_FILE,
+        )
     return out
 
 
