@@ -40,7 +40,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "RUF"]
-ignore = ["E501"]
+ignore = ["E501", "B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -51,3 +51,4 @@ addopts = "-ra --strict-markers"
 python_version = "3.12"
 strict = false
 ignore_missing_imports = true
+files = ["wildwatch"]

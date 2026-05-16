@@ -22,6 +22,9 @@ dist/
 samples/*.mp4
 samples/*.webm
 samples/*.mkv
+samples/*.jpg
+samples/*.jpeg
+samples/*.png
 
 # Logs
 *.log
