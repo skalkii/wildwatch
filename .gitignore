@@ -19,12 +19,15 @@ dist/
 *.egg-info/
 
 # Samples (binary, fetched on demand)
-samples/*.mp4
-samples/*.webm
-samples/*.mkv
-samples/*.jpg
-samples/*.jpeg
-samples/*.png
+samples/**/*.mp4
+samples/**/*.webm
+samples/**/*.mkv
+samples/**/*.jpg
+samples/**/*.jpeg
+samples/**/*.png
+samples/**/*.wav
+samples/**/_work/
+samples/**/build_results.json
 
 # Logs
 *.log
