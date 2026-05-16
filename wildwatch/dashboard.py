@@ -188,8 +188,33 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- INDEXED CONTENT TAB -->
   <main id="tab-content" class="tab-pane p-6 hidden">
-    <h2 class="text-lg font-bold mb-4">Indexed Content (TODO T-63)</h2>
-    <p class="text-gray-400 text-sm">Wired in next ticket.</p>
+    <h2 class="text-lg font-bold mb-4">Indexed Content</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-6">
+      <input id="search-q" placeholder="Search query..." class="px-3 py-2 bg-gray-800 rounded text-sm lg:col-span-2">
+      <div class="flex gap-2">
+        <select id="search-scope" class="flex-1 bg-gray-800 px-2 py-2 rounded text-sm">
+          <option value="collection">Collection</option>
+          <option value="video">Video</option>
+          <option value="rtstream">RTStream</option>
+        </select>
+        <button id="search-go" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm">Search</button>
+      </div>
+    </div>
+    <input id="search-target-id" placeholder="target id (for video/rtstream scope)" class="w-full px-3 py-2 bg-gray-800 rounded text-sm mb-4 hidden">
+    <div id="search-results" class="space-y-2 mb-6"></div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <section class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Uploaded videos</h3>
+        <div id="videos-list" class="text-xs space-y-1 max-h-[500px] overflow-y-auto">loading...</div>
+      </section>
+      <section class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Detail</h3>
+        <div id="content-detail" class="text-xs space-y-2">
+          Click a video on the left to view its indexes + recent scenes.
+        </div>
+      </section>
+    </div>
   </main>
 
   <!-- USAGE TAB -->
@@ -384,6 +409,97 @@ async function reconnectSource(id) {
   fetchSources();
 }
 
+// ──── Indexed Content tab ────
+async function fetchVideos() {
+  try {
+    const r = await fetch('/api/videos');
+    const d = await r.json();
+    const el = $('videos-list');
+    if (!d.videos || d.videos.length === 0) {
+      el.innerHTML = '<span class="text-gray-500">no videos yet</span>';
+      return;
+    }
+    el.innerHTML = d.videos.map(v =>
+      `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded" onclick="showVideoDetail('${v.id}')">
+        <div class="font-mono text-blue-300">${escapeHtml(v.id)}</div>
+        <div class="text-gray-400">${escapeHtml(v.name || '(no name)')} · ${(v.length||0).toFixed(1)}s</div>
+      </div>`
+    ).join('');
+  } catch (e) { console.warn('videos fetch failed', e); }
+}
+
+async function showVideoDetail(videoId) {
+  const el = $('content-detail');
+  el.innerHTML = `<span class="text-gray-500">loading ${escapeHtml(videoId)} ...</span>`;
+  try {
+    const r = await fetch(`/api/videos/${videoId}/indexes`);
+    const d = await r.json();
+    const idxs = d.indexes || [];
+    if (idxs.length === 0) {
+      el.innerHTML = `<div class="text-gray-400">No scene indexes for <code>${escapeHtml(videoId)}</code>.</div>`;
+      return;
+    }
+    el.innerHTML = `<div class="text-xs text-gray-400 mb-2">Video <code>${escapeHtml(videoId)}</code></div>
+      <table class="text-xs w-full">
+        <thead><tr class="text-gray-500"><th class="text-left">name</th><th class="text-left">id</th><th></th></tr></thead>
+        <tbody>
+          ${idxs.map(i => `<tr>
+            <td>${escapeHtml(i.name || '')}</td>
+            <td><code class="text-blue-300">${escapeHtml(i.scene_index_id || i.id || '')}</code></td>
+            <td><button onclick="showVideoScenes('${videoId}', '${i.scene_index_id || i.id}')" class="text-xs underline">scenes</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+      <div id="scenes-pane" class="mt-4 text-xs"></div>`;
+  } catch (e) { el.innerHTML = `<span class="text-red-400">error: ${e}</span>`; }
+}
+
+async function showVideoScenes(videoId, indexId) {
+  const pane = $('scenes-pane');
+  pane.innerHTML = '<span class="text-gray-500">loading scenes ...</span>';
+  try {
+    const r = await fetch(`/api/videos/${videoId}/scenes/${indexId}?limit=15`);
+    const d = await r.json();
+    const scenes = d.scenes || [];
+    if (scenes.length === 0) { pane.innerHTML = '<span class="text-gray-500">no scenes yet</span>'; return; }
+    pane.innerHTML = scenes.map(sc =>
+      `<div class="border-l-2 border-blue-700 bg-gray-800 p-2 mb-1">
+        <div class="text-gray-500">${sc.start}-${sc.end}</div>
+        <div>${escapeHtml((sc.description || sc.text || '').slice(0, 240))}</div>
+      </div>`
+    ).join('');
+  } catch (e) { pane.innerHTML = `<span class="text-red-400">error: ${e}</span>`; }
+}
+
+// search
+$('search-scope').addEventListener('change', () => {
+  const scope = $('search-scope').value;
+  $('search-target-id').classList.toggle('hidden', scope === 'collection');
+});
+
+$('search-go').addEventListener('click', async () => {
+  const q = $('search-q').value.trim();
+  if (!q) return;
+  const scope = $('search-scope').value;
+  const target_id = $('search-target-id').value.trim() || null;
+  $('search-results').innerHTML = '<span class="text-gray-500">searching...</span>';
+  try {
+    const r = await fetch('/api/search', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, scope, target_id })
+    });
+    const d = await r.json();
+    if (!r.ok) { $('search-results').innerHTML = `<span class="text-red-400">${escapeHtml(d.detail || 'error')}</span>`; return; }
+    const shots = d.shots || [];
+    if (shots.length === 0) { $('search-results').innerHTML = '<span class="text-gray-500">no results</span>'; return; }
+    $('search-results').innerHTML = `<div class="text-xs text-gray-400">${shots.length} shot(s) in ${escapeHtml(d.scope)} scope</div>` +
+      shots.map(sh => `<div class="bg-gray-800 p-2 rounded">
+        <div class="text-xs text-gray-500">${sh.start}-${sh.end} · score=${sh.score?.toFixed?.(2) ?? '?'} · idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id || '')}</div>
+        <div class="text-sm">${escapeHtml((sh.text || '').slice(0, 300))}</div>
+      </div>`).join('');
+  } catch (e) { $('search-results').innerHTML = `<span class="text-red-400">${e}</span>`; }
+});
+
 // Tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -393,6 +509,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
     $('tab-' + tab).classList.remove('hidden');
     if (tab === 'sources') fetchSources();
+    if (tab === 'content') fetchVideos();
   });
 });
 

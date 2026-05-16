@@ -47,6 +47,10 @@ _BG_TASKS: set[asyncio.Task] = set()
 _remote_cache: dict = {"at": 0.0, "data": {"rtstreams": [], "sandboxes": []}}
 _REMOTE_TTL_S = 10.0
 
+# Cache for /api/videos (30s TTL).
+_videos_cache: dict = {"at": 0.0, "data": {"videos": []}}
+_VIDEOS_TTL_S = 30.0
+
 app = FastAPI(title="WildWatch webhook receiver")
 
 
@@ -326,3 +330,148 @@ async def api_reconnect_source(source_id: str) -> dict:
     coll = _get_coll()
     _BG_TASKS.add(asyncio.create_task(ingest.dispatch(source_id, coll=coll)))
     return sources.get_source(source_id).__dict__
+
+
+# ──── Indexed Content explorer routes ────────────────────────────────────
+
+
+@app.get("/api/videos")
+def api_list_videos() -> dict:
+    """List videos in the collection (30s server cache)."""
+    now = time.time()
+    if (now - _videos_cache["at"]) < _VIDEOS_TTL_S:
+        return _videos_cache["data"]
+    try:
+        coll = _get_coll()
+        items = []
+        for v in coll.get_videos():
+            items.append(
+                {
+                    "id": v.id,
+                    "name": getattr(v, "name", None),
+                    "length": getattr(v, "length", None),
+                    "stream_url": getattr(v, "stream_url", None),
+                    "thumbnail_url": getattr(v, "thumbnail_url", None),
+                }
+            )
+        data = {"videos": items}
+        _videos_cache.update({"at": now, "data": data})
+        return data
+    except Exception as e:
+        logger.warning("api_list_videos failed: %s", e)
+        return {"videos": [], "error": str(e)}
+
+
+@app.get("/api/videos/{video_id}/indexes")
+def api_video_indexes(video_id: str) -> dict:
+    try:
+        coll = _get_coll()
+        video = coll.get_video(video_id)
+        indexes = video.list_scene_index() or []
+        return {"video_id": video_id, "indexes": indexes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/videos/{video_id}/scenes/{index_id}")
+def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
+    try:
+        coll = _get_coll()
+        video = coll.get_video(video_id)
+        scenes = video.get_scene_index(index_id) or []
+        # Server-side slice -- callers can paginate later
+        return {"video_id": video_id, "index_id": index_id, "scenes": scenes[:limit]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/rtstreams/{rt_id}/indexes")
+def api_rtstream_indexes(rt_id: str) -> dict:
+    try:
+        coll = _get_coll()
+        rt = coll.get_rtstream(rt_id)
+        indexes = []
+        for idx in rt.list_scene_indexes() or []:
+            indexes.append(
+                {
+                    "rtstream_index_id": getattr(idx, "rtstream_index_id", None)
+                    or getattr(idx, "id", None),
+                    "name": getattr(idx, "name", None),
+                    "status": getattr(idx, "status", None),
+                    "prompt": getattr(idx, "prompt", None),
+                }
+            )
+        return {"rtstream_id": rt_id, "indexes": indexes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/rtstreams/{rt_id}/scenes/{index_id}")
+def api_rtstream_scenes(rt_id: str, index_id: str, page_size: int = 20) -> dict:
+    try:
+        coll = _get_coll()
+        rt = coll.get_rtstream(rt_id)
+        idx = rt.get_scene_index(index_id)
+        data = idx.get_scenes(page=1, page_size=page_size)
+        return {"rtstream_id": rt_id, "index_id": index_id, "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+class SearchRequest(BaseModel):
+    query: str
+    scope: str = Field(..., description="collection|video|rtstream")
+    target_id: str | None = None
+    index_id: str | None = None
+    result_threshold: int | None = None
+
+
+def _shot_to_dict(sh: Any) -> dict:
+    return {
+        "start": getattr(sh, "start", None),
+        "end": getattr(sh, "end", None),
+        "text": getattr(sh, "text", None),
+        "score": getattr(sh, "search_score", None),
+        "scene_index_id": getattr(sh, "scene_index_id", None),
+        "scene_index_name": getattr(sh, "scene_index_name", None),
+    }
+
+
+@app.post("/api/search")
+def api_search(req: SearchRequest) -> dict:
+    coll = _get_coll()
+    try:
+        if req.scope == "collection":
+            result = coll.search(query=req.query)
+            shots = getattr(result, "shots", None) or []
+            return {"scope": "collection", "shots": [_shot_to_dict(s) for s in shots]}
+        if req.scope == "video":
+            if not req.target_id:
+                raise HTTPException(status_code=400, detail="target_id required for video scope")
+            v = coll.get_video(req.target_id)
+            result = v.search(query=req.query)
+            shots = getattr(result, "shots", None) or []
+            return {
+                "scope": "video",
+                "video_id": req.target_id,
+                "shots": [_shot_to_dict(s) for s in shots],
+            }
+        if req.scope == "rtstream":
+            if not req.target_id:
+                raise HTTPException(status_code=400, detail="target_id required for rtstream scope")
+            rt = coll.get_rtstream(req.target_id)
+            kwargs: dict[str, Any] = {"query": req.query}
+            if req.index_id:
+                kwargs["index_id"] = req.index_id
+            result = rt.search(**kwargs)
+            shots = getattr(result, "shots", None) or []
+            return {
+                "scope": "rtstream",
+                "rtstream_id": req.target_id,
+                "shots": [_shot_to_dict(s) for s in shots],
+            }
+        raise HTTPException(status_code=400, detail=f"unknown scope: {req.scope}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
