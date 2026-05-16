@@ -65,13 +65,9 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(state, indent=2))
-        tmp.replace(STATE_FILE)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    from wildwatch.state_io import atomic_write_json
+
+    atomic_write_json(STATE_FILE, state)
 
 
 def _event_attr(ev, name: str):

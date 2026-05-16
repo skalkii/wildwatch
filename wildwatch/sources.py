@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wildwatch.state_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).resolve().parent.parent / ".state.json"
@@ -68,13 +70,7 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(state, indent=2))
-        tmp.replace(STATE_FILE)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic_write_json(STATE_FILE, state)
 
 
 def _sources_dict() -> dict[str, dict]:

@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from wildwatch.state_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).resolve().parent.parent / ".state.json"
@@ -47,17 +49,8 @@ def _load_state() -> dict[str, Any]:
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    """Atomic write: stage to .tmp, then rename. POSIX rename is atomic so
-    a crash mid-write cannot leave a partial JSON file that breaks resume.
-    On write failure, the .tmp file is unlinked to avoid orphan artefacts.
-    """
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    try:
-        tmp.write_text(json.dumps(state, indent=2))
-        tmp.replace(STATE_FILE)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    """Durable atomic write via the shared state_io helper."""
+    atomic_write_json(STATE_FILE, state)
 
 
 def _record_sandbox(sb: Any, tier: Any) -> None:
