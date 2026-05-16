@@ -1,0 +1,3 @@
+# Accept publishes + reads on any path (so we can push mara/hwange/amboseli)
+paths:
+  all_others:
