@@ -55,3 +55,11 @@ def test_format_audio_substitutes_both_placeholders() -> None:
 def test_format_missing_required_placeholder_raises_key_error() -> None:
     with pytest.raises(KeyError):
         format_prompt("species", location_context="X")  # species_list missing
+
+
+def test_format_silently_ignores_extra_kwargs() -> None:
+    # Contract (not accident): callers pass the full 7-key stream dict to every
+    # prompt; str.format drops unknown placeholders. Prevents per-prompt kwarg
+    # filtering at every call site in bootstrap/pipeline.
+    out = format_prompt("environment", location_context="ignored", junk="also ignored")
+    assert out == load_prompt("environment")
