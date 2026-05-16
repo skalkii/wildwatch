@@ -728,7 +728,7 @@ def main():
             idx = rtstream.index_visuals(
                 prompt=prompts[kind],
                 name=f"{stream_key}_{kind}",
-                batch_config={"type": "time", "value": 5, "frame_count": 2},
+                batch_config={"type": "time", "value": 5, "frame_count": 3},
             )
             stream_state["indexes"][kind] = idx.id
 
