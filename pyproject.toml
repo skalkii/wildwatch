@@ -46,6 +46,7 @@ ignore = ["E501", "B008"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+pythonpath = ["."]
 
 [tool.mypy]
 python_version = "3.12"
