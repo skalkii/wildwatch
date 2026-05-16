@@ -38,15 +38,26 @@ def _load_state() -> dict[str, Any]:
     try:
         return json.loads(STATE_FILE.read_text())
     except json.JSONDecodeError:
+        logger.warning(
+            "state file %s is corrupt (JSONDecodeError); starting fresh — "
+            "any cached sandbox/rtstream ids will be re-provisioned",
+            STATE_FILE,
+        )
         return {}
 
 
 def _save_state(state: dict[str, Any]) -> None:
     """Atomic write: stage to .tmp, then rename. POSIX rename is atomic so
-    a crash mid-write cannot leave a partial JSON file that breaks resume."""
+    a crash mid-write cannot leave a partial JSON file that breaks resume.
+    On write failure, the .tmp file is unlinked to avoid orphan artefacts.
+    """
     tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(STATE_FILE)
+    try:
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.replace(STATE_FILE)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _record_sandbox(sb: Any, tier: Any) -> None:

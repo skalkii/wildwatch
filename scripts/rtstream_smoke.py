@@ -122,6 +122,10 @@ def main() -> int:
     print("\nstopping (we don't want to keep ingesting) ...")
     try:
         rt.stop()
+        try:
+            rt.refresh()
+        except Exception:
+            pass
         print(f"  stopped  status={rt.status}")
     except Exception as e:
         print(f"  WARN stop failed: {type(e).__name__}: {e}")

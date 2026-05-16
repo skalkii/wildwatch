@@ -36,13 +36,14 @@ def test_manifest_has_version_and_clips(manifest: dict) -> None:
     assert len(manifest["clips"]) >= 1
 
 
-@pytest.mark.parametrize("clip_idx", range(10))
-def test_each_clip_has_required_keys(manifest: dict, clip_idx: int) -> None:
-    if clip_idx >= len(manifest["clips"]):
-        pytest.skip("fewer than 10 clips")
-    clip = manifest["clips"][clip_idx]
+def _load_manifest_clips_for_parametrize() -> list:
+    return json.loads(MANIFEST_PATH.read_text())["clips"]
+
+
+@pytest.mark.parametrize("clip", _load_manifest_clips_for_parametrize(), ids=lambda c: c["slug"])
+def test_each_clip_has_required_keys(clip: dict) -> None:
     missing = REQUIRED_CLIP_KEYS - clip.keys()
-    assert not missing, f"clip[{clip_idx}] missing {missing}"
+    assert not missing, f"{clip['slug']} missing {missing}"
 
 
 def test_clip_slugs_unique_and_snake_case(manifest: dict) -> None:

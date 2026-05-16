@@ -111,8 +111,12 @@ def main() -> int:
             except TypeError as e:
                 print(f"  guide path TypeError on index_visuals: {e}")
                 print("  falling back to notebook signature ...\n")
-                idx = _try_notebook_index(rt)
-                path_used = "notebook-path-ok"
+                try:
+                    idx = _try_notebook_index(rt)
+                    path_used = "notebook-path-ok"
+                except Exception as e2:
+                    print(f"  notebook fallback ALSO failed: {type(e2).__name__}: {e2}")
+                    raise
 
             idx_id = getattr(idx, "rtstream_index_id", None) or getattr(idx, "id", None)
             print(f"  index_id = {idx_id}\n")
@@ -155,6 +159,10 @@ def main() -> int:
         if rt is not None:
             try:
                 rt.stop()
+                try:
+                    rt.refresh()
+                except Exception:
+                    pass
                 print(f"\nrtstream stopped  status={rt.status}")
             except Exception as e:
                 print(f"\nWARN rtstream stop failed: {e}")

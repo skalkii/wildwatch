@@ -13,10 +13,11 @@ Expose to VideoDB:
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Path
+from fastapi import FastAPI, HTTPException, Path
 from pydantic import BaseModel, Field
 
 # Load .env at import time so uvicorn-launched processes see TELEGRAM_*
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 from wildwatch.telegram import send_alert  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="WildWatch webhook receiver")
 
@@ -53,10 +56,22 @@ async def receive_alert(
     tier: Annotated[int, Path(ge=1, le=3, description="Alert tier 1=info, 2=notable, 3=urgent")],
     payload: AlertPayload,
 ) -> dict:
-    await send_alert(
-        tier=tier,
-        label=payload.label,
-        explanation=payload.explanation,
-        stream_url=payload.stream_url,
-    )
+    try:
+        await send_alert(
+            tier=tier,
+            label=payload.label,
+            explanation=payload.explanation,
+            stream_url=payload.stream_url,
+        )
+    except Exception as e:
+        # Log with full traceback so the operator can see WHY a VideoDB
+        # callback didn't reach the phone. Re-raise as 500 so VideoDB's
+        # retry logic engages (it backs off + retries on 5xx).
+        logger.exception(
+            "send_alert failed for tier=%s label=%s event_id=%s",
+            tier,
+            payload.label,
+            payload.event_id,
+        )
+        raise HTTPException(status_code=500, detail="send_alert failed; see server logs") from e
     return {"status": "received"}

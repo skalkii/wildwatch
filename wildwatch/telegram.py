@@ -43,7 +43,12 @@ def build_message(
         # browser (Chrome on Android/desktop has no native HLS). URL-encode
         # the inner URL so the nested ?url= query doesn't break the parser.
         # If the URL is already a videodb player URL, send raw — no double-wrap.
-        if "player.videodb.io" in stream_url or "console.videodb.io" in stream_url:
+        # Use startswith (not substring) so a URL that merely contains
+        # 'console.videodb.io' as a parameter value still gets re-wrapped.
+        already_player = stream_url.startswith(PLAYER_PREFIX) or stream_url.startswith(
+            "https://player.videodb.io"
+        )
+        if already_player:
             parts.append(f"▶ {stream_url}")
         else:
             encoded = quote(stream_url, safe="")
@@ -60,9 +65,24 @@ async def send_alert(
     bot_token: str | None = None,
     chat_id: str | None = None,
 ) -> dict:
-    """Send a Markdown alert via Telegram Bot API."""
-    token = bot_token or os.environ["TELEGRAM_BOT_TOKEN"]
-    chat = chat_id or os.environ["TELEGRAM_CHAT_ID"]
+    """Send a Markdown alert via Telegram Bot API.
+
+    Raises ``RuntimeError`` with an explicit message if the bot token or chat
+    id are unset, rather than the opaque ``KeyError`` ``os.environ[...]``
+    would otherwise raise.
+    """
+    token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    if not token:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is unset; alert cannot be sent. "
+            "Configure it in .env or pass bot_token explicitly."
+        )
+    if not chat:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is unset; alert cannot be sent. "
+            "Configure it in .env or pass chat_id explicitly."
+        )
     text = build_message(tier=tier, label=label, explanation=explanation, stream_url=stream_url)
     url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
     async with httpx.AsyncClient(timeout=10.0) as client:

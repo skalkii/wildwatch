@@ -56,16 +56,17 @@ def main() -> int:
     coll = conn.get_collection()
     print(f"collection.id = {coll.id}\n")
 
-    print("connecting rtstream ...")
-    rt = coll.connect_rtstream(
-        url=FALLBACK_RTSP,
-        name="smoke_event",
-        media_types=["video"],
-        store=True,
-    )
-    print(f"  rtstream.id = {rt.id}  status={rt.status}\n")
-
+    rt = None
     try:
+        print("connecting rtstream ...")
+        rt = coll.connect_rtstream(
+            url=FALLBACK_RTSP,
+            name="smoke_event",
+            media_types=["video"],
+            store=True,
+        )
+        print(f"  rtstream.id = {rt.id}  status={rt.status}\n")
+
         print("creating visual index ...")
         idx = rt.index_visuals(
             prompt=SIMPLE_INDEX_PROMPT,
@@ -110,12 +111,17 @@ def main() -> int:
         except Exception as e:
             print(f"  list_alerts failed: {type(e).__name__}: {e}")
     finally:
-        print("\nstopping rtstream ...")
-        try:
-            rt.stop()
-            print(f"  stopped  status={rt.status}")
-        except Exception as e:
-            print(f"  WARN stop failed: {type(e).__name__}: {e}")
+        if rt is not None:
+            print("\nstopping rtstream ...")
+            try:
+                rt.stop()
+                try:
+                    rt.refresh()
+                except Exception:
+                    pass
+                print(f"  stopped  status={rt.status}")
+            except Exception as e:
+                print(f"  WARN stop failed: {type(e).__name__}: {e}")
 
     print("\nNow paste the webhook.site payload back here to lock AlertPayload shape.")
     return 0

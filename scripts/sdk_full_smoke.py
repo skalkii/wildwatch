@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -28,11 +29,19 @@ STATE_FILE = REPO_ROOT / ".state.json"
 
 def main() -> int:
     load_dotenv()
-    state = json.loads(STATE_FILE.read_text())
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"ERROR: cannot read .state.json ({e}). Run event_smoke.py first.")
+        return 1
     conn = videodb.connect()
     coll = conn.get_collection()
 
-    smoke = state["rtstreams"]["smoke_event"]
+    try:
+        smoke = state["rtstreams"]["smoke_event"]
+    except KeyError:
+        print("ERROR: no smoke_event entry in .state.json. Run event_smoke.py first.")
+        return 1
     rt_id = smoke["id"]
     idx_id = smoke["index_id"]
     alert_id = smoke["alert_id"]
@@ -43,6 +52,11 @@ def main() -> int:
         if s.id == rt_id:
             rt = s
             break
+    if rt is None:
+        print(
+            f"ERROR: rtstream {rt_id} not found in collection — state stale; re-run event_smoke.py"
+        )
+        return 1
     print(f"rtstream {rt_id}  status={rt.status}\n")
 
     idx = rt.get_scene_index(idx_id)
@@ -90,7 +104,7 @@ def main() -> int:
         try:
             url = timeline.generate_stream()
             print(f"      ok -> {url[:120]}")
-            print(f"      player: https://console.videodb.io/player?url={url}")
+            print(f"      player: https://console.videodb.io/player?url={quote(url, safe='')}")
         except Exception as e:
             print(f"      FAILED: {type(e).__name__}: {e}")
     else:
