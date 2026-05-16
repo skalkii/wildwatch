@@ -31,17 +31,30 @@ def test_build_message_includes_tier_emoji() -> None:
     assert "shot heard" in msg
 
 
-def test_build_message_includes_raw_stream_url() -> None:
-    # Raw URL: no Markdown link, no console-player wrapping. Telegram auto-
-    # detects + mobile browsers route .m3u8 to native player.
+def test_build_message_wraps_hls_in_player_with_url_encoding() -> None:
     msg = build_message(
         tier=1,
         label="juvenile_present",
         explanation="calf at water edge",
         stream_url="https://rt.stream.videodb.io/m/foo.m3u8",
     )
-    assert "https://rt.stream.videodb.io/m/foo.m3u8" in msg
+    # URL-encoded so the nested ?url= doesn't break Telegram's parser or
+    # the console player's query parsing.
+    assert "console.videodb.io/player?url=" in msg
+    assert "https%3A%2F%2Frt.stream.videodb.io" in msg
     assert "▶" in msg
+
+
+def test_build_message_skips_wrap_for_already_player_urls() -> None:
+    msg = build_message(
+        tier=2,
+        label="alarm_call",
+        explanation=None,
+        stream_url="https://player.videodb.io/watch?v=Kk28WvXPjjE",
+    )
+    # No double-wrap: raw player URL passed through.
+    assert "console.videodb.io/player?url=" not in msg
+    assert "https://player.videodb.io/watch?v=Kk28WvXPjjE" in msg
 
 
 def test_build_message_omits_play_link_when_stream_url_missing() -> None:

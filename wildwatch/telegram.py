@@ -11,6 +11,7 @@ phone app opens a playable view, not a raw HLS manifest.
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 import httpx
 
@@ -38,10 +39,15 @@ def build_message(
     if explanation:
         parts.append(explanation)
     if stream_url:
-        # Send raw URL. Wrapping in console.videodb.io/player?url=... created
-        # nested-query parser failures + double-wrap issues. Telegram auto-
-        # detects the URL and mobile browsers route .m3u8 to native player.
-        parts.append(f"▶ {stream_url}")
+        # console.videodb.io/player has a JS HLS player that works in any
+        # browser (Chrome on Android/desktop has no native HLS). URL-encode
+        # the inner URL so the nested ?url= query doesn't break the parser.
+        # If the URL is already a videodb player URL, send raw — no double-wrap.
+        if "player.videodb.io" in stream_url or "console.videodb.io" in stream_url:
+            parts.append(f"▶ {stream_url}")
+        else:
+            encoded = quote(stream_url, safe="")
+            parts.append(f"▶ {PLAYER_PREFIX}{encoded}")
     return "\n".join(parts)
 
 
