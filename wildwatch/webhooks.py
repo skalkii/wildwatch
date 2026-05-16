@@ -15,10 +15,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Path
 from pydantic import BaseModel, Field
 
-from wildwatch.telegram import send_alert
+# Load .env at import time so uvicorn-launched processes see TELEGRAM_*
+# and other vars without requiring the operator to pre-export them.
+load_dotenv()
+
+from wildwatch.telegram import send_alert  # noqa: E402
 
 app = FastAPI(title="WildWatch webhook receiver")
 
