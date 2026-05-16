@@ -39,8 +39,33 @@ logger = logging.getLogger(__name__)
 UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
 
 # Strong refs to in-flight background dispatch tasks so the GC doesn't drop
-# them mid-flight (RUF006).
+# them mid-flight (RUF006). Each task removes itself via a done_callback that
+# ALSO logs exceptions — otherwise a failed task only surfaces as
+# "Task exception was never retrieved" at GC time.
 _BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro, *, label: str) -> asyncio.Task:
+    """Create + track a background task with auto-cleanup and error logging.
+
+    Without the done_callback, ``_BG_TASKS`` grows unbounded and any
+    exception raised inside the task is swallowed until the garbage
+    collector eventually emits a warning.
+    """
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _BG_TASKS.discard(t)
+        if t.cancelled():
+            return  # operator-initiated, not an error
+        exc = t.exception()
+        if exc is not None:
+            logger.error("background task %s failed: %r", label, exc, exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
 
 # Cache for /api/remote: list_rtstreams + list_sandboxes (10s TTL to avoid
 # hammering the SDK from dashboard polls).
@@ -171,7 +196,11 @@ def api_remote() -> dict:
         return data
     except Exception as e:
         logger.warning("api_remote SDK call failed: %s", e)
-        return {"rtstreams": [], "sandboxes": [], "error": str(e)}
+        # Cache the error too — otherwise every poll during an outage
+        # hammers the SDK with no backoff (one cache miss per dashboard tick).
+        data = {"rtstreams": [], "sandboxes": [], "error": str(e)}
+        _remote_cache.update({"at": now, "data": data})
+        return data
 
 
 @app.get("/events/stream")
@@ -238,7 +267,7 @@ async def api_create_source(payload: SourceCreate) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     coll = _get_coll()
-    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(s.id, coll=coll)))
+    _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch({s.id})")
     return s.__dict__
 
 
@@ -281,7 +310,7 @@ async def api_upload_source(
         raise
 
     coll = _get_coll()
-    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(s.id, coll=coll)))
+    _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch.upload({s.id})")
     return sources.get_source(s.id).__dict__
 
 
@@ -332,7 +361,9 @@ async def api_reconnect_source(source_id: str) -> dict:
         raise HTTPException(status_code=404, detail="source not found")
     sources.update_source(source_id, status="queued", error=None, stage_msg="reconnect requested")
     coll = _get_coll()
-    _BG_TASKS.add(asyncio.create_task(ingest.dispatch(source_id, coll=coll)))
+    _spawn_bg(
+        ingest.dispatch(source_id, coll=coll), label=f"ingest.dispatch.reconnect({source_id})"
+    )
     return sources.get_source(source_id).__dict__
 
 
@@ -363,7 +394,10 @@ def api_list_videos() -> dict:
         return data
     except Exception as e:
         logger.warning("api_list_videos failed: %s", e)
-        return {"videos": [], "error": str(e)}
+        # Cache the error to throttle retries during the outage.
+        data = {"videos": [], "error": str(e)}
+        _videos_cache.update({"at": now, "data": data})
+        return data
 
 
 @app.get("/api/videos/{video_id}/indexes")
@@ -540,10 +574,18 @@ def api_usage() -> dict:
     if (now - _usage_cache["at"]) < _USAGE_TTL_S and _usage_cache["data"]:
         return _usage_cache["data"]
 
-    import videodb
-
-    conn = videodb.connect()
     out: dict[str, Any] = {"estimate": _estimate_credit_burn_usd()}
+    try:
+        import videodb
+
+        conn = videodb.connect()
+    except Exception as e:
+        # Connect itself failed — cache the failure so repeated polls don't
+        # all re-attempt the broken connect.
+        out["usage_error"] = str(e)
+        out["invoices_error"] = "no connection"
+        _usage_cache.update({"at": now, "data": out})
+        return out
     try:
         out["usage"] = conn.check_usage()
     except Exception as e:
