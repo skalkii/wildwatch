@@ -27,6 +27,7 @@ dev = [
     "respx>=0.20",
     "ruff>=0.4",
     "mypy>=1.10",
+    "pre-commit>=3.7",
 ]
 
 [tool.setuptools.packages.find]
