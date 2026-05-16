@@ -180,3 +180,123 @@ def test_is_youtube_live_pattern_matching() -> None:
 def test_get_source_after_dispatch_returns_fresh_state(state_file: Path) -> None:
     s = add_source(kind="upload", input="/tmp/x.mp4", name="x")
     assert get_source(s.id).status == "queued"
+
+
+# ──── rt.status verification (reg-tests for silent-failure-hunter findings) ────
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rtsp_marks_error_when_rtstream_status_is_error(
+    state_file: Path,
+) -> None:
+    """rt.status='error' must surface as source.status='error', not 'ready'."""
+    s = add_source(kind="rtsp", input="rtsp://x/y", name="bad-rt")
+    bad_rt = _make_rtstream_mock("rts-bad")
+    bad_rt.status = "error"
+    coll = MagicMock()
+    coll.connect_rtstream = MagicMock(return_value=bad_rt)
+
+    out = await ingest.dispatch(s.id, coll=coll)
+    assert out.status == "error", f"got status={out.status!r}; rt.status='error' must propagate"
+    assert out.error and "error" in out.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rtsp_pending_status_marks_ingesting_not_ready(state_file: Path) -> None:
+    """rt.status='pending' (or any non-terminal) must NOT claim 'ready'."""
+    s = add_source(kind="rtsp", input="rtsp://x/y", name="p")
+    pending = _make_rtstream_mock("rts-pending")
+    pending.status = "pending"
+    coll = MagicMock()
+    coll.connect_rtstream = MagicMock(return_value=pending)
+
+    out = await ingest.dispatch(s.id, coll=coll)
+    assert out.status == "ingesting", (
+        f"got status={out.status!r}; pending rt.status must be 'ingesting' not 'ready'"
+    )
+    assert out.rtstream_id == "rts-pending"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rtsp_connected_status_marks_ready(state_file: Path) -> None:
+    s = add_source(kind="rtsp", input="rtsp://x/y", name="ok")
+    rt = _make_rtstream_mock("rts-ok")
+    rt.status = "connected"
+    coll = MagicMock()
+    coll.connect_rtstream = MagicMock(return_value=rt)
+
+    out = await ingest.dispatch(s.id, coll=coll)
+    assert out.status == "ready"
+
+
+# ──── yt-dlp probe error surfacing ─────────────────────────────────────────
+
+
+def test_is_youtube_live_returns_none_on_probe_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe failure must NOT be silently classified as 'not live'.
+
+    Before fix: subprocess timeout / non-zero exit returned False, so a live
+    URL routed to _ingest_url and failed deep inside VideoDB upload with no
+    indication the probe was the root cause.
+    """
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/yt-dlp")
+
+    def _bad_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="yt-dlp", timeout=20)
+
+    monkeypatch.setattr(subprocess, "run", _bad_run)
+    assert ingest._is_youtube_live("https://www.youtube.com/watch?v=x") is None
+
+
+def test_is_youtube_live_returns_none_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/yt-dlp")
+
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "bad URL"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
+    assert ingest._is_youtube_live("https://www.youtube.com/watch?v=x") is None
+
+
+def test_is_youtube_live_returns_false_when_yt_dlp_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """yt-dlp missing is the ONE case where False is reasonable — operator
+    explicitly chose not to install probe; archive-mode is the safe default."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    assert ingest._is_youtube_live("https://www.youtube.com/watch?v=x") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_youtube_routes_to_upload_when_probe_unknown_with_warning(
+    state_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe-unknown (None) routes to upload BUT records warning in stage_msg
+    so operators can see the source booted on incomplete info."""
+    monkeypatch.setattr(ingest, "_is_youtube_live", lambda url: None)
+    s = add_source(kind="youtube", input="https://www.youtube.com/watch?v=unk", name="unk")
+    coll = MagicMock()
+    coll.upload = MagicMock(return_value=_make_video_mock("m-unk"))
+
+    out = await ingest.dispatch(s.id, coll=coll)
+
+    # Routed to upload like archive mode
+    coll.upload.assert_called_once()
+    assert out.video_id == "m-unk"
+    # but the warning must surface in dashboard broadcasts
+    stats = dashboard.get_stats()
+    msgs = [
+        e.get("stage_msg", "")
+        for e in stats["recent_events"]
+        if e.get("type") == "source_progress" and e.get("source_id") == s.id
+    ]
+    assert any("probe" in m.lower() for m in msgs), (
+        f"expected a probe-warning stage_msg; got: {msgs}"
+    )

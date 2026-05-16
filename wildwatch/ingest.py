@@ -68,9 +68,22 @@ def _is_youtube_url(url: str) -> bool:
     return bool(_YT_HOST_RE.search(url))
 
 
-def _is_youtube_live(url: str) -> bool:
-    """Use yt-dlp to detect live status. False if yt-dlp unavailable."""
+def _is_youtube_live(url: str) -> bool | None:
+    """Probe YouTube URL for live status via yt-dlp.
+
+    Returns:
+        True  — confirmed live.
+        False — confirmed VOD (or yt-dlp not installed; operator opted out).
+        None  — probe failed (timeout, non-zero exit, missing output).
+                Caller must surface this to the operator and pick a default
+                rather than silently treating it as ``False``.
+
+    Pre-fix this function swallowed every error as ``False``, so a live URL
+    that failed the probe routed to archive-mode upload and failed deep
+    inside VideoDB with no indication the probe was the root cause.
+    """
     if not shutil.which("yt-dlp"):
+        # yt-dlp absent is an operator choice, not a transient error.
         return False
     try:
         out = subprocess.run(
@@ -79,9 +92,25 @@ def _is_youtube_live(url: str) -> bool:
             text=True,
             timeout=20,
         )
-        return out.stdout.strip().lower() == "true"
-    except Exception:
+    except Exception as e:
+        logger.warning("yt-dlp probe failed for %s: %r", url, e)
+        return None
+    if out.returncode != 0:
+        logger.warning(
+            "yt-dlp probe non-zero exit (%d) for %s: stderr=%r",
+            out.returncode,
+            url,
+            (out.stderr or "")[:200],
+        )
+        return None
+    val = out.stdout.strip().lower()
+    if val == "true":
+        return True
+    if val == "false":
         return False
+    # Unrecognised output (e.g. "NA" for non-YouTube URL or empty for error)
+    logger.warning("yt-dlp probe gave unexpected output for %s: %r", url, val)
+    return None
 
 
 # ──── handlers ────────────────────────────────────────────────────────────
@@ -113,6 +142,10 @@ async def _ingest_url(source, coll: Any) -> None:
     )
 
 
+_RT_READY_STATUSES = {"connected", "streaming", "running", "active"}
+_RT_ERROR_STATUSES = {"error", "failed", "disconnected"}
+
+
 async def _ingest_rtstream(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg=f"connect_rtstream({source.input})")
     rt = await asyncio.to_thread(
@@ -122,22 +155,51 @@ async def _ingest_rtstream(source, coll: Any) -> None:
         media_types=["video", "audio"],
         store=True,
     )
-    _emit(
-        source.id,
-        "ready",
-        stage_msg=f"rtstream status={getattr(rt, 'status', '?')}",
-        rtstream_id=rt.id,
-    )
+    rt_status = str(getattr(rt, "status", "") or "").lower()
+    # Map rt.status to source status explicitly — don't blindly claim 'ready'
+    # when the SDK still has the rtstream in 'pending'/'error'/etc.
+    if rt_status in _RT_ERROR_STATUSES:
+        _emit(
+            source.id,
+            "error",
+            stage_msg=f"rtstream status={rt_status}",
+            rtstream_id=rt.id,
+            error=f"rtstream reported status={rt_status} after connect",
+        )
+    elif rt_status in _RT_READY_STATUSES:
+        _emit(
+            source.id,
+            "ready",
+            stage_msg=f"rtstream status={rt_status}",
+            rtstream_id=rt.id,
+        )
+    else:
+        # 'pending', '', unknown — surface but don't lie about readiness.
+        _emit(
+            source.id,
+            "ingesting",
+            stage_msg=f"rtstream status={rt_status or 'unknown'} (waiting)",
+            rtstream_id=rt.id,
+        )
 
 
 async def _ingest_youtube(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg="probing youtube live status")
     is_live = await asyncio.to_thread(_is_youtube_live, source.input)
-    if is_live:
+    if is_live is True:
         raise RuntimeError(
             "YouTube live URL detected — needs streamlink+ffmpeg+mediamtx bridge "
             "(not handled by dispatch). Use scripts/start_live_test.py or paste the "
             "bridge-public RTSP URL instead."
+        )
+    if is_live is None:
+        # Probe failed — fall through to archive-mode upload but surface a
+        # warning so the operator can see the source booted on incomplete
+        # info. If the URL was actually live, _ingest_url will fail loud.
+        _emit(
+            source.id,
+            "connecting",
+            stage_msg="yt-dlp probe failed; treating as archive (may fail if live)",
         )
     await _ingest_url(source, coll)
 
