@@ -70,7 +70,14 @@ def broadcast(event: dict[str, Any]) -> None:
 
 
 async def subscribe() -> AsyncIterator[dict]:
-    """Yield each broadcast until subscriber drops."""
+    """Yield each broadcast until subscriber drops.
+
+    The ``finally`` block runs on normal completion, cancellation, AND any
+    exception raised at the yield point (Python generator semantics), so
+    the queue is always removed from ``_subscribers``. The defensive
+    ``logger.warning`` here exists in case some future refactor breaks
+    that invariant — better to notice the leak than to leak silently.
+    """
     q: asyncio.Queue = asyncio.Queue(maxsize=200)
     _subscribers.append(q)
     try:
@@ -78,8 +85,10 @@ async def subscribe() -> AsyncIterator[dict]:
             ev = await q.get()
             yield ev
     finally:
-        if q in _subscribers:
+        try:
             _subscribers.remove(q)
+        except ValueError:
+            logger.warning("subscribe(): queue already removed from _subscribers on cleanup")
 
 
 def get_stats() -> dict[str, Any]:

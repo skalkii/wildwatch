@@ -212,7 +212,19 @@ async def events_stream() -> StreamingResponse:
         yield b": connected\n\n"
         try:
             async for ev in dashboard.subscribe():
-                yield f"data: {json.dumps(ev)}\n\n".encode()
+                # Per-event try/except so one non-JSON-serializable payload
+                # can't kill the whole SSE stream (forcing every dashboard
+                # client to reconnect + losing future events in the window).
+                try:
+                    encoded = f"data: {json.dumps(ev)}\n\n".encode()
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "SSE event not JSON-serializable; skipped: %r (event keys=%s)",
+                        e,
+                        list(ev.keys()) if isinstance(ev, dict) else type(ev).__name__,
+                    )
+                    continue
+                yield encoded
         except asyncio.CancelledError:
             return
 
@@ -408,12 +420,40 @@ def api_list_videos() -> dict:
         return data
 
 
+def _coerce_to_list(value: Any, *, source: str) -> list:
+    """Normalise SDK return values to a list.
+
+    Pre-fix sites used ``sdk_call() or []`` which silently coerced None,
+    empty dict, or any other falsy non-list into an empty list. That
+    masked SDK contract violations (None when a list was promised) as
+    "no results", so operators had no way to tell apart a healthy
+    no-data response from a broken SDK call.
+    """
+    if value is None:
+        logger.warning("%s returned None; treating as empty list", source)
+        return []
+    if isinstance(value, list):
+        return value
+    logger.warning(
+        "%s returned %s (expected list); attempting coerce",
+        source,
+        type(value).__name__,
+    )
+    try:
+        return list(value)
+    except Exception:
+        return []
+
+
 @app.get("/api/videos/{video_id}/indexes")
 def api_video_indexes(video_id: str) -> dict:
     try:
         coll = _get_coll()
         video = coll.get_video(video_id)
-        indexes = video.list_scene_index() or []
+        indexes = _coerce_to_list(
+            video.list_scene_index(),
+            source=f"video({video_id}).list_scene_index",
+        )
         return {"video_id": video_id, "indexes": indexes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -424,7 +464,10 @@ def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
     try:
         coll = _get_coll()
         video = coll.get_video(video_id)
-        scenes = video.get_scene_index(index_id) or []
+        scenes = _coerce_to_list(
+            video.get_scene_index(index_id),
+            source=f"video({video_id}).get_scene_index({index_id})",
+        )
         # Server-side slice -- callers can paginate later
         return {"video_id": video_id, "index_id": index_id, "scenes": scenes[:limit]}
     except Exception as e:
@@ -436,17 +479,20 @@ def api_rtstream_indexes(rt_id: str) -> dict:
     try:
         coll = _get_coll()
         rt = coll.get_rtstream(rt_id)
-        indexes = []
-        for idx in rt.list_scene_indexes() or []:
-            indexes.append(
-                {
-                    "rtstream_index_id": getattr(idx, "rtstream_index_id", None)
-                    or getattr(idx, "id", None),
-                    "name": getattr(idx, "name", None),
-                    "status": getattr(idx, "status", None),
-                    "prompt": getattr(idx, "prompt", None),
-                }
-            )
+        raw = _coerce_to_list(
+            rt.list_scene_indexes(),
+            source=f"rtstream({rt_id}).list_scene_indexes",
+        )
+        indexes = [
+            {
+                "rtstream_index_id": getattr(idx, "rtstream_index_id", None)
+                or getattr(idx, "id", None),
+                "name": getattr(idx, "name", None),
+                "status": getattr(idx, "status", None),
+                "prompt": getattr(idx, "prompt", None),
+            }
+            for idx in raw
+        ]
         return {"rtstream_id": rt_id, "indexes": indexes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -502,8 +548,9 @@ def _estimate_credit_burn_usd() -> dict:
         return {"total_usd": 0.0, "rtstreams_usd": 0.0, "sandboxes_usd": 0.0, "details": []}
     try:
         state = _json.loads(state_file.read_text())
-    except Exception:
-        return {"total_usd": 0.0, "error": "state unreadable"}
+    except Exception as e:
+        logger.warning("_estimate_credit_burn_usd: %s unreadable: %r", state_file, e)
+        return {"total_usd": 0.0, "error": f"state unreadable: {e}"}
 
     now = time.time()
     rt_total = 0.0
@@ -521,7 +568,13 @@ def _estimate_credit_burn_usd() -> dict:
                 started_ts = _dt.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp()
             else:
                 started_ts = float(started_iso)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "_estimate_credit_burn_usd: rtstream %s has unparseable started_at=%r: %r",
+                key,
+                started_iso,
+                e,
+            )
             continue
         hours = max(0.0, (now - started_ts) / 3600.0)
         # Note: we don't know whether stream is still running locally, so this
@@ -559,8 +612,12 @@ def _estimate_credit_burn_usd() -> dict:
                     "burn_usd": round(burn, 2),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "_estimate_credit_burn_usd: sandbox burn calc failed: %r (sb=%r)",
+                e,
+                sb,
+            )
 
     return {
         "total_usd": round(rt_total + sb_total, 2),
