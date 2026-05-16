@@ -218,8 +218,11 @@ Same pattern for `audio_idx.create_alert(...)`.
 ## Programmable editing
 
 ```python
-from videodb.editor import Timeline, Track, Clip, ImageAsset, AudioAsset, Fit
-# Plus VideoAsset, TextAsset (verify import path on first use).
+from videodb.editor import Timeline, Track, Clip, ImageAsset, AudioAsset, Fit, VideoAsset
+# IMPORTANT: TWO different VideoAsset classes exist in videodb:
+#   videodb.editor.VideoAsset  -- signature (id, start, volume, crop)   <-- USE THIS for Timeline
+#   videodb.asset.VideoAsset   -- signature (asset_id, start, end)      <-- low-level, do not mix
+# Trim duration via Clip(asset=..., duration=N), not via VideoAsset's `end`.
 
 t = Timeline(conn)
 t.resolution = "1280x720"
