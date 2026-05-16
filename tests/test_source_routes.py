@@ -126,8 +126,55 @@ def test_delete_source_calls_remote_cleanup_when_video_id_set(
 
     r = client.delete(f"/api/sources/{sid}")
     assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "deleted"
+    assert body.get("warnings", []) == []
     mock_coll.get_rtstream.assert_called_once_with("rts-fake")
     mock_coll.delete_video.assert_called_once_with("m-z-fake")
+
+
+def test_delete_source_surfaces_warning_when_rt_stop_fails(
+    client: TestClient, state_file: Path, mock_coll: MagicMock
+) -> None:
+    """Regression: api_delete_source used to return {'status':'deleted'} even
+    when rt.stop() raised, so operators had no signal that the remote
+    rtstream may still be running and burning credits."""
+    create_r = client.post(
+        "/api/sources",
+        json={"kind": "rtsp", "input": "rtsp://x", "name": "leaky"},
+    )
+    sid = create_r.json()["id"]
+    src_mod.update_source(sid, rtstream_id="rts-leaky")
+
+    bad_rt = MagicMock()
+    bad_rt.stop = MagicMock(side_effect=RuntimeError("network unreachable"))
+    mock_coll.get_rtstream = MagicMock(return_value=bad_rt)
+
+    r = client.delete(f"/api/sources/{sid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "deleted_with_warnings"
+    warnings = body["warnings"]
+    assert any("rt.stop" in w.lower() and "network unreachable" in w for w in warnings)
+
+
+def test_delete_source_surfaces_warning_when_delete_video_fails(
+    client: TestClient, state_file: Path, mock_coll: MagicMock
+) -> None:
+    create_r = client.post(
+        "/api/sources",
+        json={"kind": "hls", "input": "https://x/y.m3u8", "name": "v"},
+    )
+    sid = create_r.json()["id"]
+    src_mod.update_source(sid, video_id="m-leaky")
+
+    mock_coll.delete_video = MagicMock(side_effect=RuntimeError("permission denied"))
+
+    r = client.delete(f"/api/sources/{sid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "deleted_with_warnings"
+    assert any("delete_video" in w.lower() and "permission denied" in w for w in body["warnings"])
 
 
 def test_disconnect_source_noop_when_no_rtstream(

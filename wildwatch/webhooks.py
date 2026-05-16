@@ -320,20 +320,28 @@ def api_delete_source(source_id: str) -> dict:
     if s is None:
         raise HTTPException(status_code=404, detail="source not found")
     # Best-effort remote cleanup (don't fail the local delete if remote fails)
+    # but collect every failure so the caller can see remote resources that
+    # may still be running (and burning credits).
     coll = _get_coll()
+    warnings: list[str] = []
     if s.rtstream_id:
         try:
             rt = coll.get_rtstream(s.rtstream_id)
             rt.stop()
         except Exception as e:
-            logger.warning("delete: rt.stop failed for %s: %s", s.rtstream_id, e)
+            msg = f"rt.stop failed for {s.rtstream_id}: {e}"
+            logger.warning("delete: %s", msg)
+            warnings.append(msg)
     if s.video_id:
         try:
             coll.delete_video(s.video_id)
         except Exception as e:
-            logger.warning("delete: coll.delete_video failed for %s: %s", s.video_id, e)
+            msg = f"coll.delete_video failed for {s.video_id}: {e}"
+            logger.warning("delete: %s", msg)
+            warnings.append(msg)
     sources.delete_source(source_id)
-    return {"status": "deleted", "id": source_id}
+    status = "deleted_with_warnings" if warnings else "deleted"
+    return {"status": status, "id": source_id, "warnings": warnings}
 
 
 @app.post("/api/sources/{source_id}/disconnect")
