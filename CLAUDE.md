@@ -92,7 +92,7 @@ WildWatch attacks all four simultaneously using VideoDB's prompt-driven VLM inde
 wildwatch/
 ├── README.md              # Pitch, quickstart, architecture, demo embed
 ├── CLAUDE.md              # This file
-├── .env.example           # VIDEODB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+├── .env.example           # VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ├── pyproject.toml         # or requirements.txt
 ├── config.py              # Streams registry, prompt strings, event defs
 ├── bridge/
@@ -692,7 +692,7 @@ def load_prompt(name):
     return Path(f"prompts/{name}.txt").read_text()
 
 def main():
-    conn = videodb.connect(api_key=os.environ["VIDEODB_API_KEY"])
+    conn = videodb.connect(api_key=os.environ["VIDEO_DB_API_KEY"])
     coll = conn.get_collection()
     state = {"streams": {}, "events": {}}
 
