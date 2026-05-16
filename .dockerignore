@@ -1,0 +1,32 @@
+# Python
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Repo
+.git
+.github
+
+# Local state (mounted at runtime)
+.state.json
+.state.json.tmp
+.env
+data
+logs
+
+# Sample binaries (corpus mp4s — large, fetched on demand)
+samples/triggers/*.mp4
+samples/triggers/*.webm
+samples/triggers/*.mkv
+samples/triggers/_work
+
+# Docs that don't ship in the image
+*.md
+plans
+
+# OS
+.DS_Store
