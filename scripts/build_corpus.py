@@ -167,6 +167,38 @@ def _dispatch_download(url: str, dest: Path) -> bool:
 # ──── per-clip builders ────────────────────────────────────────────────────
 
 
+def _build_live_youtube(clip: dict, out: Path) -> bool:
+    """Capture N seconds from the CURRENT live position of a YouTube live stream.
+
+    Uses streamlink (which understands YouTube live HLS) piped into ffmpeg with
+    -t duration to cap the recording. Avoids yt-dlp --live-from-start which
+    would re-fetch the full archive from broadcast start.
+    """
+    url = clip.get("source_url")
+    if not url:
+        print(f"  skip {clip['slug']}: source_url unset")
+        return False
+    dur = clip["duration_s"]
+    cmd = (
+        f"streamlink --stream-segment-timeout 30 "
+        f"'{url}' best -O | ffmpeg -y -i pipe:0 -t {dur} "
+        f"-c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac '{out}'"
+    )
+    print(f"  $ {cmd}")
+    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"  ! exit {res.returncode}")
+        if res.stderr:
+            print(f"  stderr: {res.stderr.strip()[-500:]}")
+        if clip.get("fallback_url"):
+            print(f"  primary live failed; retrying fallback_url for {clip['slug']}")
+            cmd2 = cmd.replace(url, clip["fallback_url"])
+            res2 = subprocess.run(cmd2, shell=True, capture_output=True, text=True)
+            return res2.returncode == 0
+        return False
+    return True
+
+
 def _build_youtube(clip: dict, out: Path) -> bool:
     url = clip.get("source_url")
     if not url:
@@ -314,8 +346,8 @@ def build_clip(clip: dict, force: bool = False) -> dict:
     out = SAMPLES_DIR / f"{slug}.mp4"
     result = {"slug": slug, "path": str(out), "status": "pending", "duration_s": None}
 
-    # Intentionally-dropped clip (manifest v2 marks these source_url=null + duration=0).
-    if clip["source"] == "youtube" and clip.get("source_url") is None:
+    # Intentionally-dropped clip (manifest marks these source_url=null + duration=0).
+    if clip["source"] in ("youtube", "live_youtube") and clip.get("source_url") is None:
         result["status"] = "dropped"
         print(f"  drop {slug} (intentionally uncovered; source_url=null)")
         return result
@@ -332,6 +364,8 @@ def build_clip(clip: dict, force: bool = False) -> dict:
     source = clip["source"]
     if source == "youtube":
         ok = _build_youtube(clip, out)
+    elif source == "live_youtube":
+        ok = _build_live_youtube(clip, out)
     elif source == "synthesized":
         ok = _build_synthesized(clip, out)
     else:

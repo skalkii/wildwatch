@@ -21,7 +21,7 @@ REQUIRED_CLIP_KEYS = {
     "events_expected",
     "license",
 }
-VALID_SOURCES = {"youtube", "fsd50k", "synthesized"}
+VALID_SOURCES = {"youtube", "live_youtube", "fsd50k", "synthesized"}
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 
 
@@ -31,7 +31,7 @@ def manifest() -> dict:
 
 
 def test_manifest_has_version_and_clips(manifest: dict) -> None:
-    assert manifest.get("version") in (1, 2)
+    assert manifest.get("version") in (1, 2, 3)
     assert isinstance(manifest.get("clips"), list)
     assert len(manifest["clips"]) >= 1
 
@@ -65,7 +65,7 @@ def test_each_clip_duration_non_negative_int(manifest: dict) -> None:
         assert isinstance(d, int)
         assert d >= 0, f"{clip['slug']}: duration_s must be >= 0"
         if clip.get("source_url") is not None:
-            assert d > 0, f"{clip['slug']}: live clip must have duration_s > 0"
+            assert d > 0, f"{clip['slug']}: real clip must have duration_s > 0"
 
 
 def test_events_expected_reference_real_event_ids(manifest: dict) -> None:

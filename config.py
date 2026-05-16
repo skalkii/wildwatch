@@ -27,22 +27,23 @@ STREAMS: dict[str, dict[str, object]] = {
         ),
     },
     "wild_africa_live": {
-        "name": "Wild Africa Live (multi-cam)",
+        "name": "Hwange Waterhole (Wilderness Linkwasha)",
         "rtsp_url": None,
-        "youtube_url": "https://www.youtube.com/watch?v=vr4o_AsrU1k",
+        # Old vr4o_AsrU1k went offline 2026-05-16; swapped to Africam's Hwange
+        # Linkwasha 24/7 cam which is reliably live and matches the waterhole prompt
+        # orientation. Zimbabwe reserve, still inside the rotating-reserves context.
+        "youtube_url": "https://www.youtube.com/watch?v=-rXriX4SiQk",
         "use_bridge": True,
-        "location_context": (
-            "Rotating African reserves: South Africa, Kenya, Botswana, Namibia, Zimbabwe"
-        ),
+        "location_context": ("Hwange National Park, Zimbabwe — Wilderness Linkwasha waterhole cam"),
         "species_list": (
-            "Big Five (lion, leopard, elephant, rhino, buffalo), "
-            "zebra, giraffe, wildebeest, impala, kudu, warthog, "
-            "hippo, crocodile, hyena, wild dog, baboon, vervet monkey, "
-            "vultures, eagles, hornbills, fish eagles"
+            "elephant, lion, leopard, buffalo, zebra, giraffe, wildebeest, "
+            "impala, kudu, sable antelope, roan antelope, warthog, baboon, "
+            "vervet monkey, wild dog, hyena, jackal, vultures, eagles, hornbills"
         ),
         "expected_sounds": (
-            "fish eagle calls, baboon barks, lion roars, "
-            "elephant trumpets, hippo bellows, various antelope alarm snorts"
+            "elephant trumpets and rumbles, lion roars at dusk and dawn, "
+            "baboon barks, kudu barks, impala alarm snorts, hyena whoops at night, "
+            "various bird calls, hornbill cackles"
         ),
     },
 }

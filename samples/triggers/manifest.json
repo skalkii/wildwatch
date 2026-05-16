@@ -1,96 +1,52 @@
 {
-  "version": 2,
-  "description": "Trigger-corpus manifest v2 — STATIC-CAMERA fixtures from Africam/explore.org camera networks matching production RTSP distribution. Documentary footage rejected per operator note: edited cuts/zooms would force prompts to overfit a distribution that doesn't exist in production. See samples/triggers/README.md.",
+  "version": 3,
+  "description": "Trigger-corpus manifest v3 — live-stream segments captured from the actual production camera feeds, plus 3 synthesised fixtures for anthropogenic threats. v2 Africam Show / Kwa Maritane / BBC Earth clips dropped because they turned out to be edited multi-shot compilations (light_mode oscillates dusk -> dawn within 300s on the v2 species output). Production-faithful distribution > targeted event coverage.",
   "intentionally_uncovered": [
     "alarm_call",
     "mortality_event",
     "human_intrusion_visual",
-    "human_intrusion_audio"
+    "human_intrusion_audio",
+    "welfare_concern",
+    "juvenile_present",
+    "large_aggregation",
+    "mixed_aggregation",
+    "notable_social",
+    "parental_care",
+    "predator_activity",
+    "predator_vocal",
+    "rare_species"
   ],
-  "intentionally_uncovered_reason": "These events are documented in production but no public static-camera fixtures exist. Africam/explore.org camera operators frame out safari vehicles (it's a hide). Predator kills happen in bush, not at waterholes. Alarm-call fixtures are mostly edited compilations. human_intrusion_audio is recoverable via Pexels-savanna + Freesound-vehicle synth (deferred to v3). Reserved for live-deployment validation rather than unit testing.",
+  "intentionally_uncovered_reason": "Two classes: (1) events that have no raw-static-cam fixture available publicly — alarm_call, mortality_event, human_intrusion_*, welfare_concern (vehicles framed out, kills happen in bush, alarms mostly in edited compilations, injury close-ups rare on raw feeds). (2) events that the namibia_live_segment + hwange_live_segment captures MAY organically cover but we can't promise without inspecting the actual capture — juvenile_present, mixed/large_aggregation, notable_social, parental_care, predator_activity, predator_vocal, rare_species. After first live-segment index run, events the VLM actually reports move to the clip's events_observed and out of this list. Until then they live here in the honest 'we don't assert coverage' bucket.",
   "clips": [
     {
-      "slug": "waterhole_rich_scene",
-      "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=AnHs4Tkb5C4",
-      "fallback_url": "https://www.youtube.com/watch?v=DSLw8FPi0Ro",
-      "source_search_query": "Africam waterhole elephants static cam",
-      "section": "0:00-5:00",
+      "slug": "namibia_live_segment",
+      "source": "live_youtube",
+      "source_url": "https://www.youtube.com/watch?v=AeMUdOPFcXI",
+      "fallback_url": null,
+      "source_search_query": "Etosha Okaukuejo Namibia waterhole live stream (config.py STREAMS.namibia_waterhole.youtube_url)",
+      "section": null,
       "duration_s": 300,
-      "events_expected": [
-        "juvenile_present",
-        "mixed_aggregation",
-        "parental_care",
-        "notable_social",
-        "large_aggregation"
-      ],
+      "events_expected": [],
+      "events_observed": [],
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "STATIC CAM. Africam 'Elephants At The Waterhole | The Africam Show' — fixed perspective at one of Africam's reserve waterhole cameras, same as our production stream profile. Commentary-over-stream format keeps underlying video single-camera. mixed/large_aggregation depend on section — verify in scrub."
+      "notes": "STATIC CAM. Real Etosha Okaukuejo waterhole live broadcast (Namibia: Live stream at the Okaukuejo waterhole in Etosha National Park). 5min capture from current live position via streamlink+ffmpeg -t 300. events_expected intentionally empty — fills events_observed after first index run based on what wildlife actually showed up."
     },
     {
-      "slug": "predator_hunt",
-      "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=lsp3KQIaPzk",
-      "fallback_url": "https://www.youtube.com/watch?v=U2mgEFXueLM",
-      "source_search_query": "Africam lions waterhole static fixed camera",
-      "section": "0:00-1:39",
-      "duration_s": 99,
-      "events_expected": [
-        "predator_activity",
-        "predator_vocal",
-        "rare_species"
-      ],
+      "slug": "hwange_live_segment",
+      "source": "live_youtube",
+      "source_url": "https://www.youtube.com/watch?v=-rXriX4SiQk",
+      "fallback_url": "https://www.youtube.com/watch?v=XyPU5-pNg5E",
+      "source_search_query": "Hwange Wilderness Linkwasha waterhole live (config.py STREAMS.wild_africa_live.youtube_url)",
+      "section": null,
+      "duration_s": 300,
+      "events_expected": [],
+      "events_observed": [],
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "STATIC CAM. Africam 'Two Male Lions Share a Drink at Kwa Maritane Waterhole'. Fixed perspective Kwa Maritane archive. Predator-present-at-waterhole pattern matches production reality better than the rarely-captured hunt. predator_activity weaker than v1 (no chase) — accepted trade for distribution fit. Fallback: leopard at waterhole IR night cam."
-    },
-    {
-      "slug": "vehicle_intrusion",
-      "source": "youtube",
-      "source_url": null,
-      "fallback_url": null,
-      "source_search_query": "Static wildlife cam vehicle intrusion -- DROPPED (intentionally_uncovered)",
-      "section": null,
-      "duration_s": 0,
-      "events_expected": [],
-      "stream_context": "wild_africa_live",
-      "audio_overlay": null,
-      "license": "n/a",
-      "notes": "DROPPED IN v2. Africam/explore.org camera operators frame out safari vehicles by design (it's a hide). No public static-cam vehicle footage. human_intrusion_visual + human_intrusion_audio recorded as intentionally_uncovered at manifest root."
-    },
-    {
-      "slug": "carcass_aftermath",
-      "source": "youtube",
-      "source_url": null,
-      "fallback_url": null,
-      "source_search_query": "Static wildlife cam carcass scavengers -- DROPPED (intentionally_uncovered)",
-      "section": null,
-      "duration_s": 0,
-      "events_expected": [],
-      "stream_context": "wild_africa_live",
-      "audio_overlay": null,
-      "license": "n/a",
-      "notes": "DROPPED IN v2. Waterhole cams don't see carcasses (kills happen in bush). Trail-cam channels exist but rarely capture scavenging on a single fixed frame for >30s. mortality_event recorded as intentionally_uncovered."
-    },
-    {
-      "slug": "injured_wildlife",
-      "source": "youtube",
-      "source_url": "https://www.youtube.com/watch?v=hvKdEB4R_bU",
-      "fallback_url": null,
-      "source_search_query": "Africam three-legged elephant calf Hwange static cam",
-      "section": "0:00-0:30",
-      "duration_s": 30,
-      "events_expected": [
-        "welfare_concern",
-        "parental_care"
-      ],
-      "stream_context": "wild_africa_live",
-      "audio_overlay": null,
-      "license": "fair-use-educational",
-      "notes": "STATIC CAM. Africam 'Three-Legged Elephant Calf Returns' from Hwange Safari Lodge waterhole. Single fixed-camera shot. Hits welfare_concern (abnormal posture + gait) AND parental_care (herd protects calf) in one clip. Strongest fixture in the corpus."
+      "notes": "STATIC CAM. Real Hwange Wilderness Linkwasha waterhole live broadcast (Zimbabwe). 5min capture from current live position. Fallback: Amboseli Waterhole live (Kenya, Tortilis Camp). events_expected intentionally empty; events_observed populated after first index run."
     },
     {
       "slug": "dry_waterhole",
@@ -106,7 +62,7 @@
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "Direct match: animals at dried-up waterhole during 3-month drought. Fits namibia_waterhole arid context."
+      "notes": "STATIC CAM. Amateur 2013 footage of animals at dried-up waterhole during 3-month drought. Grainy fixed-frame production matches what a 480p HDOnTap stream would actually look like."
     },
     {
       "slug": "pre_storm_silence",
@@ -122,7 +78,7 @@
       "stream_context": "wild_africa_live",
       "audio_overlay": null,
       "license": "fair-use-educational",
-      "notes": "3am South African savanna field recording. Pre-dawn segment with sparse biophony — satisfies ABNORMAL_SILENCE. Visual mostly static; audio is the signal."
+      "notes": "3am South African savanna field recording. Audio-only trigger (acoustic_anomaly_silence). NB: this event validates only on live RTSP path (rtstream.index_audio), not uploaded video — kept here for completeness; tests will skip until Phase 4."
     },
     {
       "slug": "poaching_synth",
@@ -148,7 +104,7 @@
         "mix_filter": "ffmpeg -i base.mp4 -i overlay.mp3 -filter_complex \"[1:a]adelay=4000|4000,volume=0.9[over];[0:a]volume=0.2[base];[base][over]amix=inputs=2:duration=first[mixed]\" -map 0:v -map \"[mixed]\" -t 10 -c:v libx264 -pix_fmt yuv420p -c:a aac out.mp4"
       },
       "license": "CC0 (Pexels base + Freesound overlay)",
-      "notes": "Pexels: ROMAN ODINTSOV lioness in field. Freesound: Cloud-10 single rifle-style gunshot (1.89s). Both fully CC0 — no fair-use ambiguity."
+      "notes": "Static lioness shot (Pexels CC0) + Freesound CC0 rifle gunshot at 4s. STATIC by construction (single locked-off Pexels source). NB: gunshot event validates only on live RTSP rtstream.index_audio path; corpus presence is documentation, not test surface."
     },
     {
       "slug": "logging_synth",
@@ -174,14 +130,14 @@
         "mix_filter": "ffmpeg -i base.mp4 -i overlay.mp3 -filter_complex \"[1:a]atrim=10:17,asetpts=PTS-STARTPTS,adelay=2000|2000,volume=0.8[over];[0:a]volume=0.3[base];[base][over]amix=inputs=2:duration=first[mixed]\" -map 0:v -map \"[mixed]\" -t 10 -c:v libx264 -pix_fmt yuv420p -c:a aac out.mp4"
       },
       "license": "CC0 (Pexels base + Freesound overlay)",
-      "notes": "Pexels: Claudiu Ciobanu forest drone aerial. Freesound: Stefan021 real Husqvarna recording (63.7s). Trim 10-17s window for pull-start + rev. Both CC0."
+      "notes": "Drone-canopy base is technically aerial-moving but single continuous shot, slow camera motion roughly equivalent to wind-swayed forest cam. Real Husqvarna chainsaw audio from Freesound. NB: chainsaw event validates on live RTSP path only."
     },
     {
       "slug": "camera_failure_synth",
       "source": "synthesized",
       "source_url": null,
       "fallback_url": null,
-      "source_search_query": "ffmpeg lavfi pure synthesis: black frame + pink noise",
+      "source_search_query": "ffmpeg lavfi: black frame + pink noise",
       "section": null,
       "duration_s": 10,
       "events_expected": [
@@ -190,7 +146,7 @@
       "stream_context": "namibia_waterhole",
       "audio_overlay": null,
       "license": "synthesized",
-      "notes": "Pure ffmpeg recipe (no external assets). Command: ffmpeg -y -f lavfi -i color=black:s=1280x720:r=25:d=10 -f lavfi -i anoisesrc=color=pink:amplitude=0.01:d=10 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -shortest out.mp4. 10s black frame with faint pink noise — what a frozen/disconnected camera outputs."
+      "notes": "Pure ffmpeg recipe: 10s black 720p frame + faint pink noise. Simulates a dead/disconnected fixed camera — what production camera_failure would look like to the visual index."
     }
   ]
 }

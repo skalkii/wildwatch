@@ -62,8 +62,8 @@ def main() -> int:
         slug = clip["slug"]
         if args.only and slug not in args.only:
             continue
-        # Intentionally-dropped clips (manifest v2: source_url=null + duration=0).
-        if clip["source"] == "youtube" and clip.get("source_url") is None:
+        # Intentionally-dropped clips (manifest marks these source_url=null + duration=0).
+        if clip["source"] in ("youtube", "live_youtube") and clip.get("source_url") is None:
             print(f"  drop   {slug}  (intentionally uncovered; source_url=null)")
             n_dropped += 1
             continue
