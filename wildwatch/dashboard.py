@@ -12,10 +12,13 @@ uvicorn restart.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 MAX_RECENT_EVENTS = 50
 
@@ -25,35 +28,45 @@ _subscribers: list[asyncio.Queue] = []
 _tier_counts: dict[int, int] = defaultdict(int)
 _recent_events: list[dict] = []
 _total: int = 0
+_dropped_total: int = 0  # SSE events lost to QueueFull (slow subscriber)
 _started_at: float = time.time()
 
 
 def reset_state() -> None:
     """Test helper — clears all counters + subscribers."""
-    global _total, _started_at
+    global _total, _started_at, _dropped_total
     _subscribers.clear()
     _tier_counts.clear()
     _recent_events.clear()
     _total = 0
+    _dropped_total = 0
     _started_at = time.time()
 
 
 def broadcast(event: dict[str, Any]) -> None:
     """Record + fanout to every subscriber. Called from webhook handler."""
-    global _total
+    global _total, _dropped_total
     _total += 1
     tier = int(event.get("tier", 0))
     _tier_counts[tier] += 1
     _recent_events.append({**event, "received_at": event.get("received_at", time.time())})
     if len(_recent_events) > MAX_RECENT_EVENTS:
         _recent_events.pop(0)
-    # Fanout to subscribers (sync put_nowait so dropped on overflow rather
-    # than blocking the webhook response path).
+    # Fanout to subscribers (sync put_nowait so the webhook response path
+    # never blocks on a slow SSE client). A full queue means the client
+    # is too slow to drain — we drop the event but COUNT and LOG it so
+    # operators can see drops in /api/stats and the log stream.
     for q in list(_subscribers):
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
-            pass
+            _dropped_total += 1
+            logger.warning(
+                "SSE event dropped: subscriber queue full (qsize=%d maxsize=%d total_dropped=%d)",
+                q.qsize(),
+                q.maxsize,
+                _dropped_total,
+            )
 
 
 async def subscribe() -> AsyncIterator[dict]:
@@ -76,6 +89,7 @@ def get_stats() -> dict[str, Any]:
         "tier_counts": dict(_tier_counts),
         "recent_events": list(reversed(_recent_events)),
         "subscribers": len(_subscribers),
+        "dropped": _dropped_total,
         "uptime_s": int(time.time() - _started_at),
     }
 

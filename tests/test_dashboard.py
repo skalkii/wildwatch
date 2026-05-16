@@ -95,3 +95,42 @@ def test_stats_serializable_to_json() -> None:
     stats = db.get_stats()
     # Roundtrip through JSON to confirm no non-serializable types
     json.dumps(stats)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_counts_drops_when_subscriber_queue_full(caplog) -> None:
+    """Slow subscriber must not silently lose alerts.
+
+    Reg-test for review finding: dashboard.py broadcast() previously
+    swallowed QueueFull without counter or log, so operators had zero
+    visibility into dropped SSE events.
+    """
+    import logging
+
+    # Force a tiny queue so we can overflow it
+    q: asyncio.Queue = asyncio.Queue(maxsize=2)
+    db._subscribers.append(q)
+    try:
+        with caplog.at_level(logging.WARNING, logger="wildwatch.dashboard"):
+            for i in range(5):
+                db.broadcast({"tier": 1, "label": f"e{i}"})
+        stats = db.get_stats()
+        # 5 broadcasts, queue holds 2 -> 3 drops
+        assert stats["dropped"] == 3
+        # At least one warning emitted
+        assert any("dropped" in r.message.lower() for r in caplog.records)
+    finally:
+        db._subscribers.remove(q)
+
+
+def test_reset_state_clears_dropped_counter() -> None:
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    db._subscribers.append(q)
+    try:
+        db.broadcast({"tier": 1, "label": "a"})
+        db.broadcast({"tier": 1, "label": "b"})  # dropped
+        assert db.get_stats()["dropped"] >= 1
+    finally:
+        db._subscribers.remove(q)
+    db.reset_state()
+    assert db.get_stats()["dropped"] == 0
