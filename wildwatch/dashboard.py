@@ -219,8 +219,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- USAGE TAB -->
   <main id="tab-usage" class="tab-pane p-6 hidden">
-    <h2 class="text-lg font-bold mb-4">VideoDB Usage (TODO T-64)</h2>
-    <p class="text-gray-400 text-sm">Wired in next ticket.</p>
+    <h2 class="text-lg font-bold mb-4">VideoDB Usage</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+      <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Estimate (local)</h3>
+        <div id="usage-estimate" class="text-sm">loading...</div>
+        <p class="text-xs text-gray-500 mt-2">Upper-bound from .state.json start timestamps.</p>
+      </div>
+      <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">SDK check_usage()</h3>
+        <pre id="usage-raw" class="text-xs text-gray-300 overflow-x-auto">loading...</pre>
+      </div>
+    </div>
+    <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+      <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Recent invoices (top 10)</h3>
+      <pre id="usage-invoices" class="text-xs text-gray-300 overflow-x-auto">loading...</pre>
+    </div>
   </main>
 
   <!-- ADD SOURCE MODAL -->
@@ -500,6 +514,22 @@ $('search-go').addEventListener('click', async () => {
   } catch (e) { $('search-results').innerHTML = `<span class="text-red-400">${e}</span>`; }
 });
 
+// ──── Usage tab ────
+async function fetchUsage() {
+  try {
+    const r = await fetch('/api/usage');
+    const d = await r.json();
+    const est = d.estimate || {};
+    $('usage-estimate').innerHTML = `<div class="text-2xl font-bold text-yellow-300">$${(est.total_usd || 0).toFixed(2)}</div>
+      <div class="text-xs text-gray-400 mt-1">RTStreams: $${(est.rtstreams_usd||0).toFixed(2)} · Sandboxes: $${(est.sandboxes_usd||0).toFixed(2)}</div>
+      <table class="text-xs w-full mt-3">
+        <tbody>${(est.details || []).map(x => `<tr><td>${escapeHtml(x.kind)} ${escapeHtml(x.key || x.id || '')}</td><td>${x.hours}h x $${x.rate_usd_per_h}/h</td><td>$${x.burn_usd}</td></tr>`).join('')}</tbody>
+      </table>`;
+    $('usage-raw').textContent = JSON.stringify(d.usage || d.usage_error || {}, null, 2);
+    $('usage-invoices').textContent = JSON.stringify(d.invoices || d.invoices_error || [], null, 2);
+  } catch (e) { console.warn('usage fetch failed', e); }
+}
+
 // Tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -510,6 +540,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     $('tab-' + tab).classList.remove('hidden');
     if (tab === 'sources') fetchSources();
     if (tab === 'content') fetchVideos();
+    if (tab === 'usage') fetchUsage();
   });
 });
 

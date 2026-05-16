@@ -51,6 +51,10 @@ _REMOTE_TTL_S = 10.0
 _videos_cache: dict = {"at": 0.0, "data": {"videos": []}}
 _VIDEOS_TTL_S = 30.0
 
+# Cache for /api/usage (60s TTL — billing endpoints are slow).
+_usage_cache: dict = {"at": 0.0, "data": {}}
+_USAGE_TTL_S = 60.0
+
 app = FastAPI(title="WildWatch webhook receiver")
 
 
@@ -435,6 +439,121 @@ def _shot_to_dict(sh: Any) -> dict:
         "scene_index_id": getattr(sh, "scene_index_id", None),
         "scene_index_name": getattr(sh, "scene_index_name", None),
     }
+
+
+# ──── Usage / billing route ───────────────────────────────────────────────
+
+
+def _estimate_credit_burn_usd() -> dict:
+    """Back-of-napkin estimate from .state.json + best-guess rates.
+
+    Rates (from PARALLEL_STREAM_HANDOVER analysis):
+      - Live RTStream visual+audio indexing at RELAXED batch_config: ~$5/h
+      - Sandbox Medium tier: $3.50/h flat
+      - Sandbox Small tier: $1/h flat
+    """
+    import json as _json
+    from pathlib import Path as _PPath
+
+    state_file = _PPath(__file__).resolve().parent.parent / ".state.json"
+    if not state_file.exists():
+        return {"total_usd": 0.0, "rtstreams_usd": 0.0, "sandboxes_usd": 0.0, "details": []}
+    try:
+        state = _json.loads(state_file.read_text())
+    except Exception:
+        return {"total_usd": 0.0, "error": "state unreadable"}
+
+    now = time.time()
+    rt_total = 0.0
+    sb_total = 0.0
+    details: list[dict] = []
+
+    for key, rt_state in state.get("rtstreams", {}).items():
+        started_iso = rt_state.get("started_at") or rt_state.get("created_at")
+        if not started_iso:
+            continue
+        try:
+            from datetime import datetime as _dt
+
+            if isinstance(started_iso, str):
+                started_ts = _dt.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp()
+            else:
+                started_ts = float(started_iso)
+        except Exception:
+            continue
+        hours = max(0.0, (now - started_ts) / 3600.0)
+        # Note: we don't know whether stream is still running locally, so this
+        # is upper-bound from start_ts to now.
+        rate = 5.0  # relaxed cost rate
+        burn = hours * rate
+        rt_total += burn
+        details.append(
+            {
+                "kind": "rtstream",
+                "key": key,
+                "hours": round(hours, 2),
+                "rate_usd_per_h": rate,
+                "burn_usd": round(burn, 2),
+            }
+        )
+
+    sb = state.get("sandbox")
+    if sb and sb.get("created_at"):
+        try:
+            from datetime import datetime as _dt
+
+            started_ts = _dt.fromisoformat(sb["created_at"].replace("Z", "+00:00")).timestamp()
+            hours = max(0.0, (now - started_ts) / 3600.0)
+            rate = 3.5 if str(sb.get("tier", "")).endswith("medium") else 1.0
+            burn = hours * rate
+            sb_total += burn
+            details.append(
+                {
+                    "kind": "sandbox",
+                    "id": sb.get("id"),
+                    "tier": sb.get("tier"),
+                    "hours": round(hours, 2),
+                    "rate_usd_per_h": rate,
+                    "burn_usd": round(burn, 2),
+                }
+            )
+        except Exception:
+            pass
+
+    return {
+        "total_usd": round(rt_total + sb_total, 2),
+        "rtstreams_usd": round(rt_total, 2),
+        "sandboxes_usd": round(sb_total, 2),
+        "details": details,
+        "note": (
+            "Upper-bound estimate from .state.json start timestamps to now. "
+            "Real usage shown by conn.check_usage() above. "
+            "Sandbox cost only counts the most-recent slot in state."
+        ),
+    }
+
+
+@app.get("/api/usage")
+def api_usage() -> dict:
+    """VideoDB check_usage + invoices + local back-of-napkin estimate (60s cache)."""
+    now = time.time()
+    if (now - _usage_cache["at"]) < _USAGE_TTL_S and _usage_cache["data"]:
+        return _usage_cache["data"]
+
+    import videodb
+
+    conn = videodb.connect()
+    out: dict[str, Any] = {"estimate": _estimate_credit_burn_usd()}
+    try:
+        out["usage"] = conn.check_usage()
+    except Exception as e:
+        out["usage_error"] = str(e)
+    try:
+        out["invoices"] = (conn.get_invoices() or [])[:10]
+    except Exception as e:
+        out["invoices_error"] = str(e)
+    _usage_cache.update({"at": now, "data": out})
+    return out
 
 
 @app.post("/api/search")
