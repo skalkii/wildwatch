@@ -14,6 +14,7 @@ Expose to VideoDB:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Annotated
 
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 # and other vars without requiring the operator to pre-export them.
 load_dotenv()
 
+from wildwatch import event_log  # noqa: E402
 from wildwatch.telegram import send_alert  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,26 @@ async def receive_alert(
     tier: Annotated[int, Path(ge=1, le=3, description="Alert tier 1=info, 2=notable, 3=urgent")],
     payload: AlertPayload,
 ) -> dict:
+    # Log the alert BEFORE attempting Telegram delivery so the digest
+    # builder still sees the event even if Telegram is down.
+    try:
+        event_log.append(
+            {
+                "received_at": time.time(),
+                "tier": tier,
+                "label": payload.label,
+                "event_id": payload.event_id,
+                "confidence": payload.confidence,
+                "explanation": payload.explanation,
+                "timestamp": payload.timestamp,
+                "start_time": payload.start_time,
+                "end_time": payload.end_time,
+                "stream_url": payload.stream_url,
+            }
+        )
+    except Exception:
+        logger.exception("event_log.append failed; alert will still attempt delivery")
+
     try:
         await send_alert(
             tier=tier,
