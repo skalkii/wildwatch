@@ -30,8 +30,9 @@ sys.path.insert(0, str(REPO_ROOT))
 import videodb  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from wildwatch.events import EVENT_DEFINITIONS, INDEX_EVENT_MAP  # noqa: E402
+from wildwatch.events import EVENT_DEFINITIONS  # noqa: E402
 from wildwatch.prompts import format_prompt  # noqa: E402
+from wildwatch.wiring import wire_alerts as _wire_alerts  # noqa: E402
 
 STATE_FILE = REPO_ROOT / ".state.json"
 
@@ -162,30 +163,20 @@ def bootstrap_stream(coll, stream_key, cfg, rtsp_url):
     return rt, indexes
 
 
-def wire_alerts(indexes, events_map, base_url, state, stream_key):
+def wire_alerts(rt, indexes, events_map, base_url, state, stream_key):
+    """Wire alerts via the shared helper; rt.id keys invalidation."""
     alert_state = state.setdefault("alerts", {}).setdefault(stream_key, {})
-    tier_by_id = {ev["id_var"]: ev["tier"] for ev in EVENT_DEFINITIONS}
-    label_by_id = {ev["id_var"]: ev["label"] for ev in EVENT_DEFINITIONS}
-    n_created = 0
-    for kind, event_id_vars in INDEX_EVENT_MAP.items():
-        idx = indexes[kind]
-        for ev_id_var in event_id_vars:
-            event_id = events_map[ev_id_var]
-            tier = tier_by_id[ev_id_var]
-            cb = f"{base_url}/webhook/{tier}"
-            key = f"{kind}.{ev_id_var}"
-            if alert_state.get(key):
-                continue
-            alert_id = idx.create_alert(event_id, callback_url=cb)
-            alert_state[key] = {
-                "alert_id": alert_id,
-                "event_id": event_id,
-                "label": label_by_id[ev_id_var],
-                "tier": tier,
-                "callback_url": cb,
-            }
-            n_created += 1
-    print(f"  alerts created: {n_created}")
+    res = _wire_alerts(
+        rtstream_id=rt.id,
+        indexes=indexes,
+        events_map=events_map,
+        base_url=base_url,
+        alert_state=alert_state,
+    )
+    print(
+        f"  alerts: created={res.created} reused={res.reused} "
+        f"replaced={res.replaced} (rtstream={rt.id})"
+    )
 
 
 def main() -> int:
@@ -230,7 +221,7 @@ def main() -> int:
                 "started_at": datetime.now(UTC).isoformat(),
             }
             _save_state(state)
-            wire_alerts(indexes, events_map, base_url, state, stream_key)
+            wire_alerts(rt, indexes, events_map, base_url, state, stream_key)
             _save_state(state)
             rtstreams.append(rt)
             print()
