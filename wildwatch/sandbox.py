@@ -3,8 +3,6 @@
 Single chokepoint for sandbox creation/teardown. Enforces the sandbox
 guide's critical rules:
 
-- ``idle_timeout=600`` always passed to ``create_sandbox`` so a forgotten
-  sandbox auto-stops in 10 minutes.
 - ``wait_for_ready`` always called before returning the sandbox to callers.
 - ``sandbox.is_active`` is asserted after wait — guide rule: "Only run jobs
   after ``sandbox.status == 'active'``".
@@ -12,6 +10,11 @@ guide's critical rules:
   active sandbox instead of leaking compute.
 - ``managed_sandbox`` context manager guarantees ``stop()`` runs even on
   exception, preventing overnight credit burn.
+
+KNOWN GAP: the hackathon-branch SDK's ``Connection.create_sandbox`` does
+NOT accept the ``idle_timeout`` kwarg shown in the sandbox guide. Until
+the SDK catches up, every caller MUST explicitly ``stop_sandbox`` (or use
+``managed_sandbox``). No safety net.
 """
 
 from __future__ import annotations
@@ -67,9 +70,13 @@ def _try_reuse(conn: Any, sandbox_id: str) -> Any | None:
 def ensure_sandbox(
     conn: Any,
     tier: Any,
-    idle_timeout: int = 600,
+    name: str | None = "wildwatch",
 ) -> Any:
-    """Return a ready, active sandbox. Reuses ``.state.json`` if possible."""
+    """Return a ready, active sandbox. Reuses ``.state.json`` if possible.
+
+    Note: ``create_sandbox`` does not accept ``idle_timeout`` on this SDK
+    branch; explicit ``stop_sandbox`` / ``managed_sandbox`` is required.
+    """
     state = _load_state()
     cached_id = state.get("sandbox", {}).get("id")
     if cached_id:
@@ -77,7 +84,7 @@ def ensure_sandbox(
         if reused is not None:
             return reused
 
-    sb = conn.create_sandbox(tier=tier, idle_timeout=idle_timeout)
+    sb = conn.create_sandbox(tier=tier, name=name)
     sb.wait_for_ready(timeout=300, interval=5)
     if not getattr(sb, "is_active", False):
         raise RuntimeError(
@@ -100,7 +107,7 @@ def stop_sandbox(conn: Any, sandbox_id: str) -> None:
 def managed_sandbox(
     conn: Any,
     tier: Any,
-    idle_timeout: int = 600,
+    name: str | None = "wildwatch",
 ) -> Iterator[Any]:
     """Context manager that auto-stops the sandbox on exit (including exceptions).
 
@@ -108,7 +115,7 @@ def managed_sandbox(
     The state file is intentionally left in place so callers see the last-used
     sandbox id even after teardown.
     """
-    sb = ensure_sandbox(conn, tier=tier, idle_timeout=idle_timeout)
+    sb = ensure_sandbox(conn, tier=tier, name=name)
     try:
         yield sb
     finally:

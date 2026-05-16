@@ -50,7 +50,9 @@ def test_ensure_sandbox_creates_new_and_waits(state_file: Path) -> None:
     conn.create_sandbox.assert_called_once()
     call_kwargs = conn.create_sandbox.call_args.kwargs
     assert call_kwargs.get("tier") == "medium"
-    assert call_kwargs.get("idle_timeout") == 600
+    # Hackathon-branch SDK does NOT accept idle_timeout; helper passes name only.
+    assert "idle_timeout" not in call_kwargs
+    assert call_kwargs.get("name") == "wildwatch"
     fake.wait_for_ready.assert_called_once_with(timeout=300, interval=5)
 
 
