@@ -16,7 +16,7 @@ corpus clips so the demo always has a reel to play.
 from __future__ import annotations
 
 import logging
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict, runtime_checkable
 
 from wildwatch import event_log
 
@@ -36,18 +36,35 @@ class DigestResult(TypedDict):
 
 
 class _DigestEventInput(TypedDict, total=False):
-    """Minimal shape `build_timeline` reads from each event dict.
+    """Minimal TypedDict for SYNTHETIC fallback event construction.
 
-    `total=False` marks both keys OPTIONAL (TypedDicts always tolerate
-    extra keys at runtime — that's a Python TypedDict semantic, not
-    something this declaration controls). Used at the synthetic fallback
-    site below to document which keys downstream actually consumes;
-    real event-log dicts carry many additional fields (event_id,
-    confidence, received_at, etc.) and flow through fine.
+    `total=False` marks both keys OPTIONAL. TypedDicts always tolerate
+    extra keys at runtime; static checkers also reject extras when typing
+    a variable against a TypedDict. Real event-log dicts carry many
+    additional fields and flow through `build_timeline` via the broader
+    `DigestEventLike` protocol below (which accepts any object with the
+    two attribute-style accessors we use). The TypedDict here exists
+    purely so the fallback `_DigestEventInput(tier=3, label="")` call
+    site is type-checked at construction.
     """
 
     tier: int
     label: str | None
+
+
+@runtime_checkable
+class DigestEventLike(Protocol):
+    """Structural type for inputs `build_timeline` reads via `.get`.
+
+    Protocol > TypedDict for the public API surface: TypedDicts reject
+    superset dicts at the type-check layer, but real event-log entries
+    carry many fields beyond tier+label. A Protocol expresses "any object
+    with these two readable attributes" without forcing a structural
+    subset. Marked `@runtime_checkable` only for completeness; we don't
+    isinstance-check it.
+    """
+
+    def get(self, key: str, default: Any = ...) -> Any: ...
 
 
 # Eager import of the editor surface so an import error surfaces at module

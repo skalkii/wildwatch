@@ -1048,7 +1048,11 @@ def _coerce_to_list(value: Any, *, source: str) -> list:
     )
     try:
         return list(value)
-    except Exception:
+    except Exception as exc:
+        # Log the underlying failure so a non-iterable SDK return doesn't
+        # look identical to a healthy "no results" — operators need to
+        # see the contract violation.
+        logger.warning("%s: coerce to list failed: %r — returning []", source, exc)
         return []
 
 
