@@ -22,6 +22,32 @@ from wildwatch import event_log
 
 logger = logging.getLogger(__name__)
 
+# Eager import of the editor surface so an import error surfaces at module
+# load (e.g. application startup) rather than when an operator triggers a
+# digest build mid-demo. Wrapped in try/except so test environments without
+# the full SDK can still import this module.
+try:
+    from videodb.editor import (  # type: ignore[import-not-found]
+        AudioAsset,
+        Background,
+        Clip,
+        Font,
+        TextAsset,
+        Timeline,
+        Track,
+        Transition,
+        VideoAsset,
+    )
+
+    _EDITOR_AVAILABLE = True
+except Exception as _editor_err:  # pragma: no cover — env-dependent
+    logger.warning(
+        "digest: videodb.editor import failed (%s); build_timeline will fail loudly", _editor_err
+    )
+    AudioAsset = Background = Clip = Font = TextAsset = None  # type: ignore[assignment]
+    Timeline = Track = Transition = VideoAsset = None  # type: ignore[assignment]
+    _EDITOR_AVAILABLE = False
+
 
 # Map tier -> ordered list of preferred corpus slugs to represent that tier.
 # First match wins, so populate with the strongest fit per tier.
@@ -96,17 +122,11 @@ def build_timeline(
     """
     if clip_seconds <= 0:
         raise ValueError(f"clip_seconds must be > 0, got {clip_seconds}")
-    from videodb.editor import (
-        AudioAsset,
-        Background,
-        Clip,
-        Font,
-        TextAsset,
-        Timeline,
-        Track,
-        Transition,
-        VideoAsset,
-    )
+    if not _EDITOR_AVAILABLE:
+        raise RuntimeError(
+            "videodb.editor unavailable — install videodb-python with editor extras "
+            "(this should have been caught at import time; see startup logs)."
+        )
 
     timeline = Timeline(conn)
     timeline.resolution = "1280x720"
@@ -202,8 +222,11 @@ def build_digest(
 
     if not picked:
         # Empty log: synthesise a demo montage from any corpus clips we have.
+        # Include explicit empty "label" so downstream consumers that read
+        # ev.get("label") see the expected key (rather than relying on
+        # `or ""` everywhere).
         logger.info("digest: event log empty; synthesising default montage")
-        picked = [{"tier": 3}, {"tier": 2}, {"tier": 1}]
+        picked = [{"tier": 3, "label": ""}, {"tier": 2, "label": ""}, {"tier": 1, "label": ""}]
 
     timeline, n_clips = build_timeline(
         picked,
@@ -230,7 +253,12 @@ def build_digest(
     try:
         pu = timeline.player_url
         player_url = pu() if callable(pu) else pu
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "digest: timeline.player_url failed (%s: %s); falling back to console URL",
+            type(e).__name__,
+            e,
+        )
         player_url = None
     if not player_url:
         from urllib.parse import quote
@@ -256,7 +284,10 @@ def build_digest(
         if hasattr(coll, "generate_text"):
             summary = coll.generate_text(prompt=prompt, model_name="basic")
     except Exception as e:
-        logger.info("digest: generate_text skipped (%s)", e)
+        # WARNING not INFO — a quota/auth failure on the LLM call should
+        # be visible at the same level as other SDK errors so it isn't
+        # confused with the legitimate "module not installed" skip.
+        logger.warning("digest: generate_text failed (%s: %s)", type(e).__name__, e)
 
     return {
         "n_events": len(events),

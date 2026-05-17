@@ -49,6 +49,14 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
                 # in CI). Log but proceed — the rename below is still
                 # crash-atomic at the kernel level.
                 logger.warning("atomic_write_json: fsync failed on %s: %r", tmp, e)
+        # Tighten perms BEFORE the rename so the published file is 0600
+        # from the moment it exists. .state.json contains the
+        # webhook_base_url which we use as a VideoDB alert callback — a
+        # local-user attacker who can read+write it can hijack alerts.
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError as e:
+            logger.warning("atomic_write_json: chmod 0600 failed on %s: %r", tmp, e)
         tmp.replace(path)
         # fsync the parent dir so the new dirent survives a crash.
         try:
@@ -66,6 +74,12 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:
-            pass  # cleanup failure must not mask original error
+        except Exception as cleanup_exc:
+            # Cleanup failure must not mask the original error, but log
+            # at DEBUG so a stale .state.json.tmp left on disk has SOME
+            # trace in the log rather than being totally invisible.
+            logger.debug(
+                "atomic_write_json: tmp cleanup failed (orig error still raised): %r",
+                cleanup_exc,
+            )
         raise

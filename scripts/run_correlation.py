@@ -97,10 +97,11 @@ def _post_correlation(base_url: str, hit, rt=None, window_s: int = 30) -> bool:
             stream_url = rt.generate_stream(start=start, end=end)
         except Exception as e:
             logger.warning(
-                "rt.generate_stream(%s, %s) failed for %s: %s",
+                "rt.generate_stream(%s, %s) failed for %s: %s: %s",
                 int(hit.fired_at - window_s),
                 int(hit.fired_at),
                 hit.rule_name,
+                type(e).__name__,
                 e,
             )
 

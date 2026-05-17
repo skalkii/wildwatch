@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from wildwatch.state_io import atomic_write_json
 
@@ -26,25 +27,31 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).resolve().parent.parent / ".state.json"
 
-KIND_VALUES: tuple[str, ...] = ("upload", "youtube", "hls", "rtsp", "rtmp")
-STATUS_VALUES: tuple[str, ...] = (
-    "queued",
-    "connecting",
-    "ingesting",
-    "indexing",
-    "ready",
-    "error",
-    "disconnected",
-)
+# Concurrent ingest tasks (reconnect + progress emit) can interleave a
+# load/update/save sequence on .state.json. Without this lock the second
+# writer's load happens AFTER the first's save → first's update is lost.
+# threading.Lock (not asyncio.Lock) because _load_state/_save_state do
+# blocking IO and can be called from sync route handlers AND from
+# ingest.py background tasks running on the asyncio thread.
+_STATE_LOCK = threading.Lock()
+
+SourceKind = Literal["upload", "youtube", "hls", "rtsp", "rtmp"]
+SourceStatus = Literal[
+    "queued", "connecting", "ingesting", "indexing", "ready", "error", "disconnected"
+]
+# Runtime tuples for validation (Pydantic/dataclass enforcement is overkill
+# for hackathon scope; we validate in add_source / update_source instead).
+KIND_VALUES: tuple[str, ...] = get_args(SourceKind)
+STATUS_VALUES: tuple[str, ...] = get_args(SourceStatus)
 
 
 @dataclass
 class Source:
     id: str
-    kind: str
+    kind: SourceKind
     input: str
     name: str
-    status: str = "queued"
+    status: SourceStatus = "queued"
     progress_pct: int | None = None
     stage_msg: str | None = None
     error: str | None = None
@@ -54,6 +61,28 @@ class Source:
     credit_estimate_usd: float | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+
+
+# Whitelist of fields update_source accepts. **fields was untyped which
+# let any caller corrupt arbitrary fields silently. This list is the
+# single source of truth — adding a field to Source requires adding it
+# here too, which is the right kind of friction.
+_UPDATABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "kind",
+        "input",
+        "name",
+        "status",
+        "progress_pct",
+        "stage_msg",
+        "error",
+        "video_id",
+        "rtstream_id",
+        "indexes",
+        "credit_estimate_usd",
+    }
+)
+_SOURCE_FIELD_NAMES: frozenset[str] = frozenset(f.name for f in fields(Source))
 
 
 # ──── state helpers ───────────────────────────────────────────────────────
@@ -78,7 +107,10 @@ def _sources_dict() -> dict[str, dict]:
 
 
 def _from_dict(d: dict) -> Source:
-    return Source(**d)
+    # Filter to known fields so a forward-migrated .state.json with extra
+    # keys (or a stale dict from an old version) doesn't crash with
+    # `TypeError: unexpected keyword argument`.
+    return Source(**{k: v for k, v in d.items() if k in _SOURCE_FIELD_NAMES})
 
 
 # ──── public API ──────────────────────────────────────────────────────────
@@ -89,34 +121,49 @@ def add_source(*, kind: str, input: str, name: str) -> Source:
         raise ValueError(f"invalid kind {kind!r}; must be one of {KIND_VALUES}")
     src = Source(
         id=str(uuid.uuid4()),
-        kind=kind,
+        kind=kind,  # type: ignore[arg-type]  -- validated above
         input=input,
         name=name,
     )
-    state = _load_state()
-    state.setdefault("sources", {})[src.id] = asdict(src)
-    _save_state(state)
+    with _STATE_LOCK:
+        state = _load_state()
+        state.setdefault("sources", {})[src.id] = asdict(src)
+        _save_state(state)
     return src
 
 
 def update_source(source_id: str, **fields: Any) -> Source:
-    state = _load_state()
-    sources = state.setdefault("sources", {})
-    if source_id not in sources:
-        raise KeyError(source_id)
+    # Whitelist enforcement: anything not in _UPDATABLE_FIELDS is silently
+    # rejected with a loud error — closes the type-design HIGH where
+    # `update_source(sid, indexes="oops")` could corrupt a typed field.
+    bad = set(fields) - _UPDATABLE_FIELDS
+    if bad:
+        raise ValueError(
+            f"update_source: unknown / non-updatable fields: {sorted(bad)}. "
+            f"Allowed: {sorted(_UPDATABLE_FIELDS)}"
+        )
     if "status" in fields and fields["status"] not in STATUS_VALUES:
         raise ValueError(f"invalid status {fields['status']!r}; must be one of {STATUS_VALUES}")
-    sources[source_id].update(fields)
-    sources[source_id]["updated_at"] = time.time()
-    _save_state(state)
-    return _from_dict(sources[source_id])
+    if "kind" in fields and fields["kind"] not in KIND_VALUES:
+        raise ValueError(f"invalid kind {fields['kind']!r}; must be one of {KIND_VALUES}")
+
+    with _STATE_LOCK:
+        state = _load_state()
+        sources = state.setdefault("sources", {})
+        if source_id not in sources:
+            raise KeyError(source_id)
+        sources[source_id].update(fields)
+        sources[source_id]["updated_at"] = time.time()
+        _save_state(state)
+        return _from_dict(sources[source_id])
 
 
 def delete_source(source_id: str) -> None:
-    state = _load_state()
-    sources = state.setdefault("sources", {})
-    sources.pop(source_id, None)
-    _save_state(state)
+    with _STATE_LOCK:
+        state = _load_state()
+        sources = state.setdefault("sources", {})
+        sources.pop(source_id, None)
+        _save_state(state)
 
 
 def get_source(source_id: str) -> Source | None:

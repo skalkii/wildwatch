@@ -106,9 +106,9 @@ def _read_ws_connection_id() -> str | None:
     channel (dual delivery: callback + ws). The listener writes the id to
     ``$VIDEODB_EVENTS_DIR/videodb_ws_id`` (default ``/tmp/videodb_ws_id``).
     """
-    import os as _os
+    import os
 
-    base = _os.environ.get("VIDEODB_EVENTS_DIR", "/tmp")
+    base = os.environ.get("VIDEODB_EVENTS_DIR", "/tmp")
     p = Path(base) / "videodb_ws_id"
     if not p.exists():
         return None
@@ -207,8 +207,10 @@ def _wire_alerts(
     )
     print(
         f"  alerts: created={res.created} reused={res.reused} "
-        f"replaced={res.replaced} (rtstream={rt.id})"
+        f"replaced={res.replaced} failed={res.failed} (rtstream={rt.id})"
     )
+    for kind, ev_id_var, err in res.failures:
+        print(f"    FAIL {kind}.{ev_id_var}: {err[:120]}")
 
 
 def main() -> int:
@@ -227,6 +229,18 @@ def main() -> int:
     base_url = state.get("webhook_base_url")
     if not base_url:
         sys.exit("ERROR: state.webhook_base_url unset; run T-25 first to set tunnel URL")
+    # Refuse plain-HTTP webhook URLs — VideoDB will POST alert callbacks
+    # cross-internet to whatever URL we register. http:// is sniffable +
+    # tamperable. The two exceptions are localhost / 127.0.0.1 for dev.
+    if not (
+        base_url.startswith("https://")
+        or base_url.startswith("http://localhost")
+        or base_url.startswith("http://127.0.0.1")
+    ):
+        sys.exit(
+            f"ERROR: webhook_base_url={base_url!r} must be https:// (or http://localhost). "
+            "Plain HTTP exposes the alert payload to MITM."
+        )
     print(f"webhook base = {base_url}\n")
 
     conn = videodb.connect()
@@ -254,6 +268,12 @@ def main() -> int:
     # connect_rtstream succeeded -- without this guard we'd leak ingest).
     stream_key = "fallback_intruder"
     rt = None
+    # Hoist `indexes` outside the try-block so a partial failure in the
+    # comprehension at line ~272 (e.g. `get_scene_index` raises on the third
+    # of four kinds) doesn't leave `indexes` unbound — which would have
+    # raised UnboundLocalError downstream at line ~289 instead of falling
+    # through to the fresh-provision path.
+    indexes: dict[str, object] = {}
     try:
         # Re-run idempotency: if state has an active rtstream for this key,
         # reconnect instead of provisioning a new one (avoids leaking the
@@ -264,17 +284,17 @@ def main() -> int:
                 existing = coll.get_rtstream(cached_rt)
                 if getattr(existing, "status", None) != "stopped":
                     print(f"[stream {stream_key}] reusing cached rtstream {cached_rt}")
-                    rt, indexes = (
-                        existing,
-                        {
-                            kind: existing.get_scene_index(idx_id)
-                            for kind, idx_id in state["rtstreams"][stream_key]
-                            .get("indexes", {})
-                            .items()
-                        },
-                    )
+                    # Build indexes dict explicitly so a mid-iteration raise
+                    # leaves indexes={} + rt=None and we drop to fresh-provision.
+                    rebuilt: dict[str, object] = {}
+                    for kind, idx_id in state["rtstreams"][stream_key].get("indexes", {}).items():
+                        rebuilt[kind] = existing.get_scene_index(idx_id)
+                    rt = existing
+                    indexes = rebuilt
             except Exception as e:
                 print(f"[stream {stream_key}] cached rtstream gone ({e}); will provision new")
+                rt = None  # ensure we fall through
+                indexes = {}
         if rt is None:
             rt, indexes = _bootstrap_stream(
                 coll, stream_key, FALLBACK_RTSP, FALLBACK_CONTEXT, ws_connection_id=ws_id

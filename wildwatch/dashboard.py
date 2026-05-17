@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -26,7 +26,11 @@ MAX_RECENT_EVENTS = 50
 
 _subscribers: list[asyncio.Queue] = []
 _tier_counts: dict[int, int] = defaultdict(int)
-_recent_events: list[dict] = []
+# deque(maxlen=N) does O(1) pop-on-overflow, vs list.pop(0) which shifts
+# the whole list. At MAX_RECENT_EVENTS=50 the perf difference is moot,
+# but the maxlen invariant also removes the manual `if len > MAX: pop(0)`
+# branch that future maintainers could miss.
+_recent_events: deque[dict] = deque(maxlen=MAX_RECENT_EVENTS)
 _total: int = 0
 _dropped_total: int = 0  # SSE events lost to QueueFull (slow subscriber)
 _started_at: float = time.time()
@@ -66,9 +70,17 @@ def broadcast(event: dict[str, Any]) -> None:
         _total += 1
         tier = int(event.get("tier", 0))
         _tier_counts[tier] += 1
+        # deque(maxlen=...) auto-trims oldest on overflow — no manual pop needed.
         _recent_events.append({**event, "received_at": event.get("received_at", time.time())})
-        if len(_recent_events) > MAX_RECENT_EVENTS:
-            _recent_events.pop(0)
+    else:
+        # Surface UI-signal pass-throughs at DEBUG so a future regression in
+        # this discriminator (e.g. a real alert that mistakenly carries a
+        # `type` field) is greppable in the log rather than silently lost.
+        logger.debug(
+            "dashboard.broadcast: ui-signal type=%s source_id=%s",
+            event.get("type"),
+            event.get("source_id"),
+        )
     # Fanout to subscribers (sync put_nowait so the webhook response path
     # never blocks on a slow SSE client). A full queue means the client
     # is too slow to drain — we drop the event but COUNT and LOG it so
@@ -695,10 +707,14 @@ function escapeHtml(s) {
 
 // Reject any non-http(s) / non-relative URL — blocks `javascript:` and `data:` URIs
 // that the SDK could theoretically return and that escapeHtml does NOT defang.
+// Also explicitly rejects protocol-relative `//evil.com` which would otherwise
+// pass the `startsWith('/')` branch and resolve to an attacker-controlled host
+// (open-redirect / phishing vector).
 function safeUrl(u) {
   if (u == null) return '';
   const s = String(u).trim();
   if (s === '') return '';
+  if (s.startsWith('//')) return '';  // protocol-relative → drop
   if (s.startsWith('/') || s.startsWith('#') || s.startsWith('?')) return s;
   if (/^https?:[/]{2}/i.test(s)) return s;
   return ''; // anything else (javascript:, data:, vbscript:, file:) → drop
@@ -1021,7 +1037,7 @@ async function showVideoDetail(videoId) {
         </tbody>
       </table>
       <div id="scenes-pane" class="mt-4 text-xs"></div>`;
-  } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${e}</span>`; }
+  } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
 async function showVideoScenes(videoId, indexId) {
@@ -1034,11 +1050,11 @@ async function showVideoScenes(videoId, indexId) {
     if (scenes.length === 0) { pane.innerHTML = '<span class="faint">no scenes yet</span>'; return; }
     pane.innerHTML = scenes.map(sc =>
       `<div class="card-soft p-2 mb-1.5" style="border-left:2px solid var(--accent)">
-        <div class="faint mono text-[10.5px]">${sc.start}&ndash;${sc.end}</div>
+        <div class="faint mono text-[10.5px]">${escapeHtml(String(sc.start ?? ''))}&ndash;${escapeHtml(String(sc.end ?? ''))}</div>
         <div class="mt-0.5">${escapeHtml((sc.description || sc.text || '').slice(0, 240))}</div>
       </div>`
     ).join('');
-  } catch (e) { pane.innerHTML = `<span style="color:#ef4444">error: ${e}</span>`; }
+  } catch (e) { pane.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
 // search
@@ -1064,10 +1080,10 @@ $('search-go').addEventListener('click', async () => {
     if (shots.length === 0) { $('search-results').innerHTML = '<span class="faint">no results</span>'; return; }
     $('search-results').innerHTML = `<div class="text-[11px] faint mb-1">${shots.length} shot(s) in <span class="muted">${escapeHtml(d.scope)}</span> scope</div>` +
       shots.map(sh => `<div class="card-soft p-2.5">
-        <div class="text-[11px] faint mono">${sh.start}&ndash;${sh.end} &middot; score=${sh.score?.toFixed?.(2) ?? '?'} &middot; idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id || '')}</div>
+        <div class="text-[11px] faint mono">${escapeHtml(String(sh.start ?? ''))}&ndash;${escapeHtml(String(sh.end ?? ''))} &middot; score=${sh.score?.toFixed?.(2) ?? '?'} &middot; idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id || '')}</div>
         <div class="text-sm mt-1">${escapeHtml((sh.text || '').slice(0, 300))}</div>
       </div>`).join('');
-  } catch (e) { $('search-results').innerHTML = `<span style="color:#ef4444">${e}</span>`; }
+  } catch (e) { $('search-results').innerHTML = `<span style="color:#ef4444">${escapeHtml(String(e))}</span>`; }
 });
 
 // ──── Usage tab ────

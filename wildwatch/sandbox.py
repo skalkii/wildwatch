@@ -131,6 +131,7 @@ def managed_sandbox(
     sandbox id even after teardown.
     """
     sb = ensure_sandbox(conn, tier=tier, name=name)
+    teardown_failed = False
     try:
         yield sb
     finally:
@@ -138,10 +139,23 @@ def managed_sandbox(
             sb.stop()
             sb.wait_for_stop(timeout=120)
         except Exception:
-            # Best-effort teardown; log loudly so a 3am credit-leak gets
-            # surfaced via the log instead of silent .state.json inspection.
-            logger.warning(
-                "managed_sandbox: stop failed for %s — sandbox may still be billing",
+            teardown_failed = True
+            # ERROR not WARNING — a sandbox that fails to stop is BILLING.
+            # WARNING is operator-skippable; this is real money leaking until
+            # someone wakes up. exc_info captures the SDK exception class so
+            # the next debug pass knows whether it was an auth, network, or
+            # state error.
+            logger.error(
+                "managed_sandbox: STOP FAILED for sandbox %s — STILL BILLING. "
+                "Tier=%s. Manually stop at https://console.videodb.io.",
                 getattr(sb, "id", "?"),
+                getattr(sb, "tier", "?"),
                 exc_info=True,
+            )
+        # Surface the failure to the caller so smoke scripts / bootstrap can
+        # fail loudly rather than swallowing a billing leak.
+        if teardown_failed:
+            raise RuntimeError(
+                f"managed_sandbox: stop failed for {getattr(sb, 'id', '?')} — "
+                "see logs; sandbox may still be billing."
             )

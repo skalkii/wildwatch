@@ -63,7 +63,11 @@ def test_list_videos_returns_summary(client: TestClient, mock_coll: MagicMock) -
 def test_list_videos_handles_sdk_error_gracefully(client: TestClient, mock_coll: MagicMock) -> None:
     mock_coll.get_videos = MagicMock(side_effect=RuntimeError("api down"))
     r = client.get("/api/videos")
-    assert r.status_code == 200  # gracefully degraded
+    # 502 (not 200): the dashboard now surfaces a degraded state as a
+    # visible error rather than an empty list that looks identical to
+    # "no videos uploaded yet." Body still carries the empty list + error
+    # for diagnostic display.
+    assert r.status_code == 502
     body = r.json()
     assert body["videos"] == []
     assert "error" in body

@@ -105,7 +105,10 @@ async def test_send_alert_raises_on_http_error() -> None:
     respx.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage").mock(
         return_value=httpx.Response(500, json={"ok": False})
     )
-    with pytest.raises(httpx.HTTPStatusError):
+    # send_alert now raises a sanitized RuntimeError instead of httpx's
+    # HTTPStatusError so the bot token in the request URL doesn't leak
+    # into log tracebacks.
+    with pytest.raises(RuntimeError, match=r"telegram send failed: HTTP 500"):
         await send_alert(tier=1, label="x", explanation=None, stream_url=None)
 
 

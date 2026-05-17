@@ -60,22 +60,25 @@ def test_create_rtsp_source_returns_201_shape(
 def test_create_upload_via_json_rejected_with_helpful_message(
     client: TestClient, state_file: Path, mock_coll: MagicMock
 ) -> None:
+    # SourceCreate.kind is now Literal["youtube","hls","rtsp","rtmp"] —
+    # "upload" is rejected at the Pydantic layer with 422 (not the old 400
+    # handler-side reject). Cleaner rejection, just earlier.
     r = client.post(
         "/api/sources",
         json={"kind": "upload", "input": "/tmp/x.mp4", "name": "x"},
     )
-    assert r.status_code == 400
-    assert "multipart" in r.json()["detail"].lower()
+    assert r.status_code == 422
 
 
 def test_create_invalid_kind_returns_400(
     client: TestClient, state_file: Path, mock_coll: MagicMock
 ) -> None:
+    # Same Pydantic-layer rejection for arbitrary unknown kinds.
     r = client.post(
         "/api/sources",
         json={"kind": "bogus", "input": "x", "name": "x"},
     )
-    assert r.status_code == 400
+    assert r.status_code == 422
 
 
 def test_get_source_404_when_missing(client: TestClient, state_file: Path) -> None:
@@ -207,7 +210,11 @@ def test_reconnect_source_resets_status_to_queued(
 def test_upload_multipart_creates_source_and_dispatches(
     client: TestClient, state_file: Path, mock_coll: MagicMock
 ) -> None:
-    fake_bytes = b"\x00" * (100 * 1024)  # 100 KB
+    # Upload endpoint now magic-byte sniffs the first 32 bytes and rejects
+    # non-video uploads as a security measure. Use a minimal real MP4
+    # `ftyp` header at offset 4 so the sniff accepts.
+    mp4_header = b"\x00\x00\x00\x20ftypmp42\x00\x00\x00\x00mp42isom"
+    fake_bytes = mp4_header + b"\x00" * (100 * 1024 - len(mp4_header))
     r = client.post(
         "/api/sources/upload",
         files={"file": ("test.mp4", fake_bytes, "video/mp4")},

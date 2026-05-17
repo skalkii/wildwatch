@@ -16,17 +16,25 @@ human-readable (``f"{kind}.{ev_id_var}"``) but each entry now records the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from wildwatch.events import EVENT_DEFINITIONS, INDEX_EVENT_MAP
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class WireResult:
-    created: int
-    reused: int
-    replaced: int
+    created: int = 0
+    reused: int = 0
+    replaced: int = 0
+    failed: int = 0
+    # (kind, event_id_var, exception_repr) for each create_alert that raised.
+    # Kept short — caller decides how to render. Without this, one bad
+    # event id would silently kill 17 downstream wirings with no record.
+    failures: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def wire_alerts(
@@ -56,7 +64,7 @@ def wire_alerts(
     tier_by_id = {ev["id_var"]: ev["tier"] for ev in EVENT_DEFINITIONS}
     label_by_id = {ev["id_var"]: ev["label"] for ev in EVENT_DEFINITIONS}
 
-    created = reused = replaced = 0
+    result = WireResult()
     for kind, event_id_vars in INDEX_EVENT_MAP.items():
         idx = indexes[kind]
         for ev_id_var in event_id_vars:
@@ -67,7 +75,7 @@ def wire_alerts(
 
             existing = alert_state.get(key)
             if existing is not None and existing.get("rtstream_id") == rtstream_id:
-                reused += 1
+                result.reused += 1
                 continue
 
             # Dual-delivery: forward ws_connection_id when available so the
@@ -76,7 +84,29 @@ def wire_alerts(
             create_kwargs: dict[str, Any] = {"callback_url": cb}
             if ws_connection_id:
                 create_kwargs["ws_connection_id"] = ws_connection_id
-            alert_id = idx.create_alert(event_id, **create_kwargs)
+
+            # Per-alert isolation: a single create_alert failure (transient
+            # SDK error, bad event_id, quota) used to abort every remaining
+            # alert for the stream because the exception propagated. Now
+            # each failure is logged + recorded + we keep going.
+            try:
+                alert_id = idx.create_alert(event_id, **create_kwargs)
+            except Exception as e:
+                result.failed += 1
+                result.failures.append((kind, ev_id_var, repr(e)))
+                logger.error(
+                    "wire_alerts: create_alert failed for kind=%s event=%s "
+                    "(label=%s tier=%s rtstream=%s): %s",
+                    kind,
+                    ev_id_var,
+                    label_by_id[ev_id_var],
+                    tier,
+                    rtstream_id,
+                    e,
+                    exc_info=True,
+                )
+                continue
+
             alert_state[key] = {
                 "alert_id": alert_id,
                 "rtstream_id": rtstream_id,
@@ -87,8 +117,8 @@ def wire_alerts(
                 "ws_connection_id": ws_connection_id,
             }
             if existing is None:
-                created += 1
+                result.created += 1
             else:
-                replaced += 1
+                result.replaced += 1
 
-    return WireResult(created=created, reused=reused, replaced=replaced)
+    return result

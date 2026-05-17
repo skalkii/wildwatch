@@ -95,7 +95,14 @@ async def send_alert(
                 "disable_web_page_preview": False,
             },
         )
-    resp.raise_for_status()
+    # Don't call resp.raise_for_status() — its HTTPStatusError stringifies
+    # the full request URL, which contains the bot token. When the
+    # exception propagates up to logger.exception(..., exc_info=True) in
+    # webhooks.py, that traceback writes the token into the log file.
+    # Instead, surface status_code + sanitized body in a RuntimeError.
+    if resp.status_code >= 400:
+        body = resp.text[:300] if resp.text else ""
+        raise RuntimeError(f"telegram send failed: HTTP {resp.status_code} body={body!r}")
     payload = resp.json()
     if not payload.get("ok"):
         raise RuntimeError(payload.get("description", "telegram send failed"))

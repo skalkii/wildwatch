@@ -118,22 +118,32 @@ async def test_dispatch_youtube_live_sets_error_when_no_bridge(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_broadcasts_progress_events(state_file: Path) -> None:
+async def test_dispatch_broadcasts_progress_events(
+    state_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     s = add_source(kind="upload", input="/tmp/x.mp4", name="x")
     coll = MagicMock()
     coll.upload = MagicMock(return_value=_make_video_mock("m-x"))
 
+    # source_progress dicts are UI signals (they carry a `type` key) and
+    # dashboard.broadcast now correctly filters them out of the alert log
+    # and tier counters. To verify ingest STILL emits them for the SSE
+    # channel, spy on broadcast directly rather than reading recent_events.
+    broadcast_calls: list[dict] = []
+
+    def _spy(event):
+        broadcast_calls.append(event)
+
+    monkeypatch.setattr(dashboard, "broadcast", _spy)
+
     await ingest.dispatch(s.id, coll=coll)
 
-    stats = dashboard.get_stats()
-    # At minimum a source_progress event with the right source_id should have
-    # landed in recent_events.
     matching = [
         e
-        for e in stats["recent_events"]
+        for e in broadcast_calls
         if e.get("type") == "source_progress" and e.get("source_id") == s.id
     ]
-    assert matching, f"no source_progress events broadcast; got: {stats['recent_events']}"
+    assert matching, f"no source_progress events broadcast; got: {broadcast_calls}"
     stages = {e.get("status") for e in matching}
     # Should have gone through at least 'connecting' and 'ready'
     assert "ready" in stages
@@ -285,16 +295,19 @@ async def test_dispatch_youtube_routes_to_upload_when_probe_unknown_with_warning
     coll = MagicMock()
     coll.upload = MagicMock(return_value=_make_video_mock("m-unk"))
 
+    # Spy on broadcast since source_progress is UI-signal, no longer
+    # mirrored into recent_events.
+    broadcast_calls: list[dict] = []
+    monkeypatch.setattr(dashboard, "broadcast", broadcast_calls.append)
+
     out = await ingest.dispatch(s.id, coll=coll)
 
     # Routed to upload like archive mode
     coll.upload.assert_called_once()
     assert out.video_id == "m-unk"
-    # but the warning must surface in dashboard broadcasts
-    stats = dashboard.get_stats()
     msgs = [
         e.get("stage_msg", "")
-        for e in stats["recent_events"]
+        for e in broadcast_calls
         if e.get("type") == "source_progress" and e.get("source_id") == s.id
     ]
     assert any("probe" in m.lower() for m in msgs), (

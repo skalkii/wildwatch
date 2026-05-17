@@ -45,7 +45,10 @@ def test_api_remote_caches_error_response_to_throttle_retries(client: TestClient
     with patch("videodb.connect", side_effect=_flaky_connect):
         r1 = client.get("/api/remote")
         r2 = client.get("/api/remote")
-    assert r1.status_code == 200
+    # 502 (not 200) — endpoint now surfaces SDK failures as a visible
+    # degraded state instead of pretending everything is fine. Error body
+    # still carries the diagnostic info + still cached to throttle retries.
+    assert r1.status_code == 502
     assert "error" in r1.json()
     assert "videodb down" in r1.json()["error"]
     # Second call within TTL must serve cached error, NOT re-hammer SDK
@@ -65,7 +68,8 @@ def test_api_list_videos_caches_error_response_to_throttle_retries(client: TestC
     with patch("videodb.connect", side_effect=_flaky_connect):
         r1 = client.get("/api/videos")
         r2 = client.get("/api/videos")
-    assert r1.status_code == 200
+    # 502 — same rationale as above.
+    assert r1.status_code == 502
     assert "error" in r1.json()
     assert call_counter["n"] == 1
     assert r2.json() == r1.json()
@@ -82,12 +86,23 @@ def test_api_usage_caches_top_level_connect_failure(client: TestClient) -> None:
 
     with patch("videodb.connect", side_effect=_flaky_connect):
         r1 = client.get("/api/usage")
+        # api_usage now calls _get_conn from THREE places (the local-burn
+        # estimator's list_rtstreams + sandbox probe + the outer
+        # check_usage path). Each will retry videodb.connect on first
+        # miss. We don't measure r1's count — we measure that r2 adds
+        # ZERO new calls because the /api/usage 60s cache served it.
+        calls_after_r1 = call_counter["n"]
         r2 = client.get("/api/usage")
     assert r1.status_code == 200
     body = r1.json()
     assert "usage_error" in body
     assert "auth expired" in body["usage_error"]
-    assert call_counter["n"] == 1
+    # The contract is: SDK call count does not grow on subsequent polls
+    # while the failure is still cached. That's what throttles the SDK
+    # during an outage.
+    assert call_counter["n"] == calls_after_r1, (
+        f"cache didn't throttle: r2 added {call_counter['n'] - calls_after_r1} more SDK calls"
+    )
     assert r2.json() == r1.json()
 
 

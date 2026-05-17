@@ -14,7 +14,20 @@ Tiers:
 
 from __future__ import annotations
 
-EVENT_DEFINITIONS: list[dict] = [
+from typing import Literal, TypedDict
+
+
+class EventDefinition(TypedDict):
+    """One row in EVENT_DEFINITIONS — typed so a typo in any literal becomes
+    a static error rather than a runtime KeyError at bootstrap time."""
+
+    id_var: str
+    label: str
+    tier: Literal[1, 2, 3]
+    prompt: str
+
+
+EVENT_DEFINITIONS: list[EventDefinition] = [
     # ──── Species index events ────
     {
         "id_var": "rare_species",
