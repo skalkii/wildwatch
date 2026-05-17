@@ -1468,8 +1468,10 @@ async function showVideoDetail(videoId) {
 
 async function reindexVideo(videoId) {
   const ok = await confirmToast(
-    'VideoDB will re-read every frame on this video. This costs credits and takes a few minutes.',
-    { title: 'Re-run scene indexing?', confirmLabel: 'Re-index', cancelLabel: 'Cancel' }
+    'VideoDB will re-read every frame + listen to the audio on this video. ' +
+    'Telegram alerts will re-fire for every event detected (gunshot, ' +
+    'alarm calls, rare species, etc.). Costs credits.',
+    { title: 'Re-run analysis + alerts?', confirmLabel: 'Re-index + alert', cancelLabel: 'Cancel' }
   );
   if (!ok) return;
   const progress = showToast(`Requesting fresh scene index for ${videoId.slice(0, 12)}…`, { variant: 'info', duration: 0 });
