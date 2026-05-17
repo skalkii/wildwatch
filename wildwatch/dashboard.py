@@ -548,10 +548,41 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- REAL VIDEODB BILLING (from check_usage) -->
+    <section id="usage-real" class="card p-5 mb-5 hidden">
+      <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+        <h3 class="text-sm font-semibold tracking-tight">Real VideoDB billing this period</h3>
+        <span id="usage-plan" class="text-[11px] faint mono"></span>
+      </div>
+      <p class="text-[12px] faint mb-3">Live numbers from <code class="mono">conn.check_usage()</code> — what VideoDB will actually charge.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit used this period</div>
+          <div id="usage-credit-used" class="text-xl font-bold mt-1 mono">$0.00</div>
+        </div>
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit balance</div>
+          <div id="usage-credit-balance" class="text-xl font-bold mt-1 mono">$0.00</div>
+          <div id="usage-credit-warn" class="text-[11px] mt-0.5 hidden" style="color:#ef4444">⚠ overdrawn — top up to continue</div>
+        </div>
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Top resource</div>
+          <div id="usage-top-resource" class="text-sm font-semibold mt-1">—</div>
+          <div id="usage-top-resource-amt" class="text-[11px] faint mono mt-0.5">$0.00</div>
+        </div>
+      </div>
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="text-[12px] font-semibold tracking-tight">Where the money went</h4>
+        <span id="usage-breakdown-count" class="text-[11px] faint">0 resources</span>
+      </div>
+      <p class="text-[11.5px] faint mb-2">Each row: <span class="muted">resource units &times; price per unit = cost</span>. Sorted biggest spend first.</p>
+      <div id="usage-breakdown" class="space-y-1.5"></div>
+    </section>
+
     <!-- HOW IT BREAKS DOWN -->
     <section class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold tracking-tight">What we're paying for right now</h3>
+        <h3 class="text-sm font-semibold tracking-tight">What we're paying for right now (local estimate)</h3>
         <span id="usage-detail-count" class="text-[11px] faint">no items</span>
       </div>
       <p class="text-[12px] faint mb-3 leading-relaxed">
@@ -1102,6 +1133,117 @@ function renderInvoices(invoices) {
   </table>`;
 }
 
+// Friendly labels + simple groupings for raw VideoDB cost_metric keys.
+const RESOURCE_LABELS = {
+  rtstream_compute: 'Live stream watching',
+  rtstream_storage: 'Live stream storage',
+  scene: 'Visual scene reads',
+  scene_index: 'Scene index',
+  spoken_index: 'Spoken-word index',
+  spoken_index_storage: 'Spoken-word storage',
+  sandbox_medium: 'AI brain (medium sandbox)',
+  sandbox_small: 'AI brain (small sandbox)',
+  search_query: 'Search queries',
+  llm_basic: 'LLM (basic)',
+  llm_pro: 'LLM (pro)',
+  llm_ultra: 'LLM (ultra)',
+  llm_custom: 'LLM (custom)',
+  llm: 'LLM (legacy)',
+  file_upload: 'File uploads',
+  media_storage: 'Media storage',
+  streaming: 'HLS streaming',
+  simple_stream: 'Simple stream',
+  programmable_stream: 'Programmable stream (digest reels)',
+  timeline_inline: 'Timeline inline (digest)',
+  timeline_overlay: 'Timeline overlay (digest)',
+  transcription: 'Transcription',
+  translation: 'Translation',
+  dubbing: 'Dubbing',
+  music_generation: 'Generated music',
+  voice_generation: 'Generated voice',
+  image_generation: 'Generated images',
+  video_generation: 'Generated video',
+  generate_audio_url: 'Audio URL generation',
+  generate_image_url: 'Image URL generation',
+  meeting_recording: 'Meeting recording',
+  transcoding: 'Transcoding',
+  youtube_search: 'YouTube search',
+};
+
+function renderRealBilling(usage) {
+  const wrap = $('usage-real');
+  if (!usage || typeof usage !== 'object' || !usage.cost_metric) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  wrap.classList.remove('hidden');
+
+  const used = Number(usage.credit_used) || 0;
+  const balance = Number(usage.credit_balance) || 0;
+  $('usage-credit-used').textContent = formatCurrency(used);
+  const balEl = $('usage-credit-balance');
+  balEl.textContent = formatCurrency(balance);
+  balEl.style.color = balance < 0 ? '#ef4444' : (balance < 5 ? '#f59e0b' : 'var(--text)');
+  $('usage-credit-warn').classList.toggle('hidden', balance >= 0);
+  $('usage-plan').textContent = usage.plan_id ? `plan: ${usage.plan_id}` : '';
+
+  // Compute per-resource $: units (usage[key]) * price (cost_metric[key]).
+  const priceCard = usage.cost_metric || {};
+  const rows = [];
+  for (const key of Object.keys(priceCard)) {
+    const price = Number(priceCard[key]);
+    const units = Number(usage[key]);
+    if (!isFinite(price) || !isFinite(units) || units <= 0) continue;
+    const cost = price * units;
+    if (cost < 0.0001) continue; // hide rounding-floor noise
+    rows.push({ key, label: RESOURCE_LABELS[key] || key.replace(/_/g, ' '), units, price, cost });
+  }
+  rows.sort((a, b) => b.cost - a.cost);
+
+  $('usage-breakdown-count').textContent = `${rows.length} resource${rows.length===1?'':'s'} charged`;
+
+  if (rows.length === 0) {
+    $('usage-breakdown').innerHTML = '<div class="faint text-sm">No billable activity yet this period.</div>';
+    $('usage-top-resource').textContent = '—';
+    $('usage-top-resource-amt').textContent = formatCurrency(0);
+    return;
+  }
+
+  $('usage-top-resource').textContent = rows[0].label;
+  $('usage-top-resource-amt').textContent = formatCurrency(rows[0].cost);
+
+  // Cost rows with proportional bar (relative to top spender) for at-a-glance.
+  const topCost = rows[0].cost;
+  // Format units intelligently — large counts get k/M, small price-per-unit
+  // gets enough precision to be readable.
+  const fmtUnits = (n) => {
+    if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+    if (n >= 1000)    return (n/1000).toFixed(1) + 'k';
+    if (n >= 10)      return n.toFixed(0);
+    if (n >= 1)       return n.toFixed(2);
+    return n.toFixed(3);
+  };
+  const fmtPrice = (n) => {
+    if (n >= 1) return '$' + n.toFixed(2);
+    if (n >= 0.01) return '$' + n.toFixed(3);
+    return '$' + n.toFixed(4);
+  };
+
+  $('usage-breakdown').innerHTML = rows.map((r) => {
+    const pct = Math.max(2, Math.round((r.cost / topCost) * 100));
+    return `<div class="card-soft p-2.5">
+      <div class="flex items-baseline justify-between gap-3">
+        <div class="text-sm font-medium truncate" title="${escapeHtml(r.key)}">${escapeHtml(r.label)}</div>
+        <div class="text-sm font-semibold mono shrink-0">${formatCurrency(r.cost)}</div>
+      </div>
+      <div class="mt-1.5 h-1.5 rounded-full overflow-hidden" style="background:color-mix(in oklab,var(--accent) 12%,transparent)">
+        <div class="h-full rounded-full" style="width:${pct}%; background:var(--accent)"></div>
+      </div>
+      <div class="text-[10.5px] faint mono mt-1">${fmtUnits(r.units)} units &times; ${fmtPrice(r.price)}/unit</div>
+    </div>`;
+  }).join('');
+}
+
 async function fetchUsage() {
   try {
     const r = await fetch('/api/usage');
@@ -1141,6 +1283,9 @@ async function fetchUsage() {
     } else {
       wrap.innerHTML = details.map(renderUsageRow).join('');
     }
+
+    // Real VideoDB billing (from check_usage): credit balance + per-resource breakdown.
+    renderRealBilling(d.usage);
 
     // Invoices: pretty table + raw JSON
     const invoices = Array.isArray(d.invoices) ? d.invoices : [];
