@@ -76,10 +76,25 @@ EVENTS_FILE: Path = OUTPUT_DIR / "videodb_events.jsonl"
 WS_ID_FILE: Path = OUTPUT_DIR / "videodb_ws_id"
 PID_FILE: Path = OUTPUT_DIR / "videodb_ws_pid"
 
+_ARGV_INITIALISED: bool = False
+
 
 def _init_from_argv() -> None:
-    """Parse argv, load .env, recompute paths. Only called from main()."""
+    """Parse argv, load .env, recompute paths. Only called from main().
+
+    Idempotent — once initialised, subsequent calls are no-ops. Two
+    concerns this guards against:
+      1. A test that imports ws_listener, sets up its own argv via
+         monkeypatch, then calls main() multiple times shouldn't
+         re-parse and shift the paths on each call.
+      2. If `main()` is invoked twice in the same process, the second
+         call's argv reading would pick up pytest's own positional
+         args (or a stale argv) and silently relocate the output dir.
+    """
+    global _ARGV_INITIALISED
     global CLEAR_EVENTS, OUTPUT_DIR, USER_CWD, EVENTS_FILE, WS_ID_FILE, PID_FILE
+    if _ARGV_INITIALISED:
+        return
     CLEAR_EVENTS, OUTPUT_DIR, USER_CWD = parse_args()
     if USER_CWD:
         load_dotenv(Path(USER_CWD) / ".env")
@@ -88,6 +103,7 @@ def _init_from_argv() -> None:
     EVENTS_FILE = OUTPUT_DIR / "videodb_events.jsonl"
     WS_ID_FILE = OUTPUT_DIR / "videodb_ws_id"
     PID_FILE = OUTPUT_DIR / "videodb_ws_pid"
+    _ARGV_INITIALISED = True
 
 
 # NOTE: `import videodb` is intentionally deferred to inside
