@@ -416,8 +416,9 @@ async def api_remote() -> JSONResponse:
             return JSONResponse(_remote_cache["data"])
     try:
         coll = await asyncio.to_thread(_get_coll)
+        conn = await asyncio.to_thread(_get_conn)
         rts = await _async_sdk(coll.list_rtstreams, timeout_s=5.0) or []
-        sbs = await _async_sdk(_get_conn().list_sandboxes, timeout_s=5.0) or []
+        sbs = await _async_sdk(conn.list_sandboxes, timeout_s=5.0) or []
         rtstreams = [
             {"id": rt.id, "name": getattr(rt, "name", "?"), "status": getattr(rt, "status", "?")}
             for rt in rts
