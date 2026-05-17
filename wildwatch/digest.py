@@ -40,13 +40,50 @@ class DigestResult(TypedDict):
 # digest build mid-demo. Wrapped in try/except so test environments without
 # the full SDK can still import this module.
 #
-# Pre-bind every editor name to None BEFORE attempting the import. The
-# `from ... import (...)` statement is not atomic — if it fails midway,
-# Python leaves any earlier names bound (or not, depending on Python
-# version + import order). Pre-binding ensures the module namespace is
-# consistent with `_EDITOR_AVAILABLE` regardless of which name failed.
-AudioAsset = Background = Clip = Font = TextAsset = None  # type: ignore[assignment]
-Timeline = Track = Transition = VideoAsset = None  # type: ignore[assignment]
+# Pre-bind every editor name to a guard sentinel BEFORE attempting the
+# import. The `from ... import (...)` statement is not atomic — if it
+# fails midway, Python leaves earlier names bound. Pre-binding to a
+# callable sentinel ensures `from wildwatch.digest import Clip; Clip(...)`
+# fails LOUDLY with a clear ImportError message rather than the silent
+# `TypeError: 'NoneType' object is not callable` that bare None produced.
+
+
+class _EditorUnavailable:
+    """Callable sentinel placeholder for editor names when SDK import fails.
+
+    Any attempt to call or instantiate raises ImportError with a clear
+    message pointing at the missing dependency. Attribute access also
+    surfaces the same error so `Clip.add_clip(...)` doesn't silently
+    return a Mock.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __call__(self, *_a: Any, **_kw: Any) -> Any:
+        raise ImportError(
+            f"videodb.editor.{self._name} is unavailable. Install videodb-python "
+            "with editor extras (`pip install -e .[dev]` should pull it). "
+            "build_timeline will fail; check startup logs for the underlying "
+            "import error."
+        )
+
+    def __getattr__(self, attr: str) -> Any:  # pragma: no cover — diagnostic
+        raise ImportError(
+            f"videodb.editor.{self._name}.{attr} access requested but the editor "
+            "import failed at startup. See logger.warning above."
+        )
+
+
+AudioAsset = _EditorUnavailable("AudioAsset")  # type: ignore[assignment]
+Background = _EditorUnavailable("Background")  # type: ignore[assignment]
+Clip = _EditorUnavailable("Clip")  # type: ignore[assignment]
+Font = _EditorUnavailable("Font")  # type: ignore[assignment]
+TextAsset = _EditorUnavailable("TextAsset")  # type: ignore[assignment]
+Timeline = _EditorUnavailable("Timeline")  # type: ignore[assignment]
+Track = _EditorUnavailable("Track")  # type: ignore[assignment]
+Transition = _EditorUnavailable("Transition")  # type: ignore[assignment]
+VideoAsset = _EditorUnavailable("VideoAsset")  # type: ignore[assignment]
 _EDITOR_AVAILABLE = False
 
 try:
