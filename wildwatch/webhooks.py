@@ -80,6 +80,11 @@ def _normalize_ip(raw: str) -> str:
     port suffix on `[::1]:1`, `[::1]:2` … to mint 65k distinct bucket
     keys from one host, defeating the per-IP limit. Returns "" for
     empty / unparsable input.
+
+    Also defends against malformed bracket forms (`[::1`, no closing
+    `]`) and multi-colon IPv4-with-suffix (`192.0.2.1:80:foo`) — both
+    would otherwise pass through unnormalized and let an attacker mint
+    distinct bucket keys from a single host by varying the suffix.
     """
     raw = raw.strip()
     if not raw:
@@ -87,12 +92,35 @@ def _normalize_ip(raw: str) -> str:
     m = _IPV6_BRACKET_RE.match(raw)
     if m:
         return m.group(1).strip()
-    # Strip a single trailing :port for plain IPv4 (ignore IPv6 — the
-    # bracket form above catches the port; bare IPv6 has many colons
-    # and we don't want to truncate them).
+    # Bracket present but missing closing `]` — strip what we can rather
+    # than letting the raw malformed string be used as a fresh key.
+    if raw.startswith("["):
+        rest = raw[1:]
+        # If there's a stray `]` further on, treat up to it as the addr.
+        if "]" in rest:
+            return rest.split("]", 1)[0].strip()
+        # Bare `[::1` etc. — drop the bracket entirely.
+        return rest.strip().split(":")[0] if rest.count(":") > 2 else rest.strip()
+    # Strip a single trailing :port for plain IPv4 (one colon).
     if raw.count(":") == 1:
         return raw.split(":", 1)[0].strip()
+    # Multi-colon non-IPv6 (e.g. `192.0.2.1:80:foo`) — reject as
+    # malformed by returning the same fallback the empty-input path uses.
+    if raw.count(":") > 1 and not _looks_like_bare_ipv6(raw):
+        return ""
     return raw
+
+
+def _looks_like_bare_ipv6(raw: str) -> bool:
+    """Heuristic: bare IPv6 is hex chars + colons, no other punctuation.
+
+    Used by _normalize_ip to distinguish a legitimate bare IPv6 address
+    (`2001:db8::1`) from an attacker-malformed multi-colon string
+    (`192.0.2.1:80:foo`). Not a full IPv6 parser — we just check that
+    every char is hex or `:`. Anything with letters beyond a-f or
+    other punctuation fails.
+    """
+    return all(c in "0123456789abcdefABCDEF:" for c in raw)
 
 
 def _client_ip_from(request: Request) -> str:
@@ -146,11 +174,14 @@ def _upload_rate_limit_check(client_ip: str) -> bool:
             _evict_overflow_locked()
             return False
         new_tokens = tokens - 1.0
-        # An IP that's at full capacity after refill has no state worth
-        # remembering; dropping the entry on a request that brings the
-        # bucket back to full means an idle attacker's spoofed key gets
-        # GC'd within (capacity - 1) requests.
-        if new_tokens >= _UPLOAD_BUCKET_CAPACITY - 0.001:
+        # An IP whose bucket was AT CAPACITY before this request consumed
+        # one token (i.e. fully idle long enough to refill) is worth
+        # GC'ing — its state is the default and re-inserting it on every
+        # request just pollutes the dict. Check the PRE-consume `tokens`
+        # value, not the post-consume `new_tokens`. (Previous condition
+        # `new_tokens >= capacity - 0.001` was unreachable arithmetic — a
+        # full bucket minus 1.0 can never satisfy that.)
+        if tokens >= float(_UPLOAD_BUCKET_CAPACITY) - 0.001:
             _upload_buckets.pop(client_ip, None)
         else:
             _upload_buckets[client_ip] = (new_tokens, now)
@@ -361,7 +392,6 @@ async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
             )
         _sdk_in_flight += 1
 
-    loop = asyncio.get_running_loop()
     call = functools.partial(fn, *args, **kwargs)
     # Submit to the SDK executor directly and wrap the concurrent.futures
     # Future for asyncio. This split is important: `cf_fut` resolves when
@@ -372,7 +402,10 @@ async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
     # immediately on cancel, so `_release_in_flight_slot` ran before the
     # worker released its slot, leaking the saturation counter.
     cf_fut = _get_executor().submit(call)
-    aio_fut = asyncio.wrap_future(cf_fut, loop=loop)
+    # asyncio.wrap_future's `loop` kwarg is deprecated since 3.10 and
+    # removed in 3.14. Inside a coroutine the function resolves the
+    # running loop automatically.
+    aio_fut = asyncio.wrap_future(cf_fut)
     slot_deferred = False  # True means worker may still be pinned; defer release
     try:
         return await asyncio.wait_for(aio_fut, timeout=timeout_s)
