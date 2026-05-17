@@ -2124,22 +2124,30 @@ function _openClipPlayer(streamUrl, title) {
 }
 
 // ──── Daily-summary modal ────
-// Large in-app popup: hero stats, narration, in-modal HLS player,
-// and 4 visually-distinct charts (hourly bar, species donut, top-
-// labels horizontal bar, category donut). Claude-ish dark scheme,
-// monospace numbers, accent-orange for highlights.
-const _CLAUDE = {
-  bg:      '#1c1816',   // warm near-black background
-  surface: '#2a2421',   // raised card
-  border:  '#3a322d',
-  text:    '#f5efe8',
-  muted:   '#a39a8f',
-  accent:  '#cc785c',   // signature Claude amber
-  t1:      '#38bdf8',   // info — matches existing tier palette
-  t2:      '#f59e0b',   // notable
-  t3:      '#ef4444',   // urgent
-};
+// Large in-app popup. Pulls CSS vars from the project theme so it
+// switches with the dashboard's light/dark toggle. Layout (per
+// product spec): KPI strip → charts grid → reel player → transcript.
 const _DIGEST_CHARTS = [];
+
+function _digestTheme() {
+  // Read computed values off :root so light/dark applies without
+  // duplicating the palette here. Tier colours are fixed (the rest
+  // of the dashboard hard-codes them too — they're severity, not
+  // chrome).
+  const cs = getComputedStyle(document.documentElement);
+  return {
+    bg:      cs.getPropertyValue('--bg').trim()         || '#0e1715',
+    surface: cs.getPropertyValue('--bg-elev').trim()    || '#131e1c',
+    soft:    cs.getPropertyValue('--bg-soft').trim()    || '#1a2522',
+    border:  cs.getPropertyValue('--border').trim()     || '#1f2a27',
+    text:    cs.getPropertyValue('--text').trim()       || '#e6edeb',
+    muted:   cs.getPropertyValue('--text-muted').trim() || '#9aa9a4',
+    accent:  cs.getPropertyValue('--accent').trim()     || '#34d399',
+    t1:      '#38bdf8',
+    t2:      '#f59e0b',
+    t3:      '#ef4444',
+  };
+}
 
 function _destroyDigestCharts() {
   while (_DIGEST_CHARTS.length) {
@@ -2148,18 +2156,18 @@ function _destroyDigestCharts() {
   }
 }
 
-function _kpi(label, value, color) {
-  return `<div style="background:${_CLAUDE.surface}; border:1px solid ${_CLAUDE.border}; border-radius:10px; padding:14px 16px;">
-    <div style="font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:${_CLAUDE.muted};">${escapeHtml(label)}</div>
-    <div class="mono" style="font-size:28px; font-weight:600; color:${color || _CLAUDE.text}; margin-top:4px; line-height:1;">${escapeHtml(String(value))}</div>
+function _kpi(theme, label, value, color) {
+  return `<div style="background:${theme.surface}; border:1px solid ${theme.border}; border-radius:10px; padding:14px 16px;">
+    <div style="font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:${theme.muted};">${escapeHtml(label)}</div>
+    <div class="mono" style="font-size:28px; font-weight:600; color:${color || theme.text}; margin-top:4px; line-height:1;">${escapeHtml(String(value))}</div>
   </div>`;
 }
 
-function _chartPanel(title, canvasId, hint) {
-  return `<div style="background:${_CLAUDE.surface}; border:1px solid ${_CLAUDE.border}; border-radius:12px; padding:14px;">
+function _chartPanel(theme, title, canvasId, hint) {
+  return `<div style="background:${theme.surface}; border:1px solid ${theme.border}; border-radius:12px; padding:14px;">
     <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px;">
-      <div style="font-size:13px; font-weight:600; color:${_CLAUDE.text};">${escapeHtml(title)}</div>
-      ${hint ? `<div style="font-size:10.5px; color:${_CLAUDE.muted};">${escapeHtml(hint)}</div>` : ''}
+      <div style="font-size:13px; font-weight:600; color:${theme.text};">${escapeHtml(title)}</div>
+      ${hint ? `<div style="font-size:10.5px; color:${theme.muted};">${escapeHtml(hint)}</div>` : ''}
     </div>
     <div style="height:200px;"><canvas id="${canvasId}"></canvas></div>
   </div>`;
@@ -2167,42 +2175,49 @@ function _chartPanel(title, canvasId, hint) {
 
 function _openDigestModal(d) {
   _destroyDigestCharts();
+  const theme = _digestTheme();
   const a = d.analytics || { tier_counts: { 1: 0, 2: 0, 3: 0 }, total: 0, top_labels: [], species: [], hourly: Array(24).fill(0), categories: {} };
   const tc = a.tier_counts || { 1: 0, 2: 0, 3: 0 };
   const overlay = document.createElement('div');
-  overlay.style.cssText = `position:fixed; inset:0; background:rgba(10,8,6,0.85); backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center; z-index:10000; padding:1.5rem;`;
+  overlay.style.cssText = `position:fixed; inset:0; background:rgba(0,0,0,0.6); backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center; z-index:10000; padding:1.5rem;`;
   const card = document.createElement('div');
-  card.style.cssText = `background:${_CLAUDE.bg}; color:${_CLAUDE.text}; border:1px solid ${_CLAUDE.border}; border-radius:16px; max-width:min(1180px, 96vw); width:100%; max-height:94vh; overflow-y:auto; padding:0; box-shadow:0 30px 80px rgba(0,0,0,0.5);`;
+  card.style.cssText = `background:${theme.bg}; color:${theme.text}; border:1px solid ${theme.border}; border-radius:16px; max-width:min(1180px, 96vw); width:100%; max-height:94vh; overflow-y:auto; padding:0; box-shadow:0 30px 80px rgba(0,0,0,0.5);`;
   const reelBlock = d.stream_url
     ? `<div style="position:relative; background:#000; border-radius:12px; overflow:hidden;">
          <video id="digest-reel-video" controls autoplay playsinline style="width:100%; max-height:60vh; background:#000; display:block;"></video>
        </div>`
-    : `<div style="background:${_CLAUDE.surface}; border:1px dashed ${_CLAUDE.border}; border-radius:12px; padding:32px; text-align:center; color:${_CLAUDE.muted};">No reel — event log empty or no usable corpus clips. Trigger some alerts (upload a sample video) and try again.</div>`;
+    : `<div style="background:${theme.surface}; border:1px dashed ${theme.border}; border-radius:12px; padding:32px; text-align:center; color:${theme.muted};">No reel — event log empty or no usable corpus clips. Trigger some alerts (upload a sample video) and try again.</div>`;
   card.innerHTML = `
-    <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 22px; border-bottom:1px solid ${_CLAUDE.border};">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 22px; border-bottom:1px solid ${theme.border};">
       <div>
-        <div style="font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:${_CLAUDE.accent};">WildWatch · Daily summary</div>
+        <div style="font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:${theme.accent};">WildWatch · Daily summary</div>
         <div style="font-size:20px; font-weight:600; margin-top:2px;">Last 24 hours · ${a.total || 0} events captured</div>
       </div>
-      <button data-act="close" aria-label="close" style="background:transparent; border:1px solid ${_CLAUDE.border}; color:${_CLAUDE.muted}; border-radius:8px; padding:6px 10px; cursor:pointer; font-size:12px;">esc · close</button>
+      <button data-act="close" aria-label="close" style="background:transparent; border:1px solid ${theme.border}; color:${theme.muted}; border-radius:8px; padding:6px 10px; cursor:pointer; font-size:12px;">esc · close</button>
     </div>
     <div style="padding:20px 22px 26px 22px;">
+      <!-- 1. KPI strip -->
       <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:18px;">
-        ${_kpi('Total events', a.total || 0, _CLAUDE.text)}
-        ${_kpi('Info · tier 1', tc[1] || 0, _CLAUDE.t1)}
-        ${_kpi('Notable · tier 2', tc[2] || 0, _CLAUDE.t2)}
-        ${_kpi('Urgent · tier 3', tc[3] || 0, _CLAUDE.t3)}
+        ${_kpi(theme, 'Total events', a.total || 0, theme.text)}
+        ${_kpi(theme, 'Info · tier 1', tc[1] || 0, theme.t1)}
+        ${_kpi(theme, 'Notable · tier 2', tc[2] || 0, theme.t2)}
+        ${_kpi(theme, 'Urgent · tier 3', tc[3] || 0, theme.t3)}
       </div>
-      ${d.summary ? `<div style="background:${_CLAUDE.surface}; border-left:3px solid ${_CLAUDE.accent}; border-radius:8px; padding:14px 18px; margin-bottom:18px; font-size:14px; line-height:1.65; color:${_CLAUDE.text};">${escapeHtml(d.summary)}</div>` : ''}
-      <div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:18px;">
-        <div>${reelBlock}</div>
-        <div>${_chartPanel('Hourly activity', 'digest-chart-hourly', '24h, local time')}</div>
+      <!-- 2. Charts grid -->
+      <div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:16px;">
+        ${_chartPanel(theme, 'Hourly activity', 'digest-chart-hourly', '24h, local time')}
+        ${_chartPanel(theme, 'Top species seen', 'digest-chart-species', 'parsed from explanations')}
       </div>
-      <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;">
-        ${_chartPanel('Top species seen', 'digest-chart-species', 'parsed from explanations')}
-        ${_chartPanel('Event mix by type', 'digest-chart-cats', 'overlapping categories')}
-        ${_chartPanel('What fired most', 'digest-chart-labels', 'top labels by count')}
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:22px;">
+        ${_chartPanel(theme, 'Event mix by type', 'digest-chart-cats', 'overlapping categories')}
+        ${_chartPanel(theme, 'What fired most', 'digest-chart-labels', 'top labels by count')}
       </div>
+      <!-- 3. Reel player -->
+      <div style="margin-bottom:18px;">${reelBlock}</div>
+      <!-- 4. Transcript -->
+      ${d.summary ? `<div style="background:${theme.surface}; border-left:3px solid ${theme.accent}; border-radius:8px; padding:14px 18px; font-size:14px; line-height:1.65; color:${theme.text};">
+        <div style="font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:${theme.muted}; margin-bottom:8px;">Transcript</div>
+        ${escapeHtml(d.summary)}</div>` : ''}
     </div>`;
   overlay.appendChild(card);
   document.body.appendChild(overlay);
@@ -2236,12 +2251,12 @@ function _openDigestModal(d) {
   const baseOpts = {
     responsive: true, maintainAspectRatio: false,
     plugins: {
-      legend: { labels: { color: _CLAUDE.muted, font: { size: 11 } } },
-      tooltip: { backgroundColor: _CLAUDE.surface, borderColor: _CLAUDE.border, borderWidth: 1 },
+      legend: { labels: { color: theme.muted, font: { size: 11 } } },
+      tooltip: { backgroundColor: theme.surface, borderColor: theme.border, borderWidth: 1 },
     },
     scales: {
-      x: { ticks: { color: _CLAUDE.muted, font: { size: 10 } }, grid: { color: _CLAUDE.border } },
-      y: { ticks: { color: _CLAUDE.muted, font: { size: 10 } }, grid: { color: _CLAUDE.border }, beginAtZero: true },
+      x: { ticks: { color: theme.muted, font: { size: 10 } }, grid: { color: theme.border } },
+      y: { ticks: { color: theme.muted, font: { size: 10 } }, grid: { color: theme.border }, beginAtZero: true },
     },
   };
   // 1. Hourly bar.
@@ -2251,7 +2266,7 @@ function _openDigestModal(d) {
       type: 'bar',
       data: {
         labels: Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2,'0')}h`),
-        datasets: [{ data: a.hourly || [], backgroundColor: _CLAUDE.accent, borderRadius: 3 }],
+        datasets: [{ data: a.hourly || [], backgroundColor: theme.accent, borderRadius: 3 }],
       },
       options: { ...baseOpts, plugins: { ...baseOpts.plugins, legend: { display: false } } },
     }));
@@ -2265,12 +2280,12 @@ function _openDigestModal(d) {
       type: 'doughnut',
       data: {
         labels: sp.map(([k]) => k),
-        datasets: [{ data: sp.map(([, v]) => v), backgroundColor: palette.slice(0, sp.length), borderColor: _CLAUDE.surface, borderWidth: 2 }],
+        datasets: [{ data: sp.map(([, v]) => v), backgroundColor: palette.slice(0, sp.length), borderColor: theme.surface, borderWidth: 2 }],
       },
       options: { ...baseOpts, scales: undefined, cutout: '58%' },
     }));
   } else if (speciesCanvas) {
-    speciesCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No species mentions parsed yet — alerts need explanation text.</div>`;
+    speciesCanvas.parentElement.innerHTML = `<div style="color:${theme.muted}; font-size:12px; padding:24px; text-align:center;">No species mentions parsed yet — alerts need explanation text.</div>`;
   }
   // 3. Categories.
   const catCanvas = card.querySelector('#digest-chart-cats');
@@ -2282,12 +2297,12 @@ function _openDigestModal(d) {
       type: 'doughnut',
       data: {
         labels: catLabels,
-        datasets: [{ data: catLabels.map(k => cats[k]), backgroundColor: catLabels.map(k => palette[k]), borderColor: _CLAUDE.surface, borderWidth: 2 }],
+        datasets: [{ data: catLabels.map(k => cats[k]), backgroundColor: catLabels.map(k => palette[k]), borderColor: theme.surface, borderWidth: 2 }],
       },
       options: { ...baseOpts, scales: undefined, cutout: '58%' },
     }));
   } else if (catCanvas) {
-    catCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No event categories yet.</div>`;
+    catCanvas.parentElement.innerHTML = `<div style="color:${theme.muted}; font-size:12px; padding:24px; text-align:center;">No event categories yet.</div>`;
   }
   // 4. Top labels horizontal bar.
   const labelCanvas = card.querySelector('#digest-chart-labels');
@@ -2297,12 +2312,12 @@ function _openDigestModal(d) {
       type: 'bar',
       data: {
         labels: lbls.map(([k]) => _friendlyLabel(k)),
-        datasets: [{ data: lbls.map(([, v]) => v), backgroundColor: _CLAUDE.accent, borderRadius: 3 }],
+        datasets: [{ data: lbls.map(([, v]) => v), backgroundColor: theme.accent, borderRadius: 3 }],
       },
       options: { ...baseOpts, indexAxis: 'y', plugins: { ...baseOpts.plugins, legend: { display: false } } },
     }));
   } else if (labelCanvas) {
-    labelCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No labels yet.</div>`;
+    labelCanvas.parentElement.innerHTML = `<div style="color:${theme.muted}; font-size:12px; padding:24px; text-align:center;">No labels yet.</div>`;
   }
 }
 

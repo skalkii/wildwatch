@@ -434,7 +434,7 @@ def build_timeline(
         "documentary ambient, soft african savanna at dawn, "
         "low strings, sparse percussion, calm but tense"
     ),
-) -> tuple[Any, int]:
+) -> tuple[Any, int, float, dict]:
     """Compose a Timeline from the picked events + corpus mapping.
 
     Skill conformance (video-db/skills editor model):
@@ -462,10 +462,13 @@ def build_timeline(
     video_track = Track()
     overlay_track = Track() if add_text_overlays else None
 
-    cursor = 0
+    cursor: float = 0.0
     n_clips = 0
     video_info_cache: dict[str, bool] = {}
     skip_ids: set[str] = set()
+    # Captured per-clip specs so the caller can repeat the reel to
+    # match a longer voiceover without re-running SDK probes.
+    clip_specs: list[dict] = []
     # Live-collection fallback list. When every entry in corpus_state is
     # stale (videos deleted off VideoDB), scan the collection ONCE for
     # any usable upload and use those instead. Lazy-built so we don't
@@ -551,6 +554,15 @@ def build_timeline(
                 Clip(asset=overlay, duration=clip_dur, transition=transition),
             )
 
+        clip_specs.append(
+            {
+                "vid_id": vid_id,
+                "clip_start": clip_start,
+                "clip_dur": clip_dur,
+                "tier": tier,
+                "label": (ev.get("label") or ""),
+            }
+        )
         cursor += clip_dur
         n_clips += 1
 
@@ -580,7 +592,105 @@ def build_timeline(
         except Exception as e:
             logger.warning("digest: generate_music failed (%s); reel will be silent", e)
 
-    return timeline, n_clips
+    ctx = {
+        "video_track": video_track,
+        "overlay_track": overlay_track,
+        "clip_specs": clip_specs,
+        "cursor": cursor,
+    }
+    return timeline, n_clips, float(cursor), ctx
+
+
+def _extend_reel_with_loop(ctx: dict, target_seconds: float) -> float:
+    """Loop the existing clip_specs onto the video + overlay tracks
+    until the cumulative duration matches ``target_seconds``.
+
+    Returns the new cursor (i.e. final reel length). No-op when
+    already at or above target. Used when the voiceover is longer
+    than the initial reel so the video plays from the start of the
+    sequence again instead of leaving a black tail.
+    """
+    cursor: float = float(ctx.get("cursor") or 0)
+    specs: list[dict] = ctx.get("clip_specs") or []
+    video_track = ctx.get("video_track")
+    overlay_track = ctx.get("overlay_track")
+    if not specs or cursor >= target_seconds:
+        return cursor
+    i = 0
+    while cursor < target_seconds:
+        spec = specs[i % len(specs)]
+        clip_dur = float(spec["clip_dur"])
+        if cursor + clip_dur > target_seconds:
+            clip_dur = target_seconds - cursor
+            if clip_dur < 0.5:
+                break  # avoid sub-half-second slivers at the tail
+        transition = Transition(in_="fade", out="fade", duration=0.4)
+        video_track.add_clip(
+            cursor,
+            Clip(
+                asset=VideoAsset(id=spec["vid_id"], start=spec["clip_start"], volume=0),
+                duration=clip_dur,
+                transition=transition,
+            ),
+        )
+        if overlay_track is not None:
+            tier = int(spec.get("tier") or 1)
+            label_text, accent = _TIER_OVERLAY.get(tier, ("EVENT", "#94a3b8"))
+            ev_label = str(spec.get("label") or "").replace("_", " ").upper()[:38]
+            overlay_asset = TextAsset(
+                text=f"{label_text}\n{ev_label}" if ev_label else label_text,
+                font=Font(family="Clear Sans", size=42, color="#ffffff"),
+                background=Background(color=accent, opacity=0.85),
+            )
+            overlay_track.add_clip(
+                cursor,
+                Clip(asset=overlay_asset, duration=clip_dur, transition=transition),
+            )
+        cursor += clip_dur
+        i += 1
+    ctx["cursor"] = cursor
+    return cursor
+
+
+def _add_tail_music(
+    timeline: Any,
+    conn: Any,
+    start: float,
+    duration: float,
+    prompt: str = "documentary ambient outro, warm low strings, fading",
+) -> bool:
+    """Generate background music for the [start, start+duration] tail.
+
+    Returns True on success. Lets the reel finish on a musical
+    cushion instead of dead air when the voiceover ends before
+    the video.
+    """
+    if duration < 1.0:
+        return False
+    try:
+        music = conn.get_collection().generate_music(prompt=prompt, duration=float(duration))
+        music_id = getattr(music, "id", None)
+        if not music_id:
+            return False
+        tail_track = Track()
+        tail_track.add_clip(
+            float(start),
+            Clip(
+                asset=AudioAsset(id=music_id, start=0, volume=0.7),
+                duration=float(duration),
+            ),
+        )
+        timeline.add_track(tail_track)
+        logger.info(
+            "digest: added tail music id=%s start=%.1fs duration=%.1fs",
+            music_id,
+            start,
+            duration,
+        )
+        return True
+    except Exception as e:
+        logger.warning("digest: tail music failed (%s); reel will end silent", e)
+        return False
 
 
 def build_digest(
@@ -618,7 +728,7 @@ def build_digest(
             {"tier": 1, "label": ""},
         ]
 
-    timeline, n_clips = build_timeline(
+    timeline, n_clips, reel_seconds, build_ctx = build_timeline(
         picked,
         corpus,
         conn,
@@ -694,17 +804,23 @@ def build_digest(
                 audio = coll.generate_voice(text=summary, voice_name="George", wait=True)
             audio_id = getattr(audio, "id", None)
             if audio_id:
-                # The narration is a fixed length per the text we
-                # passed; VideoDB rejects ``Clip duration > audio
-                # length``. Cap clip duration at min(audio_length,
-                # reel_length). ``disable_other_tracks=True`` is the
-                # default on AudioAsset and mutes the underlying clip
-                # audio for the span the narration plays — combined
-                # with the 130-170 word target that means the entire
-                # reel is muted under the voiceover.
-                reel_seconds = n_clips * clip_seconds
-                audio_len = getattr(audio, "length", None) or clip_seconds
-                vo_duration = min(float(audio_len), float(reel_seconds))
+                audio_len = float(getattr(audio, "length", None) or 0.0)
+                if audio_len <= 0:
+                    audio_len = float(reel_seconds)
+                # ──── Sync video + voiceover lengths.
+                # If voiceover OUT-lasts the reel, loop existing clips
+                # onto the video/overlay tracks so the picture keeps
+                # moving until the narration finishes.
+                if audio_len > reel_seconds + 0.5:
+                    new_cursor = _extend_reel_with_loop(build_ctx, audio_len)
+                    logger.info(
+                        "digest: looped reel %.1fs → %.1fs to cover voiceover (%.1fs)",
+                        reel_seconds,
+                        new_cursor,
+                        audio_len,
+                    )
+                    reel_seconds = new_cursor
+                vo_duration = min(audio_len, float(reel_seconds))
                 vo_track = Track()
                 vo_track.add_clip(
                     0,
@@ -717,12 +833,17 @@ def build_digest(
                 )
                 timeline.add_track(vo_track)
                 logger.info(
-                    "digest: added voiceover track id=%s duration=%ss (audio_len=%s reel=%s)",
+                    "digest: voiceover track id=%s duration=%.1fs (audio_len=%.1fs reel=%.1fs)",
                     audio_id,
                     vo_duration,
                     audio_len,
                     reel_seconds,
                 )
+                # If the reel still has a tail after the narration ends,
+                # fill it with generated music so it doesn't end silent.
+                tail_gap = float(reel_seconds) - audio_len
+                if tail_gap > 1.0:
+                    _add_tail_music(timeline, conn, start=audio_len, duration=tail_gap)
         except Exception as e:
             logger.warning(
                 "digest: generate_voice failed (%s: %s); reel will have no narration",

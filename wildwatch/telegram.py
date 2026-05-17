@@ -441,3 +441,140 @@ async def send_alert(
     if not payload.get("ok"):
         raise RuntimeError(payload.get("description", "telegram send failed"))
     return payload
+
+
+# ──── Daily-digest delivery to Telegram ────
+# Unicode-block bar charts so the message looks visually similar to
+# the dashboard modal without needing image generation. Telegram's
+# HTML mode + a <pre> block preserves alignment for the bars.
+
+_BAR_GLYPH = "█"  # one filled cell per scaled count
+_BAR_MAX = 14  # max bar width in chars — keeps mobile-portrait clean
+
+
+def _bar(count: int, peak: int, width: int = _BAR_MAX) -> str:
+    if peak <= 0 or count <= 0:
+        return ""
+    n = max(1, round(count / peak * width))
+    return _BAR_GLYPH * n
+
+
+def _spark_24(hourly: list[int]) -> str:
+    """Render 24 hourly counts as a single-line spark using 8-level blocks."""
+    levels = " ▁▂▃▄▅▆▇█"
+    peak = max(hourly or [0]) or 1
+    return "".join(levels[min(8, round(v / peak * 8))] for v in hourly[:24])
+
+
+def build_digest_message(
+    summary: str,
+    analytics: dict,
+    player_url: str | None,
+    n_clips: int,
+    n_events: int,
+) -> str:
+    """Compose the HTML Telegram body for a daily digest delivery.
+
+    Mirrors the modal's information hierarchy: KPI stats, spark of
+    hourly activity, top species + top labels as bar charts, the
+    narration paragraph, and finally a tappable Play link.
+    """
+    a = analytics or {}
+    tc = a.get("tier_counts") or {1: 0, 2: 0, 3: 0}
+    hourly = a.get("hourly") or [0] * 24
+    species = a.get("species") or []
+    labels = a.get("top_labels") or []
+
+    parts: list[str] = []
+    parts.append("📊 <b>WildWatch · Daily Summary</b>")
+    parts.append(f"<i>Last 24h · {n_events} events · {n_clips} clips in reel</i>")
+    parts.append("")
+    parts.append(
+        f"🔵 <b>Info {tc.get(1, 0)}</b>   "
+        f"🟡 <b>Notable {tc.get(2, 0)}</b>   "
+        f"🔴 <b>Urgent {tc.get(3, 0)}</b>"
+    )
+    parts.append("")
+    parts.append("<b>When</b> · activity per hour (00→23)")
+    parts.append(f"<pre>{_html_escape(_spark_24(hourly))}</pre>")
+    if labels:
+        peak = max(c for _, c in labels[:6]) or 1
+        rows = "\n".join(
+            f"{friendly_label(lbl)[:22]:<22} {_bar(c, peak):<{_BAR_MAX}} {c}"
+            for lbl, c in labels[:6]
+        )
+        parts.append("<b>What fired most</b>")
+        parts.append(f"<pre>{_html_escape(rows)}</pre>")
+    if species:
+        peak = max(c for _, c in species[:6]) or 1
+        rows = "\n".join(
+            f"{str(sp)[:18]:<18} {_bar(c, peak):<{_BAR_MAX}} {c}" for sp, c in species[:6]
+        )
+        parts.append("<b>Top species seen</b>")
+        parts.append(f"<pre>{_html_escape(rows)}</pre>")
+    if summary:
+        parts.append("<b>Narration</b>")
+        parts.append(_html_escape(summary))
+    if player_url:
+        parts.append("")
+        safe = _html_escape(player_url)
+        parts.append(f'▶ <a href="{safe}">Watch full reel on VideoDB</a>')
+    return "\n".join(parts)
+
+
+async def send_digest(
+    summary: str,
+    analytics: dict,
+    player_url: str | None,
+    n_clips: int,
+    n_events: int,
+    *,
+    bot_token: str | None = None,
+    chat_id: str | None = None,
+) -> dict:
+    """Send a daily digest message to Telegram.
+
+    Same auth + transport semantics as send_alert. Splits across
+    multiple sends only if the body exceeds Telegram's 4096-char
+    cap — usually fits in one.
+    """
+    token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is unset; digest cannot be sent.")
+    if not chat:
+        raise RuntimeError("TELEGRAM_CHAT_ID is unset; digest cannot be sent.")
+
+    body = build_digest_message(summary, analytics, player_url, n_clips, n_events)
+    # Telegram caps a single sendMessage at 4096 chars. The digest
+    # body is comfortably under that even with 6 species + 6 labels.
+    if len(body) > 4090:
+        body = body[:4080] + "\n…"
+    url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                json={
+                    "chat_id": chat,
+                    "text": body,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+            )
+    except httpx.TransportError as e:
+        logger.warning(
+            "telegram digest network error: %s (args=%r)",
+            type(e).__name__,
+            getattr(e, "args", ()),
+        )
+        raise RuntimeError(f"telegram network error: {type(e).__name__}") from None
+    if resp.status_code >= 400:
+        body_resp = resp.text[:300] if resp.text else ""
+        raise RuntimeError(
+            f"telegram digest send failed: HTTP {resp.status_code} body={body_resp!r}"
+        )
+    payload = resp.json()
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("description", "telegram digest send failed"))
+    return payload

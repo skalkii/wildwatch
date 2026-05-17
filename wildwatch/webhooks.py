@@ -2021,6 +2021,9 @@ class DigestRequest(BaseModel):
     clip_seconds: int = 4
     add_text_overlays: bool = True
     add_voiceover: bool = True
+    # When true, ship the same content (KPIs + spark + bars + paragraph
+    # + reel link) to the Telegram chat after the reel is built.
+    notify_telegram: bool = True
 
 
 @app.post("/api/digest/build")
@@ -2053,4 +2056,24 @@ async def api_build_digest(req: DigestRequest) -> dict:
     except Exception as e:
         logger.exception("api_build_digest failed")
         raise HTTPException(status_code=500, detail=f"digest build failed: {e}") from e
+
+    # Best-effort Telegram delivery. Never crashes the API response —
+    # the dashboard modal is the primary surface; Telegram is a
+    # convenience push that should fail soft.
+    if req.notify_telegram and result.get("n_clips"):
+        try:
+            from wildwatch.telegram import send_digest
+
+            await send_digest(
+                summary=result.get("summary") or "",
+                analytics=result.get("analytics") or {},
+                player_url=result.get("player_url"),
+                n_clips=int(result.get("n_clips") or 0),
+                n_events=int(result.get("n_events") or 0),
+            )
+            result["telegram_sent"] = True
+        except Exception as e:
+            logger.warning("api_build_digest: telegram delivery failed: %r", e)
+            result["telegram_sent"] = False
+            result["telegram_error"] = str(e)[:200]
     return dict(result)
