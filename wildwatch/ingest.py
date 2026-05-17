@@ -5,10 +5,16 @@ right handler by ``kind``, runs it, and updates the source's status as
 it progresses. Each transition is broadcast through the dashboard so
 the SPA can show per-source live progress.
 
-Handlers are intentionally thin: they get the source into VideoDB
-(uploaded video OR connected rtstream). Indexing + alert wiring are
-separate operations a user triggers explicitly via the UI on a ready
-source — that keeps the failure surface here small.
+For file / URL uploads (`_ingest_upload`, `_ingest_url`) the handler
+ALSO kicks off a scene index automatically — the video is unsearchable
+until at least one scene index exists, and asking users to run a CLI
+script after every upload was the wrong UX. The index call is fire-
+and-forget; the dashboard's Indexed Content tab shows the index in
+``processing`` state until VideoDB finishes.
+
+For live rtstreams (`_ingest_rtstream`) scene indexing is handled
+separately by ``scripts/bootstrap.py`` which wires four prompt-based
+indexes (species / behavior / environment / audio) plus alerts.
 """
 
 from __future__ import annotations
@@ -116,15 +122,89 @@ def _is_youtube_live(url: str) -> bool | None:
 # ──── handlers ────────────────────────────────────────────────────────────
 
 
+_DEFAULT_SCENE_PROMPT_CONTEXT = {
+    "location_context": "uploaded clip (any environment)",
+    "species_list": (
+        "common wildlife — oryx, springbok, elephant, lion, giraffe, zebra, "
+        "leopard, hyena, jackal, kudu, buffalo, hippo, crocodile, baboon, "
+        "warthog, wild dog, various birds. If no wildlife, describe what is "
+        "in the scene."
+    ),
+    "expected_sounds": "any ambient sound",
+}
+
+
+async def _kick_off_scene_index(video, source_id: str) -> None:
+    """Fire-and-forget scene index on a freshly-uploaded video.
+
+    The SDK call returns immediately with an index_id; the actual
+    indexing runs on VideoDB's side and shows up as `processing` then
+    `done` when polled via `video.list_scene_index()`. The dashboard's
+    Indexed Content tab reads that status and renders the right state.
+
+    Failures are logged but NEVER propagated — a working upload that
+    couldn't be indexed is still useful (operator can retry via
+    `scripts/index_corpus.py`). The source row stays `ready`.
+    """
+    from wildwatch.prompts import format_prompt
+
+    try:
+        prompt = format_prompt("species", **_DEFAULT_SCENE_PROMPT_CONTEXT)
+    except Exception as e:
+        logger.warning("ingest: prompt format failed for %s: %r", source_id, e)
+        return
+
+    def _call() -> Any:
+        # Skip if the video already has any scene index (idempotent).
+        try:
+            existing = video.list_scene_index() or []
+        except Exception as e:
+            logger.warning("ingest: list_scene_index probe failed for source=%s: %r", source_id, e)
+            existing = []
+        if existing:
+            logger.info(
+                "ingest: source=%s already has %d scene index(es); skipping auto-index",
+                source_id,
+                len(existing),
+            )
+            return None
+        return video.index_scenes(prompt=prompt, name=f"wildwatch-auto-{source_id[:8]}")
+
+    try:
+        idx_id = await asyncio.to_thread(_call)
+    except Exception as e:
+        logger.warning(
+            "ingest: index_scenes kickoff failed for source=%s: %r — video usable but unsearchable until re-indexed",
+            source_id,
+            e,
+        )
+        return
+    if idx_id:
+        logger.info("ingest: kicked off scene index for source=%s idx=%s", source_id, idx_id)
+
+
 async def _ingest_upload(source, coll: Any) -> None:
     _emit(source.id, "ingesting", stage_msg="uploading file to VideoDB")
     video = await asyncio.to_thread(coll.upload, file_path=source.input)
     if video is None:
         raise RuntimeError("coll.upload returned None")
+    # Auto-kick scene indexing so the video becomes searchable without
+    # the operator running a CLI script. Status pulse so the dashboard
+    # shows "indexing" briefly before flipping to "ready".
+    _emit(
+        source.id,
+        "indexing",
+        stage_msg="kicking off scene index on VideoDB",
+        video_id=video.id,
+    )
+    await _kick_off_scene_index(video, source.id)
     _emit(
         source.id,
         "ready",
-        stage_msg=f"uploaded {getattr(video, 'length', '?')}s",
+        stage_msg=(
+            f"uploaded {getattr(video, 'length', '?')}s — "
+            "scene index processing (check Indexed Content tab)"
+        ),
         video_id=video.id,
     )
 
@@ -136,8 +216,18 @@ async def _ingest_url(source, coll: Any) -> None:
         raise RuntimeError("coll.upload returned None")
     _emit(
         source.id,
+        "indexing",
+        stage_msg="kicking off scene index on VideoDB",
+        video_id=video.id,
+    )
+    await _kick_off_scene_index(video, source.id)
+    _emit(
+        source.id,
         "ready",
-        stage_msg=f"uploaded {getattr(video, 'length', '?')}s",
+        stage_msg=(
+            f"uploaded {getattr(video, 'length', '?')}s — "
+            "scene index processing (check Indexed Content tab)"
+        ),
         video_id=video.id,
     )
 

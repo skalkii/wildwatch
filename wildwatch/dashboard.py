@@ -1086,6 +1086,22 @@ async function fetchVideos() {
   } catch (e) { console.warn('videos fetch failed', e); }
 }
 
+function _indexStatusPill(status) {
+  const s = String(status || 'unknown').toLowerCase();
+  const palette = {
+    ready: ['Ready', 'status-ready'],
+    indexed: ['Ready', 'status-ready'],
+    complete: ['Ready', 'status-ready'],
+    completed: ['Ready', 'status-ready'],
+    processing: ['Processing', 'status-indexing'],
+    queued: ['Queued', 'status-queued'],
+    failed: ['Failed', 'status-error'],
+    error: ['Failed', 'status-error'],
+  };
+  const [label, cls] = palette[s] || [s, 'status-queued'];
+  return `<span class="pill ${cls}">${escapeHtml(label)}</span>`;
+}
+
 async function showVideoDetail(videoId) {
   const el = $('content-detail');
   el.innerHTML = `<span class="faint">loading ${escapeHtml(videoId)} …</span>`;
@@ -1094,38 +1110,83 @@ async function showVideoDetail(videoId) {
     const d = await r.json();
     const idxs = d.indexes || [];
     if (idxs.length === 0) {
-      el.innerHTML = `<div class="muted">No scene indexes for <code class="mono">${escapeHtml(videoId)}</code>.</div>`;
+      el.innerHTML = `<div class="card-soft p-4">
+        <div class="text-sm font-medium">Scene index still being prepared</div>
+        <div class="text-[11.5px] faint mt-1">VideoDB is reading this clip. Scene indexes show up here once the AI finishes its first pass — typically a minute or two per minute of footage. Refresh in a moment.</div>
+      </div>`;
       return;
     }
     el.innerHTML = `<div class="text-[11px] faint mb-2">Video <code class="mono">${escapeHtml(videoId)}</code></div>
-      <table class="text-xs w-full">
-        <thead><tr class="faint"><th class="text-left font-medium pb-1">name</th><th class="text-left font-medium pb-1">id</th><th></th></tr></thead>
-        <tbody>
-          ${idxs.map(i => `<tr class="border-t divider">
-            <td class="py-1.5">${escapeHtml(i.name || '')}</td>
-            <td class="py-1.5"><code class="mono link">${escapeHtml(i.scene_index_id || i.id || '')}</code></td>
-            <td class="py-1.5 text-right"><button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(i.scene_index_id || i.id)}" class="link underline">scenes</button></td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-      <div id="scenes-pane" class="mt-4 text-xs"></div>`;
+      <div class="space-y-2">
+        ${idxs.map(i => {
+          const idxId = i.scene_index_id || i.id || '';
+          const name = i.name || `Scene Index ${escapeHtml(idxId.slice(0, 8))}…`;
+          const status = String(i.status || 'unknown').toLowerCase();
+          const isReady = ['ready','indexed','complete','completed'].includes(status);
+          const btnClass = isReady ? 'btn btn-primary text-[11.5px]' : 'btn btn-ghost text-[11.5px]';
+          const btnLabel = isReady ? '▶ View scenes' : `${status} — view anyway`;
+          return `<div class="card-soft p-3">
+            <div class="flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-sm font-medium truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+                <div class="text-[11px] faint mono mt-0.5 truncate" title="${escapeHtml(idxId)}">${escapeHtml(idxId)}</div>
+              </div>
+              ${_indexStatusPill(i.status)}
+            </div>
+            <div class="flex justify-end mt-2">
+              <button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="${btnClass}">${btnLabel}</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div id="scenes-pane" class="mt-4"></div>`;
   } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
 async function showVideoScenes(videoId, indexId) {
   const pane = $('scenes-pane');
-  pane.innerHTML = '<span class="faint">loading scenes …</span>';
+  if (!pane) return;
+  pane.innerHTML = '<div class="faint text-sm">loading scenes …</div>';
   try {
-    const r = await fetch(`/api/videos/${videoId}/scenes/${indexId}?limit=15`);
+    const r = await fetch(`/api/videos/${videoId}/scenes/${indexId}?limit=20`);
     const d = await r.json();
+    const status = String(d.status || 'unknown').toLowerCase();
     const scenes = d.scenes || [];
-    if (scenes.length === 0) { pane.innerHTML = '<span class="faint">no scenes yet</span>'; return; }
-    pane.innerHTML = scenes.map(sc =>
-      `<div class="card-soft p-2 mb-1.5" style="border-left:2px solid var(--accent)">
-        <div class="faint mono text-[10.5px]">${escapeHtml(String(sc.start ?? ''))}&ndash;${escapeHtml(String(sc.end ?? ''))}</div>
-        <div class="mt-0.5">${escapeHtml((sc.description || sc.text || '').slice(0, 240))}</div>
-      </div>`
-    ).join('');
+    const header = `<div class="flex items-center justify-between mb-2">
+      <div class="text-[11.5px] faint">Index ${_indexStatusPill(status)} · ${scenes.length} scene${scenes.length===1?'':'s'} shown</div>
+    </div>`;
+    if (status === 'processing' || status === 'queued') {
+      pane.innerHTML = header + `<div class="card-soft p-3 text-sm">
+        <strong class="muted">AI is still reading this video.</strong>
+        <div class="faint text-[11.5px] mt-1">Scene index is in <code class="mono">${escapeHtml(status)}</code> state. VideoDB needs a minute or two per minute of footage. Refresh the dashboard or click the button again shortly.</div>
+      </div>`;
+      return;
+    }
+    if (status === 'not_found') {
+      pane.innerHTML = header + `<div class="card-soft p-3 text-sm" style="color:#ef4444">Index not found on VideoDB. It may have been deleted.</div>`;
+      return;
+    }
+    if (status === 'failed' || status === 'error') {
+      pane.innerHTML = header + `<div class="card-soft p-3 text-sm" style="color:#ef4444">Index failed on VideoDB. Re-run the corpus indexer to retry.</div>`;
+      return;
+    }
+    if (scenes.length === 0) {
+      pane.innerHTML = header + `<div class="card-soft p-3 text-sm faint">No scenes returned. The video may be too short for the configured batch size.</div>`;
+      return;
+    }
+    pane.innerHTML = header + scenes.map((sc, i) => {
+      const start = sc.start ?? '';
+      const end = sc.end ?? '';
+      const text = (sc.description || sc.text || '').toString();
+      const idx = i + 1;
+      return `<div class="card-soft p-2.5 mb-1.5" style="border-left:3px solid var(--accent)">
+        <div class="flex items-center justify-between gap-2 text-[11px] faint">
+          <span>Scene ${idx}</span>
+          <span class="mono">${escapeHtml(String(start))}s &ndash; ${escapeHtml(String(end))}s</span>
+        </div>
+        <div class="text-sm mt-1" style="color:var(--text)">${escapeHtml(text.slice(0, 320))}${text.length > 320 ? '…' : ''}</div>
+      </div>`;
+    }).join('');
   } catch (e) { pane.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 

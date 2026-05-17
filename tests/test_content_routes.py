@@ -84,11 +84,34 @@ def test_video_indexes_returns_list(client: TestClient, mock_coll: MagicMock) ->
 
 def test_video_scenes_returns_capped_records(client: TestClient, mock_coll: MagicMock) -> None:
     v = _video_mock("vid1")
+    # api_video_scenes lists indexes FIRST and only fetches scenes when
+    # the requested index has status=ready — otherwise it returns the
+    # status so the dashboard can render "still processing" rather than
+    # blocking the SDK on get_scene_index.
+    v.list_scene_index = MagicMock(
+        return_value=[{"scene_index_id": "i1", "name": "test", "status": "ready"}]
+    )
     v.get_scene_index = MagicMock(return_value=[{"description": f"s{i}"} for i in range(50)])
     mock_coll.get_video = MagicMock(return_value=v)
     r = client.get("/api/videos/vid1/scenes/i1?limit=5")
     assert r.status_code == 200
-    assert len(r.json()["scenes"]) == 5
+    body = r.json()
+    assert body["status"] == "ready"
+    assert len(body["scenes"]) == 5
+
+
+def test_video_scenes_skips_get_when_processing(client: TestClient, mock_coll: MagicMock) -> None:
+    v = _video_mock("vid1")
+    v.list_scene_index = MagicMock(
+        return_value=[{"scene_index_id": "i1", "name": "test", "status": "processing"}]
+    )
+    v.get_scene_index = MagicMock(side_effect=AssertionError("should not be called"))
+    mock_coll.get_video = MagicMock(return_value=v)
+    r = client.get("/api/videos/vid1/scenes/i1?limit=5")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "processing"
+    assert body["scenes"] == []
 
 
 def test_rtstream_indexes_normalises_objects(client: TestClient, mock_coll: MagicMock) -> None:

@@ -1133,15 +1133,54 @@ async def api_video_indexes(video_id: str) -> dict:
 
 @app.get("/api/videos/{video_id}/scenes/{index_id}")
 async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
+    """Return scenes for a video's scene index.
+
+    BIG SUBTLETY: `video.get_scene_index(idx_id)` HANGS the SDK when the
+    index is still in `processing` state — the SDK blocks waiting for
+    backend completion (we've seen it sit >5 minutes). Solution: list
+    the indexes first (fast), check the requested one's status. If not
+    `ready`, return the status + an empty list rather than blocking.
+    """
     try:
         coll = await _async_sdk(_get_coll, timeout_s=10.0)
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
+        all_idxs = _coerce_to_list(
+            await _async_sdk(video.list_scene_index, timeout_s=5.0),
+            source=f"video({video_id}).list_scene_index",
+        )
+        meta = next(
+            (i for i in all_idxs if (i.get("scene_index_id") or i.get("id")) == index_id),
+            None,
+        )
+        if meta is None:
+            return {
+                "video_id": video_id,
+                "index_id": index_id,
+                "status": "not_found",
+                "scenes": [],
+            }
+        status = str(meta.get("status", "unknown")).lower()
+        if status not in ("ready", "complete", "completed", "indexed", "done"):
+            # Don't block on a processing/failed index — surface the state
+            # so the dashboard can render a friendly message.
+            return {
+                "video_id": video_id,
+                "index_id": index_id,
+                "status": status,
+                "index_name": meta.get("name"),
+                "scenes": [],
+            }
         scenes = _coerce_to_list(
-            await _async_sdk(video.get_scene_index, index_id, timeout_s=5.0),
+            await _async_sdk(video.get_scene_index, index_id, timeout_s=30.0),
             source=f"video({video_id}).get_scene_index({index_id})",
         )
-        # Server-side slice -- callers can paginate later
-        return {"video_id": video_id, "index_id": index_id, "scenes": scenes[:limit]}
+        return {
+            "video_id": video_id,
+            "index_id": index_id,
+            "status": "ready",
+            "index_name": meta.get("name"),
+            "scenes": scenes[:limit],
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
