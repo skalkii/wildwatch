@@ -47,6 +47,7 @@ class AlertEvent(TypedDict, total=False):
     start_time: str | float | None
     end_time: str | float | None
     stream_url: str | None
+    video_id: str | None
     received_at: float
 
 

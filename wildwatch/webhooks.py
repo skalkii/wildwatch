@@ -568,6 +568,11 @@ class AlertPayload(BaseModel):
     start_time: str | float | None = None
     end_time: str | float | None = None
     stream_url: str | None = None
+    # Path-B post-upload sweep sends the source video id so the digest
+    # builder can pull the actual triggering scene into the reel
+    # instead of falling back to a generic corpus clip. rtstream
+    # callbacks omit this — they don't have a stable video id.
+    video_id: str | None = None
 
     # `extra="ignore"` rather than "allow": we build the persisted record
     # explicitly from named fields below, so extras would be silently
@@ -648,6 +653,7 @@ async def receive_alert(
         "start_time": payload.start_time,
         "end_time": payload.end_time,
         "stream_url": payload.stream_url,
+        "video_id": payload.video_id,
     }
     try:
         event_log.append(record)

@@ -186,6 +186,32 @@ def pick_corpus_video_id(
     return None
 
 
+def _maybe_seconds(v: Any) -> float | None:
+    """Coerce an event payload's start/end_time to seconds-since-video-start.
+
+    Path-B webhooks send floats (seconds offset from upload start).
+    rtstream callbacks send wall-clock ISO strings or unix epochs, which
+    aren't meaningful as a Timeline offset into a corpus video — those
+    return None so the caller falls back to the corpus/collection path.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        # Reject epoch-like values that obviously aren't intra-video
+        # offsets (>= 24h would clip past most uploaded videos).
+        return f if 0 <= f < 86400 else None
+    if isinstance(v, str):
+        # Pure-number string like "12.5" or "12.500s".
+        s = v.strip().rstrip("s")
+        try:
+            f = float(s)
+            return f if 0 <= f < 86400 else None
+        except ValueError:
+            return None
+    return None
+
+
 def _discover_collection_fallback(
     conn: Any,
     cache: dict[str, bool],
@@ -303,34 +329,49 @@ def build_timeline(
     collection_fallback: list[str] | None = None
     for ev in events:
         tier = int(ev.get("tier", 1))
-        # Walk every preferred corpus slug + fallback list, skipping any
-        # video_id whose video_info isn't available on VideoDB. Without
-        # this, one bad upload (audio-only / corrupt / deleted) crashes
-        # the entire reel at timeline.generate_stream().
+
+        # 1st choice: the actual triggering scene. Path-B post-upload
+        # webhooks carry ``video_id`` + numeric ``start_time`` /
+        # ``end_time`` so the reel shows the real moment that fired
+        # the alert (a gunshot frame, the rare-species sighting),
+        # not a stand-in from the corpus library. rtstream callbacks
+        # omit video_id — those fall through to the corpus path.
         vid_id: str | None = None
-        while True:
-            cand = pick_corpus_video_id(tier, corpus_state, skip=skip_ids)
-            if cand is None:
-                break
-            if _video_has_info(conn, cand, video_info_cache):
-                vid_id = cand
-                break
-            skip_ids.add(cand)
-        # If state's corpus is entirely dead, fall back to ANY usable
-        # video the collection currently has uploaded. Built once.
-        if not vid_id:
-            if collection_fallback is None:
-                collection_fallback = _discover_collection_fallback(
-                    conn, video_info_cache, skip_ids
-                )
-            if collection_fallback:
-                vid_id = collection_fallback[n_clips % len(collection_fallback)]
+        clip_start: float = 0.0
+        clip_dur: float = float(clip_seconds)
+        ev_vid = ev.get("video_id")
+        ev_start = _maybe_seconds(ev.get("start_time"))
+        ev_end = _maybe_seconds(ev.get("end_time"))
+        if ev_vid and ev_start is not None and _video_has_info(conn, ev_vid, video_info_cache):
+            vid_id = ev_vid
+            clip_start = max(0.0, float(ev_start))
+            if ev_end is not None and ev_end > ev_start:
+                clip_dur = min(float(clip_seconds), float(ev_end) - clip_start)
+                if clip_dur < 1.0:  # don't include sub-second slivers
+                    clip_dur = float(clip_seconds)
+        else:
+            # 2nd choice: tier-preferred corpus slug.
+            while True:
+                cand = pick_corpus_video_id(tier, corpus_state, skip=skip_ids)
+                if cand is None:
+                    break
+                if _video_has_info(conn, cand, video_info_cache):
+                    vid_id = cand
+                    break
+                skip_ids.add(cand)
+            # 3rd choice: any usable upload on the live collection.
+            if not vid_id:
+                if collection_fallback is None:
+                    collection_fallback = _discover_collection_fallback(
+                        conn, video_info_cache, skip_ids
+                    )
+                if collection_fallback:
+                    vid_id = collection_fallback[n_clips % len(collection_fallback)]
         if not vid_id:
             logger.warning(
-                "digest: no usable corpus clip for tier=%s (exhausted %d candidates); "
-                "skipping event",
+                "digest: no usable clip for event=%s tier=%s; skipping",
+                (ev.get("label") or "?")[:30],
                 tier,
-                len(skip_ids),
             )
             continue
 
@@ -341,8 +382,8 @@ def build_timeline(
         video_track.add_clip(
             cursor,
             Clip(
-                asset=VideoAsset(id=vid_id, start=0),
-                duration=clip_seconds,
+                asset=VideoAsset(id=vid_id, start=clip_start),
+                duration=clip_dur,
                 transition=transition,
             ),
         )
@@ -359,10 +400,10 @@ def build_timeline(
             )
             overlay_track.add_clip(
                 cursor,
-                Clip(asset=overlay, duration=clip_seconds, transition=transition),
+                Clip(asset=overlay, duration=clip_dur, transition=transition),
             )
 
-        cursor += clip_seconds
+        cursor += clip_dur
         n_clips += 1
 
     timeline.add_track(video_track)
@@ -478,9 +519,15 @@ def build_digest(
             )
             audio_id = getattr(audio, "id", None)
             if audio_id:
-                # Total reel length so far — sum of cursor across all clips.
-                # build_timeline returned n_clips; clip_seconds is uniform.
-                vo_duration = n_clips * clip_seconds
+                # The generated narration is a fixed length per the text
+                # we passed; VideoDB rejects ``Clip duration > audio
+                # length``. Use the asset's actual length, capped at
+                # the reel length so the narration doesn't extend past
+                # the final visual cut. If the SDK omits .length we
+                # fall back to clip_seconds (one slot's worth).
+                reel_seconds = n_clips * clip_seconds
+                audio_len = getattr(audio, "length", None) or clip_seconds
+                vo_duration = min(float(audio_len), float(reel_seconds))
                 vo_track = Track()
                 vo_track.add_clip(
                     0,
@@ -491,9 +538,11 @@ def build_digest(
                 )
                 timeline.add_track(vo_track)
                 logger.info(
-                    "digest: added voiceover track id=%s duration=%ss",
+                    "digest: added voiceover track id=%s duration=%ss (audio_len=%s reel=%s)",
                     audio_id,
                     vo_duration,
+                    audio_len,
+                    reel_seconds,
                 )
         except Exception as e:
             logger.warning(
