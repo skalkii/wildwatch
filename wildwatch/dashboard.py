@@ -1141,12 +1141,56 @@ function startSSE() {
 }
 
 // ──── Sources tab ────
+// Friendly source-kind labels — replaces raw SDK strings on the cards.
+const _SRC_KIND_FRIENDLY = {
+  upload: 'Uploaded file',
+  youtube: 'YouTube',
+  hls: 'Web stream',
+  rtsp: 'Live camera',
+  rtmp: 'Live camera',
+};
+
+// Friendly source-status labels — what shows on the pill instead of
+// the internal Literal values. Keeps the same colour scheme.
+const _SRC_STATUS_FRIENDLY = {
+  queued: 'waiting',
+  connecting: 'connecting...',
+  ingesting: 'uploading...',
+  indexing: 'AI is reading it...',
+  ready: 'ready',
+  error: 'error',
+  disconnected: 'disconnected',
+};
+
+function _friendlyStageMsg(s) {
+  // Rewrite the most common technical stage_msg strings into something a
+  // non-technical operator can parse. Anything we don't recognise is
+  // shown verbatim — better to surface raw debug than swallow it.
+  const m = (s.stage_msg || '').trim();
+  if (!m) return '';
+  if (/^rtstream status=connected/i.test(m)) return 'Receiving frames from the live camera.';
+  if (/^rtstream status=(error|failed|disconnected)/i.test(m))
+    return 'Live camera connection lost.';
+  if (/^uploaded \\S+ . scene . audio indexes processing/i.test(m))
+    return 'Upload complete. The AI is reading the clip in the background.';
+  if (/scene index processing/i.test(m))
+    return 'Upload complete. The AI is reading the clip in the background.';
+  if (/^kicking off scene/i.test(m)) return 'Asking the AI to look at this clip...';
+  if (/^bridge configured/i.test(m)) return 'Switching to live camera mode.';
+  return m;
+}
+
 function renderSource(s) {
   const statusClass = `status-${s.status || 'queued'}`;
+  const statusLabel = _SRC_STATUS_FRIENDLY[s.status] || s.status || 'waiting';
   const errMsg = s.error ? `<div class="text-[11px] mt-1.5" style="color:#ef4444">${escapeHtml(s.error)}</div>` : '';
-  const stage = s.stage_msg ? `<div class="text-[11px] faint mt-1">${escapeHtml(s.stage_msg)}</div>` : '';
-  const remote = s.video_id ? `video ${_idPill(s.video_id, {truncate: true})}` :
-                 s.rtstream_id ? `rtstream ${_idPill(s.rtstream_id, {truncate: true})}` : '';
+  const stageText = _friendlyStageMsg(s);
+  const stage = stageText ? `<div class="text-[11px] faint mt-1">${escapeHtml(stageText)}</div>` : '';
+  // "Saved as" rather than internal field names; show ID as a copyable
+  // pill but keep the prose friendly.
+  const remote = s.video_id ? `Saved on VideoDB as ${_idPill(s.video_id, {truncate: true})}` :
+                 s.rtstream_id ? `Streaming as ${_idPill(s.rtstream_id, {truncate: true})}` : '';
+  const kindLabel = _SRC_KIND_FRIENDLY[s.kind] || s.kind;
   const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString() : '';
   // Action buttons depend on the source kind:
   //   - rtsp / rtmp: stream actually reconnects to a remote feed. Reconnect
@@ -1171,9 +1215,9 @@ function renderSource(s) {
     <div class="flex justify-between items-start gap-3">
       <div class="min-w-0">
         <div class="font-semibold truncate" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</div>
-        <div class="text-[11px] faint mt-1">${escapeHtml(s.kind)} &middot; ${created}</div>
+        <div class="text-[11px] faint mt-1">${escapeHtml(kindLabel)} &middot; ${created}</div>
       </div>
-      <span class="pill ${statusClass}">${escapeHtml(s.status || 'queued')}</span>
+      <span class="pill ${statusClass}">${escapeHtml(statusLabel)}</span>
     </div>
     <div class="text-[11px] muted mt-2 truncate mono" title="${escapeHtml(s.input || '')}">${escapeHtml(s.input || '')}</div>
     ${stage}
@@ -1396,8 +1440,13 @@ function _renderLibrary() {
       ? ''  // rtstreams aren't deleted from the library — use Sources tab to disconnect.
       : `<button data-action="delete-video" data-id="${escapeHtml(v.id)}" data-name="${escapeHtml(v.name || v.id)}" data-stop-propagation class="text-[11px] shrink-0" style="background:none; border:1px solid var(--border); color:#ef4444; padding:0.15rem 0.45rem; border-radius:5px; cursor:pointer;" title="Delete this video from VideoDB">&times; delete</button>`;
     const action = isRtstream ? 'show-rtstream' : 'show-video';
-    const rtStatusPill = isRtstream && v._rt_status
-      ? `<span class="pill" style="color:#a78bfa; background:color-mix(in oklab,#a78bfa 14%,transparent);">${escapeHtml(v._rt_status)}</span>`
+    // Friendly label for the rtstream status — "connected" / "running"
+    // become "live now"; everything else maps to whatever the SDK returned.
+    const rtStatusLabel = isRtstream && v._rt_status
+      ? (_RTSTREAM_RUNNING_STATUSES.has(String(v._rt_status).toLowerCase()) ? 'live now' : v._rt_status)
+      : '';
+    const rtStatusPill = rtStatusLabel
+      ? `<span class="pill" style="color:#a78bfa; background:color-mix(in oklab,#a78bfa 14%,transparent);">${escapeHtml(rtStatusLabel)}</span>`
       : '';
     return `<div class="card-soft p-2.5 flex items-center gap-3 cursor-pointer hover:border-[var(--border-strong)] transition" style="border:1px solid var(--border)" data-action="${action}" data-id="${escapeHtml(v.id)}">
       ${thumb}
@@ -1422,26 +1471,28 @@ function _renderLibrary() {
 }
 
 async function fetchVideos() {
-  // Merge two SDK surfaces into the Library: archive videos
-  // (`coll.get_videos`) AND live rtstreams (`coll.list_rtstreams`,
-  // surfaced via /api/remote). Both are "things the AI is watching" —
-  // surfacing them together stops users wondering why a connected RTSP
-  // source doesn't appear in the Library.
+  // Library merges two surfaces: archive videos (coll.get_videos) AND
+  // running rtstreams (coll.list_rtstreams via /api/remote). Stopped
+  // rtstreams are filtered out here — they clutter the list for non-
+  // tech viewers without providing usable content (VideoDB has no
+  // delete_rtstream, so they hang around forever).
   try {
     const [vr, rr] = await Promise.all([
       fetch('/api/videos').then(r => r.json()).catch(() => ({ videos: [] })),
       fetch('/api/remote').then(r => r.json()).catch(() => ({ rtstreams: [] })),
     ]);
     const videos = (vr.videos || []).map(v => ({ ...v, _kind: 'video' }));
-    const rtstreams = (rr.rtstreams || []).map(rt => ({
-      id: rt.id,
-      name: rt.name || rt.id,
-      length: null,
-      stream_url: null,
-      thumbnail_url: null,
-      _kind: 'rtstream',
-      _rt_status: rt.status,
-    }));
+    const rtstreams = (rr.rtstreams || [])
+      .filter(rt => _RTSTREAM_RUNNING_STATUSES.has(String(rt.status || '').toLowerCase()))
+      .map(rt => ({
+        id: rt.id,
+        name: rt.name || rt.id,
+        length: null,
+        stream_url: null,
+        thumbnail_url: null,
+        _kind: 'rtstream',
+        _rt_status: rt.status,
+      }));
     _libraryVids = [...rtstreams, ...videos];
     _renderLibrary();
   } catch (e) { console.warn('library fetch failed', e); }
