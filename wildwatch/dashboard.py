@@ -66,8 +66,8 @@ class AlertEvent(_AlertEventRequired, total=False):
     confidence: float | None
     explanation: str | None
     timestamp: str | None
-    start_time: str | None
-    end_time: str | None
+    start_time: str | float | None
+    end_time: str | float | None
     stream_url: str | None
     received_at: float
 

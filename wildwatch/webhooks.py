@@ -548,15 +548,21 @@ async def _csrf_origin_guard(request: Request, call_next):
 
 
 class AlertPayload(BaseModel):
-    """Subset of VideoDB callback payload we actually consume."""
+    """Subset of VideoDB callback payload we actually consume.
+
+    Note: VideoDB's rtstream alert callback sends ``start_time`` /
+    ``end_time`` as strings (e.g. ``"12.500s"``), while our Path-B
+    synthesised webhooks post them as floats (raw seconds). Accept
+    both so neither path 422s.
+    """
 
     label: str = Field(..., description="Event label (e.g. POACHING_ALERT_GUNSHOT)")
     event_id: str | None = None
     confidence: float | None = None
     explanation: str | None = None
     timestamp: str | None = None
-    start_time: str | None = None
-    end_time: str | None = None
+    start_time: str | float | None = None
+    end_time: str | float | None = None
     stream_url: str | None = None
 
     # `extra="ignore"` rather than "allow": we build the persisted record
