@@ -694,38 +694,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </section>
 
-    <!-- REAL VIDEODB BILLING (from check_usage) -->
-    <section id="usage-real" class="card p-5 mb-5 hidden">
-      <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
-        <h3 class="text-sm font-semibold tracking-tight">Real VideoDB billing this period</h3>
-        <span id="usage-plan" class="text-[11px] faint mono"></span>
-      </div>
-      <p class="text-[12px] faint mb-3">Live numbers from <code class="mono">conn.check_usage()</code> — what VideoDB will actually charge.</p>
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
-        <div class="card-soft p-3">
-          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit used this period</div>
-          <div id="usage-credit-used" class="text-xl font-bold mt-1 mono">$0.00</div>
-        </div>
-        <div class="card-soft p-3">
-          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit balance</div>
-          <div id="usage-credit-balance" class="text-xl font-bold mt-1 mono">$0.00</div>
-          <div id="usage-credit-warn" class="text-[11px] mt-0.5 hidden" style="color:#ef4444">⚠ overdrawn — top up to continue</div>
-        </div>
-        <div class="card-soft p-3">
-          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Top resource</div>
-          <div id="usage-top-resource" class="text-sm font-semibold mt-1">—</div>
-          <div id="usage-top-resource-amt" class="text-[11px] faint mono mt-0.5">$0.00</div>
-        </div>
-      </div>
-      <div class="flex items-center justify-between mb-2">
-        <h4 class="text-[12px] font-semibold tracking-tight">Where the money went</h4>
-        <span id="usage-breakdown-count" class="text-[11px] faint">0 resources</span>
-      </div>
-      <p class="text-[11.5px] faint mb-2">Each row: <span class="muted">resource units &times; price per unit = cost</span>. Sorted biggest spend first.</p>
-      <div id="usage-breakdown" class="space-y-1.5 overflow-y-auto pr-1" style="max-height:360px;"></div>
-    </section>
-
-    <!-- HOW IT BREAKS DOWN -->
+    <!-- HOW IT BREAKS DOWN (local estimate) -->
     <section class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-sm font-semibold tracking-tight">What we're paying for right now (local estimate)</h3>
@@ -736,7 +705,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         Stopping a stream or shutting down the sandbox stops the meter on that row.
       </p>
       <div id="usage-detail-rows" class="space-y-2">
-        <div class="faint text-sm">loading…</div>
+        <div class="faint text-sm">loading&hellip;</div>
       </div>
     </section>
 
@@ -745,8 +714,39 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h3 class="text-sm font-semibold tracking-tight mb-1">Recent activity (VideoDB invoices)</h3>
       <p class="text-[12px] faint mb-3">The most recent ten line-items VideoDB has billed for. This is the real number.</p>
       <div id="usage-invoices-pretty">
-        <div class="faint text-sm">loading…</div>
+        <div class="faint text-sm">loading&hellip;</div>
       </div>
+    </section>
+
+    <!-- REAL VIDEODB BILLING (from check_usage) -->
+    <section id="usage-real" class="card p-5 mb-5 hidden">
+      <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+        <h3 class="text-sm font-semibold tracking-tight">Real VideoDB billing this period</h3>
+        <span id="usage-plan" class="text-[11px] faint mono"></span>
+      </div>
+      <p class="text-[12px] faint mb-3">Live numbers from <code class="mono">conn.check_usage()</code> &mdash; what VideoDB will actually charge.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit used this period</div>
+          <div id="usage-credit-used" class="text-xl font-bold mt-1 mono">$0.00</div>
+        </div>
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Credit balance</div>
+          <div id="usage-credit-balance" class="text-xl font-bold mt-1 mono">$0.00</div>
+          <div id="usage-credit-warn" class="text-[11px] mt-0.5 hidden" style="color:#ef4444">&#9888; overdrawn &mdash; top up to continue</div>
+        </div>
+        <div class="card-soft p-3">
+          <div class="text-[10.5px] uppercase tracking-[0.1em] faint font-semibold">Top resource</div>
+          <div id="usage-top-resource" class="text-sm font-semibold mt-1">&mdash;</div>
+          <div id="usage-top-resource-amt" class="text-[11px] faint mono mt-0.5">$0.00</div>
+        </div>
+      </div>
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="text-[12px] font-semibold tracking-tight">Where the money went</h4>
+        <span id="usage-breakdown-count" class="text-[11px] faint">0 resources</span>
+      </div>
+      <p class="text-[11.5px] faint mb-2">Each row: <span class="muted">resource units &times; price per unit = cost</span>. Sorted biggest spend first.</p>
+      <div id="usage-breakdown" class="space-y-1.5 overflow-y-auto pr-1" style="max-height:360px;"></div>
     </section>
 
     <!-- TECHNICAL DETAILS (collapsible) -->
