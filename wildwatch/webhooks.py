@@ -17,18 +17,20 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from pathlib import Path as PPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypedDict
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     import videodb as _videodb_types  # for type annotations only
-from urllib.parse import urlparse
 
 import aiofiles
 from dotenv import load_dotenv
@@ -54,9 +56,38 @@ UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
 # who upload at most a few clips per session.
 _UPLOAD_BUCKET_CAPACITY = 3
 _UPLOAD_BUCKET_REFILL_PER_SEC = 1.0 / 60.0  # one new token per minute per IP
+# Hard cap on the bucket dict to bound memory under attacker probing
+# (especially when WILDWATCH_TRUSTED_PROXY=1 lets an attacker rotate
+# X-Forwarded-For). OrderedDict gives O(1) LRU eviction via popitem(False).
+_UPLOAD_BUCKETS_MAX = 50_000
 # {ip: (tokens_float, last_refill_ts)}
-_upload_buckets: dict[str, tuple[float, float]] = {}
+_upload_buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
 _upload_bucket_lock = threading.Lock()
+
+
+_IPV6_BRACKET_RE = re.compile(r"^\[(.+)\](?::\d+)?$")
+
+
+def _normalize_ip(raw: str) -> str:
+    """Strip surrounding `[...]` brackets and `:port` from an XFF token.
+
+    Without this, an attacker behind a trusted proxy could rotate the
+    port suffix on `[::1]:1`, `[::1]:2` … to mint 65k distinct bucket
+    keys from one host, defeating the per-IP limit. Returns "" for
+    empty / unparsable input.
+    """
+    raw = raw.strip()
+    if not raw:
+        return ""
+    m = _IPV6_BRACKET_RE.match(raw)
+    if m:
+        return m.group(1).strip()
+    # Strip a single trailing :port for plain IPv4 (ignore IPv6 — the
+    # bracket form above catches the port; bare IPv6 has many colons
+    # and we don't want to truncate them).
+    if raw.count(":") == 1:
+        return raw.split(":", 1)[0].strip()
+    return raw
 
 
 def _client_ip_from(request: Request) -> str:
@@ -69,14 +100,18 @@ def _client_ip_from(request: Request) -> str:
     use the FIRST IP in the X-Forwarded-For chain (the original client)
     instead of the TCP peer. Direct-exposure deployments leave the env
     unset so a remote attacker can't spoof XFF to bypass the limit.
+
+    Result is normalised to strip `[...]` and `:port` so XFF token-
+    rotation can't be used to dodge per-IP buckets.
     """
     if os.environ.get("WILDWATCH_TRUSTED_PROXY") == "1":
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            first = xff.split(",")[0].strip()
+            first = _normalize_ip(xff.split(",")[0])
             if first:
                 return first
-    return (request.client.host if request.client else "unknown") or "unknown"
+    peer = request.client.host if request.client else "unknown"
+    return _normalize_ip(peer or "") or "unknown"
 
 
 def _upload_rate_limit_check(client_ip: str) -> bool:
@@ -86,6 +121,11 @@ def _upload_rate_limit_check(client_ip: str) -> bool:
     _UPLOAD_BUCKET_REFILL_PER_SEC tokens/second up to capacity. Each
     upload consumes one token. Lock-guarded so concurrent uploads from
     one IP can't both observe a full bucket and double-spend.
+
+    Eviction: an IP that has refilled fully (idle long enough) is
+    removed from the dict — the next request resets to default-full so
+    the visible behaviour is identical. Plus a hard size cap with LRU
+    pop on overflow to bound memory under attacker probing.
     """
     now = time.time()
     with _upload_bucket_lock:
@@ -97,9 +137,32 @@ def _upload_rate_limit_check(client_ip: str) -> bool:
         )
         if tokens < 1.0:
             _upload_buckets[client_ip] = (tokens, now)
+            _upload_buckets.move_to_end(client_ip)
+            _evict_overflow_locked()
             return False
-        _upload_buckets[client_ip] = (tokens - 1.0, now)
+        new_tokens = tokens - 1.0
+        # An IP that's at full capacity after refill has no state worth
+        # remembering; dropping the entry on a request that brings the
+        # bucket back to full means an idle attacker's spoofed key gets
+        # GC'd within (capacity - 1) requests.
+        if new_tokens >= _UPLOAD_BUCKET_CAPACITY - 0.001:
+            _upload_buckets.pop(client_ip, None)
+        else:
+            _upload_buckets[client_ip] = (new_tokens, now)
+            _upload_buckets.move_to_end(client_ip)
+            _evict_overflow_locked()
         return True
+
+
+def _evict_overflow_locked() -> None:
+    """Trim LRU entries when the bucket dict exceeds the hard cap.
+
+    Caller MUST hold _upload_bucket_lock — name suffix `_locked` is the
+    project convention. OrderedDict.popitem(last=False) drops the
+    least-recently-touched entry in O(1).
+    """
+    while len(_upload_buckets) > _UPLOAD_BUCKETS_MAX:
+        _upload_buckets.popitem(last=False)
 
 
 # Strong refs to in-flight background dispatch tasks so the GC doesn't drop
