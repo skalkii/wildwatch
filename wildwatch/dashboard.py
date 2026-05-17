@@ -331,6 +331,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* Status pills */
     .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 999px; letter-spacing: .02em; border: 1px solid transparent; }
+    .id-pill { display: inline-flex; align-items: center; gap: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: var(--bg-soft); color: var(--text); border: 1px solid var(--border); cursor: pointer; vertical-align: middle; transition: background 120ms ease, border-color 120ms ease, color 120ms ease; max-width: 100%; }
+    .id-pill:hover { background: color-mix(in oklab, var(--accent) 12%, var(--bg-soft)); border-color: color-mix(in oklab, var(--accent) 40%, var(--border)); color: var(--text); }
+    .id-pill:active { transform: translateY(1px); }
+    .id-pill .id-pill-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .id-pill .id-pill-icon { flex-shrink: 0; opacity: 0.55; }
+    .id-pill:hover .id-pill-icon { opacity: 1; }
+    .id-pill.copied { background: color-mix(in oklab, #10b981 18%, var(--bg-soft)); border-color: color-mix(in oklab, #10b981 50%, var(--border)); color: #10b981; }
     .pill::before { content:''; width: 6px; height: 6px; border-radius: 999px; background: currentColor; }
     .status-queued       { color: #94a3b8; background: color-mix(in oklab, #94a3b8 15%, transparent); }
     .status-connecting   { color: #38bdf8; background: color-mix(in oklab, #38bdf8 15%, transparent); }
@@ -821,6 +828,46 @@ function safeUrl(u) {
   return ''; // anything else (javascript:, data:, vbscript:, file:) → drop
 }
 
+// ──── ID pills (click to copy) ───────────────────────────────────────────
+// Every external identifier (video_id, rtstream_id, scene_index_id, event_id,
+// sandbox id, source id) renders through _idPill. Click → clipboard, with a
+// brief "copied" visual + toast confirmation.
+function _idPill(id, opts) {
+  if (id == null || id === '') return '';
+  const s = String(id);
+  const trunc = opts && opts.truncate;
+  const max = (opts && opts.maxLen) || 18;
+  const display = trunc && s.length > max ? s.slice(0, max) + '…' : s;
+  const label = (opts && opts.label) ? `${escapeHtml(opts.label)} ` : '';
+  return `<button type="button" class="id-pill" data-action="copy-id" data-id="${escapeHtml(s)}" title="Click to copy: ${escapeHtml(s)}">${label}<span class="id-pill-text">${escapeHtml(display)}</span><svg class="id-pill-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
+}
+
+async function copyIdToClipboard(text, btn) {
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } else {
+      // Fallback for non-secure contexts (LAN demo over http://).
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    }
+  } catch (e) { ok = false; }
+  if (ok) {
+    showToast(`Copied: ${text.slice(0, 36)}${text.length > 36 ? '…' : ''}`, { variant: 'success', duration: 1800 });
+    if (btn) {
+      btn.classList.add('copied');
+      setTimeout(() => btn.classList.remove('copied'), 900);
+    }
+  } else {
+    showToast('Copy failed — your browser blocked clipboard access.', { variant: 'error', duration: 4000 });
+  }
+}
+
 // ──── Toast notifications (vanilla react-toastify-style) ─────────────────
 // Reusable, dismissable, auto-fading cards stacked in the bottom-right.
 // Replaces window.alert / window.confirm — those break tab focus and look
@@ -914,7 +961,7 @@ function renderEvent(ev) {
   const ts = ev.received_at ? new Date(ev.received_at * 1000).toLocaleTimeString() : '';
   return `<div class="ev ev-${tier} feed-enter" data-event-id="${escapeHtml(ev.event_id || '')}">
     <div class="flex justify-between items-center text-[11px] faint">
-      <span>${TIER_NAME[tier] || tier} · <span class="mono">${escapeHtml(ev.event_id || '')}</span></span>
+      <span class="inline-flex items-center gap-2">${TIER_NAME[tier] || tier} ${ev.event_id ? _idPill(ev.event_id, {truncate: true}) : ''}</span>
       <span class="mono">${ts}</span>
     </div>
     <div class="text-sm mono mt-1" style="color:var(--text)">${escapeHtml(ev.label || '')}</div>
@@ -983,10 +1030,12 @@ function applyRtstreams(d) {
   if (!d.rtstreams.length) { c.innerHTML = '<span class="faint">none</span>'; return; }
   c.innerHTML = d.rtstreams.map(r => {
     const ok = r.status === 'connected';
+    const idBit = r.id ? `<span class="ml-2 inline-block align-middle">${_idPill(r.id, {truncate: true})}</span>` : '';
     return `<div class="flex items-center justify-between gap-2">
       <span class="truncate" title="${escapeHtml(r.name)}">
         <span class="live-dot ${ok ? 'live-on' : 'live-off'}" style="vertical-align:middle"></span>
         <span style="color:var(--text)">${escapeHtml(r.name)}</span>
+        ${idBit}
       </span>
       <span class="faint mono text-[10.5px]">${escapeHtml(r.status)}</span>
     </div>`;
@@ -998,9 +1047,9 @@ function applySandboxes(d) {
   if (!d || !d.sandboxes) { c.innerHTML = '<span class="faint">n/a</span>'; return; }
   if (!d.sandboxes.length) { c.innerHTML = '<span class="faint">none</span>'; return; }
   c.innerHTML = d.sandboxes.map(sb => `<div class="flex items-center justify-between gap-2">
-    <span class="truncate">
+    <span class="truncate inline-flex items-center gap-2">
       <span class="live-dot ${sb.is_active ? 'live-on' : 'live-off'}" style="vertical-align:middle"></span>
-      <span class="mono text-[11px]" style="color:var(--text)">${escapeHtml(sb.id)}</span>
+      ${_idPill(sb.id, {truncate: true})}
     </span>
     <span class="faint text-[10.5px]">${escapeHtml(sb.tier)}</span>
   </div>`).join('');
@@ -1060,8 +1109,8 @@ function renderSource(s) {
   const statusClass = `status-${s.status || 'queued'}`;
   const errMsg = s.error ? `<div class="text-[11px] mt-1.5" style="color:#ef4444">${escapeHtml(s.error)}</div>` : '';
   const stage = s.stage_msg ? `<div class="text-[11px] faint mt-1">${escapeHtml(s.stage_msg)}</div>` : '';
-  const remote = s.video_id ? `video <code class="mono link">${escapeHtml(s.video_id)}</code>` :
-                 s.rtstream_id ? `rtstream <code class="mono link">${escapeHtml(s.rtstream_id)}</code>` : '';
+  const remote = s.video_id ? `video ${_idPill(s.video_id, {truncate: true})}` :
+                 s.rtstream_id ? `rtstream ${_idPill(s.rtstream_id, {truncate: true})}` : '';
   const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString() : '';
   // Action buttons depend on the source kind:
   //   - rtsp / rtmp: stream actually reconnects to a remote feed. Reconnect
@@ -1253,10 +1302,10 @@ function _renderLibrary() {
           <div class="text-sm font-medium truncate" title="${escapeHtml(v.name || 'untitled')}">${escapeHtml(v.name || 'Untitled clip')}</div>
           <span class="pill" style="color:${kindMeta.color}; background:color-mix(in oklab,${kindMeta.color} 14%,transparent);">${kindMeta.label}</span>
         </div>
-        <div class="text-[11px] faint flex items-center gap-2 mt-0.5">
+        <div class="text-[11px] faint flex items-center gap-2 mt-0.5 flex-wrap" data-stop-propagation>
           <span class="mono">${dur}</span>
           <span>&middot;</span>
-          <span class="mono truncate" title="${escapeHtml(v.id)}">${escapeHtml(v.id.slice(0, 18))}&hellip;</span>
+          ${_idPill(v.id, {truncate: true})}
         </div>
       </div>
       <div class="flex items-center gap-2 shrink-0" data-stop-propagation>
@@ -1307,6 +1356,29 @@ async function deleteVideo(videoId, name) {
   }
 }
 
+// Infer index kind from its name so the dashboard can show "audio" vs
+// "visual" pills without an extra API call. Naming convention used by
+// `ingest.py:_kick_off_*` and `scripts/index_corpus.py`.
+function _indexKindFromName(name) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('audio')) return 'audio';
+  if (n.includes('environment')) return 'environment';
+  if (n.includes('behavior')) return 'behavior';
+  if (n.includes('species') || n.includes('wildwatch-auto') || n.startsWith('wildwatch:')) return 'visual';
+  return 'visual';
+}
+const _INDEX_KIND_PILL = {
+  visual:      ['👁  Visual',     '#0ea5e9'],
+  audio:       ['🎧 Audio',       '#10b981'],
+  environment: ['🌿 Environment', '#a78bfa'],
+  behavior:    ['🐾 Behavior',    '#f59e0b'],
+};
+function _indexKindPill(name) {
+  const kind = _indexKindFromName(name);
+  const [label, color] = _INDEX_KIND_PILL[kind] || ['Index', '#94a3b8'];
+  return `<span class="pill" style="color:${color}; background:color-mix(in oklab,${color} 14%,transparent); border-color:color-mix(in oklab,${color} 30%,transparent);">${escapeHtml(label)}</span>`;
+}
+
 function _indexStatusPill(status) {
   const s = String(status || 'unknown').toLowerCase();
   const palette = {
@@ -1344,8 +1416,8 @@ async function showVideoDetail(videoId) {
       </div>`;
       return;
     }
-    el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2">
-        <div class="text-[11px] faint">Video <code class="mono">${escapeHtml(videoId)}</code></div>
+    el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+        <div class="text-[11px] faint inline-flex items-center gap-2">Video ${_idPill(videoId, {truncate: true})}</div>
         ${reindexBtn}
       </div>
       <div class="space-y-2">
@@ -1362,10 +1434,13 @@ async function showVideoDetail(videoId) {
           // delegated handler.
           const paneId = `scenes-pane-${idxId}`;
           return `<div class="card-soft p-3">
-            <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="min-w-0">
-                <div class="text-sm font-medium truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-                <div class="text-[11px] faint mono mt-0.5 truncate" title="${escapeHtml(idxId)}">${escapeHtml(idxId)}</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  ${_indexKindPill(name)}
+                  <div class="text-sm font-medium truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+                </div>
+                <div class="mt-1">${_idPill(idxId, {truncate: true})}</div>
               </div>
               ${_indexStatusPill(i.status)}
             </div>
@@ -1423,11 +1498,13 @@ async function reindexVideo(videoId) {
 // Render it as friendly tagged cards rather than the raw raw text.
 
 function _parseSceneText(raw) {
-  // Returns {scene:{light_mode,total,state}, animals:[{species,count,age_sex,position}], notes:string}.
-  const out = {scene: null, animals: [], notes: null};
+  // Returns a normalised structure covering BOTH index families:
+  //   - visual species: [SCENE] [ANIMAL] [NOTES]
+  //   - audio:          [SOUND] [SIGNAL] [SUMMARY]
+  // The renderer downstream picks visual vs audio card layout based on
+  // which fields are populated.
+  const out = {scene: null, animals: [], notes: null, sounds: [], signals: [], summary: null};
   if (!raw) return out;
-  // Split on each [TAG] marker. Tags can appear on the same line or new
-  // lines; either way each bracketed group starts a fresh segment.
   const tokens = raw.split(/(\\[[A-Z_]+\\])/).map(s => s.trim()).filter(Boolean);
   for (let i = 0; i < tokens.length; i++) {
     const m = tokens[i].match(/^\\[([A-Z_]+)\\]$/);
@@ -1437,6 +1514,9 @@ function _parseSceneText(raw) {
     if (tag === 'SCENE')   out.scene = _parseKVList(body);
     if (tag === 'ANIMAL')  out.animals.push(_parseKVList(body));
     if (tag === 'NOTES')   out.notes = (out.notes ? out.notes + ' ' : '') + body;
+    if (tag === 'SOUND')   out.sounds.push(_parseKVList(body));
+    if (tag === 'SIGNAL')  out.signals.push(body);
+    if (tag === 'SUMMARY') out.summary = body;
   }
   return out;
 }
@@ -1510,36 +1590,92 @@ function _renderAnimalRow(a) {
   </div>`;
 }
 
+const _SOUND_CATEGORY_PILL = {
+  biophony:       ['🦁 Biophony',       '#10b981'],
+  geophony:       ['💨 Geophony',       '#60a5fa'],
+  anthropophony:  ['⚠️ Anthropogenic',  '#ef4444'],
+};
+const _SIGNAL_PILL = {
+  ALARM_CALL:           ['Alarm call',          '#f59e0b'],
+  DISTRESS_CALL:        ['Distress call',       '#ef4444'],
+  PREDATOR_VOCALIZATION:['Predator vocal',      '#ef4444'],
+  ABNORMAL_SILENCE:     ['Abnormal silence',    '#a78bfa'],
+};
+
+function _renderSoundRow(s) {
+  const cat = String(s.category || '').toLowerCase();
+  const [catLabel, catColor] = _SOUND_CATEGORY_PILL[cat] || [cat || 'sound', '#94a3b8'];
+  const type = s.type ? s.type.replace(/_/g, ' ') : 'unknown';
+  const intensity = s.intensity ? s.intensity : null;
+  const confidence = s.confidence ? s.confidence : null;
+  const species = s.species && s.species !== 'unknown' ? s.species.replace(/_/g, ' ') : null;
+  return `<div class="flex items-baseline gap-2 text-[12.5px] flex-wrap">
+    <span class="pill" style="color:${catColor}; background:color-mix(in oklab,${catColor} 14%,transparent); border-color:color-mix(in oklab,${catColor} 30%,transparent);">${escapeHtml(catLabel)}</span>
+    <span class="font-medium">${escapeHtml(type)}</span>
+    ${species ? `<span class="faint">&middot; ${escapeHtml(species)}</span>` : ''}
+    ${intensity ? `<span class="faint">&middot; ${escapeHtml(intensity)}</span>` : ''}
+    ${confidence ? `<span class="faint">&middot; conf=${escapeHtml(confidence)}</span>` : ''}
+  </div>`;
+}
+
+function _renderSignalPill(sig) {
+  const key = String(sig || '').trim();
+  const [label, color] = _SIGNAL_PILL[key] || [key || 'signal', '#a78bfa'];
+  return `<span class="pill" style="color:${color}; background:color-mix(in oklab,${color} 14%,transparent); border-color:color-mix(in oklab,${color} 30%,transparent);">${escapeHtml(label)}</span>`;
+}
+
 function _renderSceneCard(sc, idx, videoId) {
   const start = sc.start ?? 0;
   const end = sc.end ?? 0;
   const text = (sc.description || sc.text || '').toString();
   const parsed = _parseSceneText(text);
+  const isAudio = parsed.sounds.length > 0 || parsed.signals.length > 0 || !!parsed.summary;
+  const isVisual = !!parsed.scene || parsed.animals.length > 0;
+
+  const clickable = videoId && Number.isFinite(Number(start)) && Number.isFinite(Number(end)) && Number(end) > Number(start);
+  const clickAttrs = (border) => clickable
+    ? ` role="button" tabindex="0" data-action="play-scene-clip" data-video-id="${escapeHtml(videoId)}" data-start="${start}" data-end="${end}" style="cursor:pointer; border-left:3px solid ${border}" title="Click to play this scene"`
+    : ` style="border-left:3px solid ${border}"`;
+  const playHint = clickable
+    ? '<span class="pill" style="color:var(--accent); background:color-mix(in oklab,var(--accent) 14%,transparent); border-color:color-mix(in oklab,var(--accent) 30%,transparent);">&#9658; Play</span>'
+    : '';
+
+  // ──── audio-flavoured card ────────────────────────────────────────────
+  if (isAudio && !isVisual) {
+    // Border color escalates to red if anthropogenic sound is present.
+    const anthro = parsed.sounds.some(s => String(s.category || '').toLowerCase() === 'anthropophony');
+    const border = anthro ? '#ef4444' : (parsed.signals.length ? '#f59e0b' : 'var(--border)');
+    return `<div class="card-soft p-3 mb-2 scene-card hover:translate-y-[-1px] transition"${clickAttrs(border)}>
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] faint mono">#${idx}</span>
+          <span class="text-sm font-semibold">Audio segment</span>
+          <span class="text-[11px] faint mono">${_fmtSec(start)} &ndash; ${_fmtSec(end)}</span>
+        </div>
+        <div class="flex items-center gap-1.5 flex-wrap">
+          ${parsed.signals.map(_renderSignalPill).join('')}
+          ${playHint}
+        </div>
+      </div>
+      ${parsed.sounds.length > 0 ? `<div class="mt-2 space-y-1">${parsed.sounds.map(_renderSoundRow).join('')}</div>` : ''}
+      ${parsed.summary ? `<div class="text-[11.5px] muted mt-2 border-t divider pt-1.5"><span class="faint">Summary:</span> ${escapeHtml(parsed.summary)}</div>` : ''}
+    </div>`;
+  }
+
+  // ──── visual-flavoured card (default + back-compat) ───────────────────
   const scene = parsed.scene || {};
   const state = scene.state || (parsed.animals.length === 0 ? 'empty' : '—');
   const total = scene.total || (parsed.animals.length || 0);
   const lightMode = scene.light_mode;
   const animals = parsed.animals;
   const isEmpty = state === 'empty' || animals.length === 0;
-  // Empty scenes get a muted card; populated scenes get an accent border
-  // tinted by state colour so the eye picks out aggregations / mixed.
   const [, stateColor] = _SCENE_STATE_PILL[state] || ['—', 'var(--accent)'];
-  // If the parser didn't recover anything structured AND text is present,
-  // show the cleaned raw text as a fallback so the operator can still read
-  // the AI output instead of seeing a bare card.
   const parsedNothing = !parsed.scene && animals.length === 0 && !parsed.notes;
   const fallback = parsedNothing && text
     ? `<div class="text-[12.5px] mt-2">${escapeHtml(text.slice(0, 600))}</div>`
     : '';
-  const clickable = videoId && Number.isFinite(Number(start)) && Number.isFinite(Number(end)) && Number(end) > Number(start);
-  const clickAttrs = clickable
-    ? ` role="button" tabindex="0" data-action="play-scene-clip" data-video-id="${escapeHtml(videoId)}" data-start="${start}" data-end="${end}" style="cursor:pointer; border-left:3px solid ${isEmpty ? 'var(--border)' : stateColor}" title="Click to play this scene"`
-    : ` style="border-left:3px solid ${isEmpty ? 'var(--border)' : stateColor}"`;
-  const playHint = clickable
-    ? '<span class="pill" style="color:var(--accent); background:color-mix(in oklab,var(--accent) 14%,transparent); border-color:color-mix(in oklab,var(--accent) 30%,transparent);">&#9658; Play</span>'
-    : '';
-
-  return `<div class="card-soft p-3 mb-2 scene-card hover:translate-y-[-1px] transition"${clickAttrs}>
+  const border = isEmpty ? 'var(--border)' : stateColor;
+  return `<div class="card-soft p-3 mb-2 scene-card hover:translate-y-[-1px] transition"${clickAttrs(border)}>
     <div class="flex items-center justify-between gap-2 flex-wrap">
       <div class="flex items-center gap-2">
         <span class="text-[11px] faint mono">#${idx}</span>
@@ -1707,8 +1843,16 @@ $('search-go').addEventListener('click', async () => {
           description: sh.text || '',
         };
         const card = _renderSceneCard(synthetic, i + 1, vid);
-        const src = sh.video_name || sh.video_id || sh.rtstream_id || '';
-        const meta = `<div class="text-[11px] faint mt-1">score=${sh.score?.toFixed?.(2) ?? '?'}${src ? ` &middot; ${escapeHtml(src)}` : ''}${sh.scene_index_name || sh.scene_index_id ? ` &middot; idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id)}` : ''}</div>`;
+        const srcName = sh.video_name || '';
+        const srcId = sh.video_id || sh.rtstream_id || '';
+        const idxId = sh.scene_index_id || '';
+        const idxName = sh.scene_index_name || '';
+        const parts = [`score=${sh.score?.toFixed?.(2) ?? '?'}`];
+        if (srcName) parts.push(escapeHtml(srcName));
+        if (srcId) parts.push(_idPill(srcId, {truncate: true}));
+        if (idxName && !srcName) parts.push(escapeHtml(idxName));
+        if (idxId) parts.push(_idPill(idxId, {truncate: true, label: 'idx'}));
+        const meta = `<div class="text-[11px] faint mt-1 inline-flex items-center gap-2 flex-wrap" data-stop-propagation>${parts.join(' <span class=&quot;faint&quot;>&middot;</span> ')}</div>`;
         return `<div class="mb-2">${card}${meta}</div>`;
       }).join('');
   } catch (e) { $('search-results').innerHTML = `<span style="color:#ef4444">${escapeHtml(String(e))}</span>`; }
@@ -2079,6 +2223,7 @@ document.addEventListener('click', (e) => {
     case 'reindex-video':   reindexVideo(id); break;
     case 'delete-video':    deleteVideo(id, t.dataset.name); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
+    case 'copy-id':         copyIdToClipboard(t.dataset.id, t); break;
     case 'play-scene-clip': {
       const v = t.dataset.videoId;
       const s = parseFloat(t.dataset.start);

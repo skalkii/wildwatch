@@ -154,7 +154,8 @@ The judges built VideoDB around three layers: **See, Understand, Act**. Most sub
 | Understand | `rtstream.index_audio(prompt=...)` | One audio index covering biophony + anthropophony. The differentiator. |
 | Understand | `rtstream.search(query, index_id, time_range=...)` | Used in correlation engine to detect multi-modal patterns. |
 | Act | `conn.create_event(event_prompt=..., label=...)` | Defined ONCE, reused across both streams (this is the design intent). |
-| Act | `index.create_alert(event_id, callback_url=...)` | Webhooks → FastAPI → Telegram with clip URL. |
+| Act | `index.create_alert(event_id, callback_url=...)` | Webhooks → FastAPI → Telegram with clip URL. **Rtstream-only** in the current SDK; for uploaded videos, see Path B below. |
+| Act | `video.search` over `index_type=scene` + synthesised webhook POST | **Path B** — works around the rtstream-only `create_alert` so archive URL uploads also fire Telegram. After upload, `wildwatch/post_upload_analysis.py` polls until both visual + audio indexes finish, runs `video.search(query, index_type=scene)` per event-of-interest, and POSTs to our own `/webhook/{tier}` on hits. Flows through the same Telegram pipeline as rtstream alerts. |
 | Act | `conn.connect_websocket()` | Live dashboard channel for the demo. |
 | Act | `rtstream.generate_stream(start, end)` / `video.generate_stream(timeline=[(start,end)])` | Playable clip URLs — attached to alerts AND served via `GET /api/videos/{id}/clip` for dashboard scene-card click-to-play (hls.js modal). |
 | Act | Programmable editing | Auto-generate daily highlight reel from flagged shots. |

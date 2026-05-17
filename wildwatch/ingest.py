@@ -183,6 +183,66 @@ async def _kick_off_scene_index(video, source_id: str) -> None:
         logger.info("ingest: kicked off scene index for source=%s idx=%s", source_id, idx_id)
 
 
+async def _kick_off_audio_index_async(video, source_id: str) -> None:
+    """Async wrapper around the post_upload_analysis audio-index kickoff.
+
+    Same fire-and-forget contract as ``_kick_off_scene_index`` — failures
+    are logged but never propagate.
+    """
+    from wildwatch.post_upload_analysis import kick_off_audio_index
+
+    try:
+        await asyncio.to_thread(kick_off_audio_index, video, source_id)
+    except Exception as e:
+        logger.warning(
+            "ingest: audio index kickoff failed for source=%s: %r — video usable but no audio alerts",
+            source_id,
+            e,
+        )
+
+
+# Strong refs to background analysis tasks so the GC can't drop them
+# mid-execution. Tasks are popped from the set when they finish.
+_post_analysis_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_post_upload_analysis(video, source_id: str) -> None:
+    """Spawn the Path-B post-upload event sweep as a tracked bg task.
+
+    The function returns immediately. The task lives for as long as the
+    audio + species indexes need to reach `done` (capped at 20 min) plus
+    a short search budget. Errors surface through ``done_callback`` log
+    instead of an unawaited-coroutine warning.
+    """
+    from wildwatch.post_upload_analysis import run_post_upload_analysis
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning(
+            "ingest: cannot spawn post-upload analysis (no running loop) for %s",
+            source_id,
+        )
+        return
+
+    task = loop.create_task(run_post_upload_analysis(video, source_id))
+    _post_analysis_tasks.add(task)
+
+    def _on_done(t: asyncio.Task[Any]) -> None:
+        _post_analysis_tasks.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            logger.warning(
+                "ingest: post-upload analysis task for %s raised: %r",
+                source_id,
+                exc,
+            )
+
+    task.add_done_callback(_on_done)
+
+
 async def _ingest_upload(source, coll: Any) -> None:
     _emit(source.id, "ingesting", stage_msg="uploading file to VideoDB")
     video = await asyncio.to_thread(coll.upload, file_path=source.input)
@@ -194,19 +254,21 @@ async def _ingest_upload(source, coll: Any) -> None:
     _emit(
         source.id,
         "indexing",
-        stage_msg="kicking off scene index on VideoDB",
+        stage_msg="kicking off scene + audio indexes on VideoDB",
         video_id=video.id,
     )
     await _kick_off_scene_index(video, source.id)
+    await _kick_off_audio_index_async(video, source.id)
     _emit(
         source.id,
         "ready",
         stage_msg=(
             f"uploaded {getattr(video, 'length', '?')}s — "
-            "scene index processing (check Indexed Content tab)"
+            "scene + audio indexes processing; auto-analysis running in background"
         ),
         video_id=video.id,
     )
+    _spawn_post_upload_analysis(video, source.id)
 
 
 async def _ingest_url(source, coll: Any) -> None:
@@ -217,19 +279,21 @@ async def _ingest_url(source, coll: Any) -> None:
     _emit(
         source.id,
         "indexing",
-        stage_msg="kicking off scene index on VideoDB",
+        stage_msg="kicking off scene + audio indexes on VideoDB",
         video_id=video.id,
     )
     await _kick_off_scene_index(video, source.id)
+    await _kick_off_audio_index_async(video, source.id)
     _emit(
         source.id,
         "ready",
         stage_msg=(
             f"uploaded {getattr(video, 'length', '?')}s — "
-            "scene index processing (check Indexed Content tab)"
+            "scene + audio indexes processing; auto-analysis running in background"
         ),
         video_id=video.id,
     )
+    _spawn_post_upload_analysis(video, source.id)
 
 
 _RT_READY_STATUSES = {"connected", "streaming", "running", "active"}

@@ -107,7 +107,8 @@ flowchart TD
     - `ingest_hls`: HEAD-checks the manifest, then `coll.upload(url=...)`.
     - `ingest_rtstream`: `coll.connect_rtstream(url=..., media_types=["video","audio"], store=True)` and waits for `status="connected"`.
 13–14. **Progress states** — each handler updates the source's `status` field (`queued → connecting → ingesting → indexing → ready`) and broadcasts a `source_progress` SSE event after every change.
-14b. **Auto scene-index (uploads + URLs only)** — `ingest.py:_kick_off_scene_index(video, source_id)` fires `video.index_scenes(prompt=species, name=wildwatch-auto-<src8>)` straight after `coll.upload` succeeds. Idempotent (skips if `video.list_scene_index()` is non-empty) and best-effort (failure is logged + the source still flips to `ready`). The actual scene generation runs on VideoDB's side and shows up as `processing` → `done` when the dashboard polls `/api/videos/{id}/scenes/{index_id}`. Operators can also force a fresh index via the Re-index button (calls `POST /api/videos/{id}/reindex`) or via `python scripts/index_corpus.py` for the corpus.
+14b. **Auto scene-index + audio-index (uploads + URLs only)** — `ingest.py:_kick_off_scene_index(video, source_id)` fires `video.index_scenes(prompt=species, name=wildwatch-auto-<src8>)` AND `_kick_off_audio_index_async` fires `video.index_audio(prompt=audio, name=wildwatch-audio-<src8>)`. Both are idempotent and best-effort. The actual indexing runs on VideoDB's side and shows up as `processing` → `done` when the dashboard polls `/api/videos/{id}/scenes/{index_id}`. Operators can force a fresh visual index via the Re-index button (calls `POST /api/videos/{id}/reindex`) or via `python scripts/index_corpus.py` for the corpus.
+14c. **Post-upload auto-analysis (Path B alerts)** — immediately after `_emit("ready", …)`, `_spawn_post_upload_analysis(video, source_id)` kicks `wildwatch/post_upload_analysis.py:run_post_upload_analysis` as a tracked asyncio task. That task polls both indexes until `done`, runs `video.search(query, index_type=scene, scene_index_id=…, score_threshold=0.35)` for each event-of-interest (gunshot, chainsaw, rare species, alarm calls, etc.) and POSTs a synthesised payload to `/webhook/{tier}` for every hit — flowing through the same Telegram + dashboard SSE pipeline as VideoDB-fired rtstream alerts. Capped at 12 fires per upload. This works around the SDK limitation that `create_alert` only attaches to rtstream indexes.
 15–16. **Ready** — the source now has a `video_id` (for uploads/URLs) or `rtstream_id` (for live streams) and is searchable.
 17. **Card flips to ready** — the dashboard re-fetches `/api/sources` on `source_progress` AND on `source_deleted`, so both happy-path and rejection-path UI updates are instant.
 
@@ -481,6 +482,69 @@ flowchart TD
 11. **Cache bust + SSE** — the in-process `_videos_cache` is zeroed (so the next `/api/videos` actually hits the SDK) and a `{"type": "video_deleted", "video_id": id}` event is broadcast to every open dashboard.
 12. **Optimistic UI** — the client immediately filters the deleted id out of `_libraryVids` and re-renders, then kicks `fetchVideos()` again to reconcile against the server's truth.
 13. **Detail panel cleanup** — if the deleted video was the one open in the right pane, the pane resets to its placeholder text.
+
+---
+
+## Flow 11 — Path B: post-upload auto-analysis (Telegram on archive uploads)
+
+VideoDB's `create_alert` only attaches to **rtstream** scene indexes — uploaded videos have indexes you can search but cannot push push-based alerts on. WildWatch closes that gap with a post-upload sweep that polls until both indexes finish, searches each one for known threats / events, and synthesises webhooks on hits. The synthesised webhooks flow through the *exact same* `/webhook/{tier}` pipeline as VideoDB-fired alerts — so Telegram, the dashboard SSE feed, and the event log all behave identically.
+
+```mermaid
+flowchart TD
+    A[User adds URL source<br/>or uploads a file] --> B[ingest.py:_ingest_url<br/>or _ingest_upload]
+    B --> C[coll.upload]
+    C --> D[_kick_off_scene_index<br/>video.index_scenes<br/>species prompt]
+    C --> E[_kick_off_audio_index_async<br/>video.index_audio<br/>audio prompt]
+    D --> F[Source status=ready]
+    E --> F
+    F --> G[_spawn_post_upload_analysis<br/>asyncio.Task tracked in set]
+    G --> H[run_post_upload_analysis]
+    H --> I1[_wait_for_index<br/>wildwatch-auto<br/>20m cap]
+    H --> I2[_wait_for_index<br/>wildwatch-audio<br/>8m cap]
+    I1 --> J{both / either<br/>ready?}
+    I2 --> J
+    J -->|neither| K0[log + exit]
+    J -->|at least one| K[Loop _EVENT_QUERY<br/>id_var → query string]
+    K --> L{Which index<br/>per event kind?}
+    L -->|audio events| M1[v.search idx=audio<br/>score_threshold=0.35]
+    L -->|species/env events| M2[v.search idx=visual<br/>score_threshold=0.35]
+    M1 --> N{hits?}
+    M2 --> N
+    N -->|no| K
+    N -->|yes| O[pick top-scoring shot]
+    O --> P[generate_stream<br/>start, end → m3u8]
+    P --> Q[POST /webhook/&#123;tier&#125;<br/>label, explanation, stream_url]
+    Q --> R[normal alert pipeline<br/>event_log + Telegram + SSE]
+    R --> S{fire cap<br/>= 12?}
+    S -->|no| K
+    S -->|yes| T[log + exit]
+```
+
+### Node-by-node
+
+1. **Entry** — operator pastes a URL or uploads a file in the Sources tab.
+2. **Ingest** — `_ingest_url` / `_ingest_upload` calls `coll.upload(...)`. Video is now in VideoDB.
+3. **Two indexes kicked off in parallel:**
+    - `_kick_off_scene_index` → `video.index_scenes(prompt=species, name="wildwatch-auto-<src8>")` (visual / species).
+    - `_kick_off_audio_index_async` → `video.index_audio(prompt=audio, name="wildwatch-audio-<src8>")` (transcript-based audio classifier).
+   Both are idempotent (skip if a matching-named index exists) and best-effort.
+4. **Source flips to `ready`** — the dashboard card turns green; the user can search the indexes manually.
+5. **`_spawn_post_upload_analysis(video, source_id)`** — fire-and-forget asyncio Task, kept in a module-level set (`_post_analysis_tasks`) so the GC can't drop it mid-run. `done_callback` logs any uncaught exception.
+6. **`run_post_upload_analysis`** — the worker coroutine.
+7. **`_wait_for_index(video, name_substr, cap_s)`** — polls `video.list_scene_index()` every 8 s, returns the index metadata when `status in {ready, indexed, complete, completed, done}`, or `None` on `failed` / `error` / timeout. Visual cap 20 min, audio cap 8 min.
+8. **Both deadlines hit with no ready index** — log + exit cleanly. The upload is still searchable; the operator just doesn't get auto-alerts.
+9. **Iterate `_EVENT_QUERY`** — a hand-curated mapping from event `id_var` (defined in `wildwatch/events.py`) to a short natural-language search query. The event prompts in `events.py` are written for VideoDB's event engine ("Detect when sound type is gunshot, confidence medium or high"); those don't translate well to free-text search, so the search query is separate.
+10. **Per-event index routing** — `_EVENT_INDEX_KIND` maps each `id_var` to which index it should search. Audio events → audio index. Species/environment events → visual scene index.
+11. **`video.search(query, index_type=scene, scene_index_id=…, score_threshold=0.35)`** — semantic search over the bracket-tagged AI output. Empty results are caught (the SDK raises `InvalidRequestError` with `"No results found"`) and treated as `[]`.
+12. **Top-scoring shot** — `max(shots, key=search_score)`. One synthesised event per event-of-interest, not one per hit, to prevent flooding Telegram with 50 "gunshot" pings for a single clip.
+13. **`generate_stream(timeline=[(start, end)])`** — get a playable HLS manifest for the matched segment so the Telegram message and dashboard feed both have a tap-to-play link.
+14. **`POST /webhook/{tier}`** — synthesised payload includes `label`, `tier`, `confidence` (mapped from score), `explanation`, `video_id`, `start_time`, `end_time`, `stream_url`. Default POST target is `http://localhost:8000` (override via `LOCAL_WEBHOOK_URL` env var).
+15. **Normal pipeline** — `webhooks.py:receive_alert` is agnostic to who fired the event. Same event log append, same Telegram send, same dashboard SSE broadcast.
+16. **Fire cap** — `_MAX_FIRES_PER_UPLOAD = 12`. Stops the loop early if hit. Protects Telegram from runaway prompts.
+
+> **Why polling instead of a callback?** `video.index_scenes` and `video.index_audio` both accept a `callback_url` param, which VideoDB will POST to when the index finishes. We don't use it because (a) it requires a public webhook URL — the whole point of Path B is to work *without* a cloudflared tunnel, and (b) we want to fire alerts for hits, not just "index done." A callback would still need a subsequent search loop.
+
+> **Operational hint:** if no alerts fire, run `python scripts/index_corpus.py --slug <yourclip>` to verify the indexes actually have content, then check the uvicorn logs for `post-analysis:` lines.
 
 ---
 
