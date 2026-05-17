@@ -46,8 +46,15 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
         # read .state.json before the chmod corrected it.
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         fd = os.open(str(tmp), flags, 0o600)
+        fdopen_succeeded = False
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            wrapped = os.fdopen(fd, "w", encoding="utf-8")
+            # Once fdopen returns successfully, IT owns the fd and will
+            # close it on context exit. Mark the bare-fd close path as
+            # OWNED so the BaseException handler below doesn't try a
+            # double-close on a recycled descriptor.
+            fdopen_succeeded = True
+            with wrapped as f:
                 f.write(payload)
                 f.flush()
                 try:
@@ -55,13 +62,14 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
                 except OSError as e:
                     logger.warning("atomic_write_json: fsync failed on %s: %r", tmp, e)
         except BaseException:
-            # If fdopen / write raised after the fd was opened, the fd
-            # was given to fdopen which closes it. If os.open succeeded
-            # but fdopen never ran, close fd here.
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+            # Only close `fd` if fdopen NEVER took ownership. After fdopen
+            # returns, wrapped.__exit__ closes the fd; on some BSDs a
+            # double-close hits a recycled fd in another thread.
+            if not fdopen_succeeded:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             raise
         # Belt-and-braces: re-chmod in case the underlying filesystem
         # ignored the mode argument (some network filesystems do).
