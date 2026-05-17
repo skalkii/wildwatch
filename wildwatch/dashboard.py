@@ -40,11 +40,22 @@ MAX_RECENT_EVENTS = 50
 # avoid touching every existing emit site.
 
 
-class AlertEvent(TypedDict, total=False):
-    """Alert payload — NO `type` key. Tier counts + _recent_events."""
+# Split into required-base + optional-extras using TypedDict inheritance.
+# Static checkers reject `{}` as an AlertEvent or `{}` as a UISignalEvent
+# now — tier/label and type are mandatory, respectively. Without this an
+# empty dict matched either TypedDict structurally and the runtime
+# discriminator (`"type" not in event`) would treat it as an alert and
+# increment _total / _tier_counts.
 
+
+class _AlertEventRequired(TypedDict):
     tier: int
     label: str
+
+
+class AlertEvent(_AlertEventRequired, total=False):
+    """Alert payload — NO `type` key, tier+label REQUIRED."""
+
     event_id: str | None
     confidence: float | None
     explanation: str | None
@@ -55,11 +66,14 @@ class AlertEvent(TypedDict, total=False):
     received_at: float
 
 
-class UISignalEvent(TypedDict, total=False):
-    """UI signal payload — `type` key REQUIRED. Routed to SSE only."""
-
+class _UISignalRequired(TypedDict):
     type: Literal["source_progress", "source_deleted"]
     source_id: str
+
+
+class UISignalEvent(_UISignalRequired, total=False):
+    """UI signal payload — `type` + `source_id` REQUIRED. Routed to SSE only."""
+
     status: str
     stage_msg: str | None
     progress_pct: int | None
