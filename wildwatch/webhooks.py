@@ -599,6 +599,11 @@ async def receive_alert(
     if payload.explanation and len(payload.explanation) >= 40:
         try:
             coll = await _async_sdk(_get_coll, timeout_s=5.0)
+            # 25s — VideoDB's basic model occasionally takes 12-18s on a
+            # cold start. 12s was too aggressive (2 of 3 manual test fires
+            # timed out). Real cost of a longer wait is fine: webhook
+            # already returns 200 only after Telegram delivers, so 25s
+            # extra is acceptable; VideoDB only retries on 5xx anyway.
             rewritten = await asyncio.wait_for(
                 asyncio.to_thread(
                     genai_friendly_explanation,
@@ -607,7 +612,7 @@ async def receive_alert(
                     payload.label,
                     payload.explanation,
                 ),
-                timeout=12.0,
+                timeout=25.0,
             )
             if rewritten:
                 final_expl = rewritten
