@@ -589,8 +589,8 @@ async def api_remote() -> JSONResponse:
         if (now - _remote_cache["at"]) < _REMOTE_TTL_S:
             return JSONResponse(_remote_cache["data"])
     try:
-        coll = await asyncio.to_thread(_get_coll)
-        conn = await asyncio.to_thread(_get_conn)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        conn = await _async_sdk(_get_conn, timeout_s=10.0)
         rts = await _async_sdk(coll.list_rtstreams, timeout_s=5.0) or []
         sbs = await _async_sdk(conn.list_sandboxes, timeout_s=5.0) or []
         rtstreams = [
@@ -743,7 +743,7 @@ async def api_create_source(payload: SourceCreate) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch({s.id})")
     return s.__dict__
 
@@ -895,7 +895,7 @@ async def api_upload_source(
         await asyncio.to_thread(sources.update_source, s.id, status="error", error=str(e))
         raise
 
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch.upload({s.id})")
     return (await asyncio.to_thread(sources.get_source, s.id)).__dict__
 
@@ -909,19 +909,19 @@ async def api_delete_source(source_id: str) -> dict:
     # but collect every failure so the caller can see remote resources that
     # may still be running (and burning credits). All blocking SDK calls go
     # through asyncio.to_thread so the event loop stays responsive.
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     warnings: list[str] = []
     if s.rtstream_id:
         try:
-            rt = await asyncio.to_thread(coll.get_rtstream, s.rtstream_id)
-            await asyncio.to_thread(rt.stop)
+            rt = await _async_sdk(coll.get_rtstream, s.rtstream_id, timeout_s=5.0)
+            await _async_sdk(rt.stop, timeout_s=10.0)
         except Exception as e:
             msg = f"rt.stop failed for {s.rtstream_id}: {e}"
             logger.warning("delete: %s", msg)
             warnings.append(msg)
     if s.video_id:
         try:
-            await asyncio.to_thread(coll.delete_video, s.video_id)
+            await _async_sdk(coll.delete_video, s.video_id, timeout_s=10.0)
         except Exception as e:
             msg = f"coll.delete_video failed for {s.video_id}: {e}"
             logger.warning("delete: %s", msg)
@@ -949,10 +949,10 @@ async def api_disconnect_source(source_id: str) -> dict:
         raise HTTPException(status_code=404, detail="source not found")
     if not s.rtstream_id:
         return {"status": "noop", "reason": "no rtstream attached"}
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     try:
-        rt = await asyncio.to_thread(coll.get_rtstream, s.rtstream_id)
-        await asyncio.to_thread(rt.stop)
+        rt = await _async_sdk(coll.get_rtstream, s.rtstream_id, timeout_s=5.0)
+        await _async_sdk(rt.stop, timeout_s=10.0)
         await asyncio.to_thread(
             sources.update_source, source_id, status="disconnected", stage_msg="rtstream stopped"
         )
@@ -974,7 +974,7 @@ async def api_reconnect_source(source_id: str) -> dict:
         error=None,
         stage_msg="reconnect requested",
     )
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     _spawn_bg(
         ingest.dispatch(source_id, coll=coll), label=f"ingest.dispatch.reconnect({source_id})"
     )
@@ -997,7 +997,7 @@ async def api_list_videos() -> JSONResponse:
         if (now - _videos_cache["at"]) < _VIDEOS_TTL_S:
             return JSONResponse(_videos_cache["data"])
     try:
-        coll = await asyncio.to_thread(_get_coll)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
         videos = await _async_sdk(coll.get_videos, timeout_s=8.0)
         items = []
         for v in videos:
@@ -1051,7 +1051,7 @@ def _coerce_to_list(value: Any, *, source: str) -> list:
 @app.get("/api/videos/{video_id}/indexes")
 async def api_video_indexes(video_id: str) -> dict:
     try:
-        coll = await asyncio.to_thread(_get_coll)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         indexes = _coerce_to_list(
             await _async_sdk(video.list_scene_index, timeout_s=5.0),
@@ -1065,7 +1065,7 @@ async def api_video_indexes(video_id: str) -> dict:
 @app.get("/api/videos/{video_id}/scenes/{index_id}")
 async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
     try:
-        coll = await asyncio.to_thread(_get_coll)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         scenes = _coerce_to_list(
             await _async_sdk(video.get_scene_index, index_id, timeout_s=5.0),
@@ -1080,7 +1080,7 @@ async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dic
 @app.get("/api/rtstreams/{rt_id}/indexes")
 async def api_rtstream_indexes(rt_id: str) -> dict:
     try:
-        coll = await asyncio.to_thread(_get_coll)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
         rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
         raw = _coerce_to_list(
             await _async_sdk(rt.list_scene_indexes, timeout_s=5.0),
@@ -1104,7 +1104,7 @@ async def api_rtstream_indexes(rt_id: str) -> dict:
 @app.get("/api/rtstreams/{rt_id}/scenes/{index_id}")
 async def api_rtstream_scenes(rt_id: str, index_id: str, page_size: int = 20) -> dict:
     try:
-        coll = await asyncio.to_thread(_get_coll)
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
         rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
         idx = await _async_sdk(rt.get_scene_index, index_id, timeout_s=5.0)
         data = await _async_sdk(idx.get_scenes, page=1, page_size=page_size, timeout_s=5.0)
@@ -1362,7 +1362,7 @@ async def api_usage() -> dict:
     # get_sandbox). Run it on the thread pool so we don't park the loop.
     out: dict[str, Any] = {"estimate": await asyncio.to_thread(_estimate_credit_burn_usd)}
     try:
-        conn = await asyncio.to_thread(_get_conn)
+        conn = await _async_sdk(_get_conn, timeout_s=10.0)
     except Exception as e:
         out["usage_error"] = str(e)
         out["invoices_error"] = "no connection"
@@ -1396,7 +1396,7 @@ async def api_search(req: SearchRequest) -> dict:
         "No results found"); catch it and return ``shots: []`` instead of
         a 500. That's what every skill example does.
     """
-    coll = await asyncio.to_thread(_get_coll)
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
     # Late import — videodb is heavy + we want the SDK constants if available.
     try:
         from videodb import IndexType, SearchType
