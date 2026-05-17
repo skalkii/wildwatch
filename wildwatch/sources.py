@@ -63,26 +63,16 @@ class Source:
     updated_at: float = field(default_factory=time.time)
 
 
-# Whitelist of fields update_source accepts. **fields was untyped which
-# let any caller corrupt arbitrary fields silently. This list is the
-# single source of truth — adding a field to Source requires adding it
-# here too, which is the right kind of friction.
-_UPDATABLE_FIELDS: frozenset[str] = frozenset(
-    {
-        "kind",
-        "input",
-        "name",
-        "status",
-        "progress_pct",
-        "stage_msg",
-        "error",
-        "video_id",
-        "rtstream_id",
-        "indexes",
-        "credit_estimate_usd",
-    }
-)
+# Immutable identity / lifecycle fields — never overwritten via the
+# update API. Anything else on Source is auto-allowed.
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset({"id", "created_at", "updated_at"})
+
+# Whitelist of fields update_source accepts. Auto-derived from the
+# dataclass so adding a new field to Source doesn't silently lock it
+# out — the previous manually-maintained set drifted from the dataclass
+# shape every time someone added a field.
 _SOURCE_FIELD_NAMES: frozenset[str] = frozenset(f.name for f in fields(Source))
+_UPDATABLE_FIELDS: frozenset[str] = _SOURCE_FIELD_NAMES - _IMMUTABLE_FIELDS
 
 
 # ──── state helpers ───────────────────────────────────────────────────────
