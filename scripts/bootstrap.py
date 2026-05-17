@@ -350,6 +350,9 @@ def main() -> int:
                 except Exception as exc:
                     print(f"  _bootstrap_stream failed for {sk}: {exc}")
                     continue
+            # `started_at` is REQUIRED — `webhooks._estimate_credit_burn_usd`
+            # filters rtstreams without it from the Usage meter, so omitting
+            # this hides the cost from the operator.
             state.setdefault("rtstreams", {})[sk] = {
                 "id": srt.id,
                 "url": rtsp,
