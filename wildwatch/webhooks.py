@@ -1188,8 +1188,62 @@ def _coerce_to_list(value: Any, *, source: str) -> list:
         return []
 
 
+def _probe_transcript_blocked(video: Any) -> str | None:
+    """Return a short reason string when the video has no speech transcript.
+
+    VideoDB's `index_audio` is transcript-based — it permanently hangs in
+    `processing` for clips with no speech. The SDK's `list_scene_index`
+    output gives no hint (just `status=processing`), so we probe the
+    transcript layer: a failure with "no spoken data found" or "Transcript
+    job failed" is the signal that any audio index on this video will
+    never complete.
+
+    Returns None on success or unknown failures. The dashboard treats a
+    non-None return as "audio indexing is blocked; show the user a clear
+    explanation instead of `processing` forever".
+    """
+    try:
+        existing = video.get_transcript()
+        if existing:
+            # Non-empty list/string = speech present, audio indexing OK.
+            if isinstance(existing, list) and any(str(s.get("text", "")).strip() for s in existing):
+                return None
+            if isinstance(existing, str) and existing.strip():
+                return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "no spoken data" in msg or "transcript job failed" in msg:
+            return "no_speech"
+    # Try generate as a tie-breaker
+    try:
+        result = video.generate_transcript(force=False)
+        if isinstance(result, dict):
+            if (result.get("text") or "").strip():
+                return None
+            if result.get("word_timestamps"):
+                return None
+        elif isinstance(result, str) and result.strip():
+            return None
+    except Exception as e:
+        msg = str(e).lower()
+        if "no spoken data" in msg or "transcript job failed" in msg:
+            return "no_speech"
+        # Unknown error — don't claim block; let it ride.
+    return None
+
+
 @app.get("/api/videos/{video_id}/indexes")
 async def api_video_indexes(video_id: str) -> dict:
+    """Return scene indexes for a video, with audio-blocked annotation.
+
+    For every index whose name contains 'audio' AND status is
+    `processing/queued/pending/initiated`, probe `video.get_transcript()`.
+    If the probe says "no spoken data found", attach
+    `audio_blocked: 'no_speech'` to that index entry so the dashboard
+    can render "Audio skipped (no speech in clip)" instead of
+    "still processing" — which would be a lie since `video.index_audio`
+    will never finish on a wordless clip.
+    """
     try:
         coll = await _async_sdk(_get_coll, timeout_s=10.0)
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
@@ -1197,9 +1251,54 @@ async def api_video_indexes(video_id: str) -> dict:
             await _async_sdk(video.list_scene_index, timeout_s=5.0),
             source=f"video({video_id}).list_scene_index",
         )
+        # Annotate stuck audio indexes only — skip the transcript probe
+        # entirely when no audio index needs it (saves a round-trip).
+        stuck_audio = [
+            i
+            for i in indexes
+            if "audio" in str(i.get("name", "")).lower()
+            and str(i.get("status", "")).lower() in ("processing", "queued", "pending", "initiated")
+        ]
+        if stuck_audio:
+            try:
+                blocked = await _async_sdk(_probe_transcript_blocked, video, timeout_s=15.0)
+            except Exception:
+                blocked = None
+            if blocked == "no_speech":
+                for i in stuck_audio:
+                    # Mutate in place — the dict came from _coerce_to_list,
+                    # not the SDK object, so this is safe to enrich.
+                    i["audio_blocked"] = "no_speech"
+                    i["audio_blocked_message"] = (
+                        "VideoDB's audio indexing is transcript-based and "
+                        "this clip has no detected speech. The audio index "
+                        "will not complete. The visual scene index still "
+                        "covers events on this clip."
+                    )
         return {"video_id": video_id, "indexes": indexes}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.delete("/api/videos/{video_id}/indexes/{index_id}")
+async def api_delete_video_index(video_id: str, index_id: str) -> dict:
+    """Delete a single scene index from a video.
+
+    Used by the dashboard's "remove" button on stuck audio indexes
+    (VideoDB has no cancel-job API; deletion is the only way to clear
+    a permanently-`processing` index). Returns 502 on SDK failure so
+    the dashboard can toast a useful error instead of 500.
+    """
+    try:
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
+    try:
+        await _async_sdk(video.delete_scene_index, index_id, timeout_s=10.0)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"delete_scene_index failed: {e}") from e
+    return {"video_id": video_id, "index_id": index_id, "status": "deleted"}
 
 
 @app.get("/api/videos/{video_id}/scenes/{index_id}")

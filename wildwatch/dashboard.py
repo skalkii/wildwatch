@@ -588,7 +588,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
         <div class="lg:col-span-7 relative">
           <svg class="absolute left-3 top-1/2 -translate-y-1/2 faint" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input id="search-q" placeholder='Try: "lion roar", "vehicle at night", "juvenile elephant"…' class="input w-full pl-9 pr-3 py-2.5 text-sm">
+          <input id="search-q" placeholder='Try: "lion roar", "vehicle at night", "juvenile elephant"&hellip;' class="input w-full pl-9 pr-8 py-2.5 text-sm">
+          <button id="search-clear" type="button" class="absolute right-2 top-1/2 -translate-y-1/2 faint hidden hover:opacity-100" style="background:none;border:none;cursor:pointer;padding:4px;" title="Clear search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+          </button>
         </div>
         <div class="lg:col-span-3">
           <select id="search-scope" class="input w-full px-3 py-2.5 text-sm">
@@ -1688,6 +1691,32 @@ async function showVideoDetail(videoId) {
           // bottom of the panel). data-pane id pairs to data-idx via the
           // delegated handler.
           const paneId = `scenes-pane-${idxId}`;
+          // Audio-blocked annotation comes from the backend probing
+          // `video.get_transcript()` and detecting "no spoken data".
+          // For these indexes, "processing" would lie — they hang forever.
+          // Render a clear explanation + a remove button so the operator
+          // can clean up the dead row.
+          const blocked = i.audio_blocked;
+          const blockedMsg = i.audio_blocked_message || '';
+          const blockedCard = blocked
+            ? `<div class="card-soft p-2 mt-2" style="border-left:3px solid #f59e0b; background:color-mix(in oklab,#f59e0b 6%, transparent);">
+                <div class="text-[12px] font-semibold" style="color:#f59e0b;">Audio indexing blocked &mdash; no speech detected</div>
+                <div class="text-[11.5px] muted mt-1">${escapeHtml(blockedMsg)}</div>
+                <div class="text-[11px] faint mt-1">VideoDB SDK cannot classify non-speech sounds (gunshots, animal calls, vehicles) on uploaded videos at this time. See <code class="mono">docs/GENAI_ROADMAP.md</code> Phase 7 for the planned external-model integration.</div>
+              </div>`
+            : '';
+          const statusPill = blocked
+            ? `<span class="pill" style="color:#f59e0b; background:color-mix(in oklab,#f59e0b 14%,transparent); border-color:color-mix(in oklab,#f59e0b 30%,transparent);">no speech &mdash; skipped</span>`
+            : _indexStatusPill(i.status);
+          const removeBtn = blocked
+            ? `<button data-action="delete-index" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="btn text-[11.5px]" style="background:color-mix(in oklab,#ef4444 14%,transparent); color:#ef4444; border:1px solid color-mix(in oklab,#ef4444 35%,transparent);" title="Delete this stuck audio index from VideoDB.">&times; Remove</button>`
+            : '';
+          // For blocked indexes hide the "View scenes" button — there
+          // are no scenes to view, and clicking would just toast a misleading
+          // "still processing" message.
+          const viewBtn = blocked
+            ? ''
+            : `<button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="${btnClass}">${btnLabel}</button>`;
           return `<div class="card-soft p-3" id="index-card-${escapeHtml(idxId)}">
             <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="min-w-0">
@@ -1697,11 +1726,13 @@ async function showVideoDetail(videoId) {
                 </div>
                 <div class="mt-1">${_idPill(idxId, {truncate: true})}</div>
               </div>
-              ${_indexStatusPill(i.status)}
+              ${statusPill}
             </div>
+            ${blockedCard}
             <div class="flex items-center justify-end gap-1.5 mt-2 flex-wrap">
-              <button data-action="toggle-scenes-pane" data-pane="${paneId}" class="btn btn-ghost text-[11.5px]" title="Show / hide the scene list for this index. Useful when one index has lots of scenes and you want to scroll past it to inspect another.">&#x25BE; Collapse</button>
-              <button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="${btnClass}">${btnLabel}</button>
+              <button data-action="toggle-scenes-pane" data-pane="${paneId}" class="btn btn-ghost text-[11.5px]" title="Show / hide the scene list for this index.">&#x25BE; Collapse</button>
+              ${removeBtn}
+              ${viewBtn}
             </div>
             <div id="${paneId}" class="mt-3"></div>
           </div>`;
@@ -1720,6 +1751,29 @@ async function showVideoDetail(videoId) {
       showVideoScenes(videoId, first.scene_index_id || first.id);
     }
   } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
+}
+
+async function deleteScenesIndex(videoId, indexId) {
+  const ok = await confirmToast(
+    'Remove this stuck audio index from VideoDB. Useful for audio indexes that never finished because the clip has no speech.',
+    { title: 'Remove blocked index?', confirmLabel: 'Remove', cancelLabel: 'Keep', danger: true }
+  );
+  if (!ok) return;
+  const progress = showToast('Removing index…', { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/videos/${encodeURIComponent(videoId)}/indexes/${encodeURIComponent(indexId)}`, { method: 'DELETE' });
+    const d = await r.json();
+    progress.dismiss();
+    if (!r.ok) {
+      showToast(`Remove failed: ${d.detail || 'unknown error'}`, { variant: 'error', duration: 5000 });
+      return;
+    }
+    showToast('Index removed.', { variant: 'success', duration: 2500 });
+    showVideoDetail(videoId);
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
+  }
 }
 
 async function reindexVideo(videoId, kind) {
@@ -2076,6 +2130,24 @@ async function showVideoScenes(videoId, indexId) {
   const evt = el.tagName === 'INPUT' ? 'input' : 'change';
   el.addEventListener(evt, () => _renderLibrary());
 });
+
+// Search clear-x button — show only when the input has text; resets
+// both the input AND the results pane.
+(() => {
+  const qEl = $('search-q');
+  const clearBtn = $('search-clear');
+  const resEl = $('search-results');
+  if (!qEl || !clearBtn) return;
+  const sync = () => clearBtn.classList.toggle('hidden', !qEl.value);
+  qEl.addEventListener('input', sync);
+  clearBtn.addEventListener('click', () => {
+    qEl.value = '';
+    if (resEl) resEl.innerHTML = '';
+    sync();
+    qEl.focus();
+  });
+  sync();
+})();
 
 $('search-scope').addEventListener('change', () => {
   const scope = $('search-scope').value;
@@ -2488,6 +2560,7 @@ document.addEventListener('click', (e) => {
     case 'show-video':      showVideoDetail(id);     break;
     case 'show-rtstream':   showRtstreamDetail(id);  break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
+    case 'delete-index':    deleteScenesIndex(id, t.dataset.idx); break;
     case 'toggle-scenes-pane': {
       const pane = document.getElementById(t.dataset.pane);
       if (pane) {

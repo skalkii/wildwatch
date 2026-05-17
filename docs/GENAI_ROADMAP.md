@@ -137,6 +137,128 @@ Effort: ~5h. Only useful at scale.
 
 ---
 
+## Phase 7 — Real non-speech audio event detection (OUT OF SCOPE for this hackathon)
+
+> **Status:** deferred. The current hackathon scope is "everything wired
+> on top of VideoDB's SDK", and this phase requires either:
+>   - a future VideoDB platform feature that doesn't exist today, OR
+>   - introducing a non-VideoDB AI provider (PANNs, YAMNet, BirdNET,
+>     SoundEffectDetector — pick one).
+>
+> The skill rubric's "depth of VideoDB SDK usage" axis (30% of the
+> total score) discourages bringing in a secondary provider unless
+> there's no choice. There IS no SDK choice for non-speech audio,
+> but the right move during the 48-hour build is to document the gap
+> and ship without it. Re-evaluate after submission.
+
+### Why this phase exists
+
+**Confirmed via SDK source + live tests + skill docs + cookbook + full
+docs search (`llms-full.txt`):** VideoDB has no native non-speech audio
+classification anywhere in the platform.
+
+- `video.index_audio(prompt=...)` calls `POST /index/scene` with
+  `extraction_type=SceneExtractionType.transcript` (verified in
+  `videodb/video.py:644-683`). It segments the existing transcript and
+  runs the prompt over each segment via an LLM. **It does not analyse
+  the raw audio waveform.**
+- The OpenAPI spec exposes only two index types — `spoken_word` and
+  `scene` (with sub-modes `shot_based` / `time_based` / `transcript`).
+  There is no `audio_event` mode.
+- The Audio resource (`docs.videodb.io/api-reference/audio/`) exposes
+  list / get / delete / update / generate_url / **create_transcription**
+  / get_transcription. **Only transcription** — no event detection.
+- Full-doc search (`docs.videodb.io/llms-full.txt`) finds **zero hits**
+  for `audio event classification`, `sound event detection`,
+  `non-speech audio`, `gunshot detection`, `chainsaw`, `bird sound`,
+  `audio classifier`, `sound recognition`.
+- The `video-db/videodb-cookbook` repo has notebooks for voiceover
+  generation, audio overlay, dubbing, subtitles — **no notebooks** for
+  sound-event detection or non-speech classification.
+
+### Live test results (recorded for the handover)
+
+Probed three uploaded clips with different speech profiles:
+
+| Clip | Length | Speech? | `get_transcript` result | `index_audio` outcome |
+|---|---|---|---|---|
+| `dry_waterhole` (YouTube ingest, supposed to have narration) | 110s | none detected | `InvalidRequestError: Failed to detect the language, no spoken data found` | Index returned scene_index_id; permanently `processing` |
+| `logging_synth.mp4` (synth chainsaw SFX) | 10s | none | Same error | Same — permanently `processing` |
+| `zebra_waterhole` (YouTube ingest, music + ambient) | 32s | none | Same error | Same — permanently `processing` |
+
+The error message ships the diagnosis:
+```
+'Failed to detect the language, no spoken data found.', please re-index spoken words again.
+```
+
+When the speech-to-text layer can't extract any speech:
+1. `generate_transcript` raises `InvalidRequestError`.
+2. `index_audio` STILL accepts the call and returns a valid
+   `scene_index_id` (no upfront validation).
+3. But the resulting scene index **permanently sits in `processing`**
+   because the segmentation pipeline has nothing to segment.
+
+### Current mitigation (already wired)
+
+- `wildwatch/post_upload_analysis.py:_has_transcript` probes
+  `get_transcript` / `generate_transcript` before calling
+  `index_audio`. On "no spoken data found", the audio index is skipped
+  and the sweep falls back to running audio-event queries against the
+  **visual** scene index instead (which is why an uploaded clip can
+  still fire `predator_vocalization` / `rare_species` etc. via visual
+  keywords like "weapon visible" / "person aiming firearm").
+- Dashboard's Indexed Content tab annotates any audio-named index in
+  `processing` status with a probe of the transcript layer (`GET
+  /api/videos/{id}/indexes` returns `audio_blocked: 'no_speech'` on
+  blocked indexes). The card shows an amber "no speech — skipped"
+  pill + a "Remove" button that calls `DELETE /api/videos/{id}/indexes/{idx_id}`
+  so the operator can clean up the dead row instead of staring at a
+  permanent "processing".
+
+### Path forward — two options
+
+**Option A: Wait for VideoDB SDK to add native sound-event classification.**
+
+The skill plugin's roadmap doesn't list this today. Watch
+`docs.videodb.io/api-reference/videos/indexing/` for a new `index_type`
+value (e.g. `audio_event` / `sound_event`). When it lands, swap our
+`post_upload_analysis._has_transcript` gate for the new index type and
+delete the visual-fallback queries.
+
+Effort when it lands: ~1h refactor.
+
+**Option B: Integrate an external sound-event model.**
+
+Out of VideoDB; needs a small sidecar service or a fan-out HTTP call.
+Three viable candidates (all licence-friendly, free for non-commercial):
+
+| Model | Best for | Latency | Setup |
+|---|---|---|---|
+| **PANNs (CNN14)** | General sound classification — 527 AudioSet classes (gunshot, chainsaw, animal vocalisations all covered) | 200-500ms per 10s clip on CPU | Install `panns-inference`, pip-only, no GPU needed |
+| **YAMNet** | Same 521-class AudioSet vocabulary, runs in TF.js so a stateless serverless function works | 100-300ms per 10s | TFHub model + a Cloud Run / Lambda wrapper |
+| **BirdNET-Analyzer** | Bird vocalisations (3k+ species) — way over-specialised for our wildlife stream use case | 50-200ms | Local Python lib OR Cornell's hosted API |
+
+Recommended: **PANNs (CNN14)** if we go this route — best class
+coverage for our 18 events. Wrap it in a tiny `audio_classifier_sidecar`
+FastAPI service that takes a (signed-url-to-m3u8, start, end) tuple and
+returns a list of (class, confidence). Path-B sweep then POSTs each
+audio-event query through that sidecar instead of falling back to the
+visual index.
+
+Effort: ~6-8h including model download, ffmpeg-extract-audio plumbing,
+sidecar service, integration into post_upload_analysis, hardening.
+
+### Decision
+
+**Ship without Phase 7 for the hackathon.** Current visual-fallback
+behaviour is honest about the limitation (dashboard pill says
+"no speech — skipped"; roadmap says external model needed). Re-evaluate
+after submission. If VideoDB ships native sound-event detection in the
+meantime, do Option A; otherwise Option B if a wildlife customer asks
+for it explicitly.
+
+---
+
 ## Cost model (rough, May 2026 pricing)
 
 | Surface | Per-call cost | Daily usage estimate | Daily $ |
@@ -178,3 +300,6 @@ streams). Worth doing.
    share the Timeline pipeline.
 4. Phase 4 (multilingual dub) — depends on Phase 2.
 5. Phase 5 + 6 — opt-in / stretch goals.
+6. Phase 7 — **explicitly out of scope** for this hackathon. Either
+   wait for VideoDB to add native sound-event detection, or sidecar
+   PANNs/YAMNet after submission.
