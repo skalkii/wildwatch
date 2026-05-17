@@ -38,14 +38,21 @@ _BROADCAST_FAIL_COUNTER: dict[str, int] = {"n": 0}
 # ──── progress helper ─────────────────────────────────────────────────────
 
 
-def _emit(source_id: str, status: str, stage_msg: str | None = None, **extra: Any) -> None:
-    """Persist + broadcast a status transition."""
+async def _emit(source_id: str, status: str, stage_msg: str | None = None, **extra: Any) -> None:
+    """Persist + broadcast a status transition.
+
+    Async because ``sources.update_source`` does an atomic JSON write
+    (open + fsync + rename + parent fsync) — calling it directly from
+    an async route handler parked the event loop on disk I/O for every
+    status transition. Wrapping the write in ``asyncio.to_thread``
+    keeps the loop hot under concurrent ingests.
+    """
     fields: dict[str, Any] = {"status": status}
     if stage_msg is not None:
         fields["stage_msg"] = stage_msg
     fields.update(extra)
     try:
-        src = sources.update_source(source_id, **fields)
+        src = await asyncio.to_thread(sources.update_source, source_id, **fields)
     except KeyError:
         logger.warning("ingest: source %s vanished during dispatch", source_id)
         return
@@ -259,14 +266,14 @@ def _spawn_post_upload_analysis(video, source_id: str) -> None:
 
 
 async def _ingest_upload(source, coll: Any) -> None:
-    _emit(source.id, "ingesting", stage_msg="uploading file to VideoDB")
+    await _emit(source.id, "ingesting", stage_msg="uploading file to VideoDB")
     video = await asyncio.to_thread(coll.upload, file_path=source.input)
     if video is None:
         raise RuntimeError("coll.upload returned None")
     # Auto-kick scene indexing so the video becomes searchable without
     # the operator running a CLI script. Status pulse so the dashboard
     # shows "indexing" briefly before flipping to "ready".
-    _emit(
+    await _emit(
         source.id,
         "indexing",
         stage_msg="kicking off scene + audio indexes on VideoDB",
@@ -274,7 +281,7 @@ async def _ingest_upload(source, coll: Any) -> None:
     )
     await _kick_off_scene_index(video, source.id)
     await _kick_off_audio_index_async(video, source.id)
-    _emit(
+    await _emit(
         source.id,
         "ready",
         stage_msg=(
@@ -287,11 +294,11 @@ async def _ingest_upload(source, coll: Any) -> None:
 
 
 async def _ingest_url(source, coll: Any) -> None:
-    _emit(source.id, "ingesting", stage_msg=f"uploading {source.kind} URL to VideoDB")
+    await _emit(source.id, "ingesting", stage_msg=f"uploading {source.kind} URL to VideoDB")
     video = await asyncio.to_thread(coll.upload, url=source.input)
     if video is None:
         raise RuntimeError("coll.upload returned None")
-    _emit(
+    await _emit(
         source.id,
         "indexing",
         stage_msg="kicking off scene + audio indexes on VideoDB",
@@ -299,7 +306,7 @@ async def _ingest_url(source, coll: Any) -> None:
     )
     await _kick_off_scene_index(video, source.id)
     await _kick_off_audio_index_async(video, source.id)
-    _emit(
+    await _emit(
         source.id,
         "ready",
         stage_msg=(
@@ -316,7 +323,7 @@ _RT_ERROR_STATUSES = {"error", "failed", "disconnected"}
 
 
 async def _ingest_rtstream(source, coll: Any) -> None:
-    _emit(source.id, "connecting", stage_msg=f"connect_rtstream({source.input})")
+    await _emit(source.id, "connecting", stage_msg=f"connect_rtstream({source.input})")
 
     # Idempotency: if this source already has an rtstream_id from a
     # previous run, try to reuse it before creating a new one. Without
@@ -371,7 +378,7 @@ async def _ingest_rtstream(source, coll: Any) -> None:
     # Map rt.status to source status explicitly — don't blindly claim 'ready'
     # when the SDK still has the rtstream in 'pending'/'error'/etc.
     if rt_status in _RT_ERROR_STATUSES:
-        _emit(
+        await _emit(
             source.id,
             "error",
             stage_msg=f"rtstream status={rt_status}",
@@ -379,7 +386,7 @@ async def _ingest_rtstream(source, coll: Any) -> None:
             error=f"rtstream reported status={rt_status} after connect",
         )
     elif rt_status in _RT_READY_STATUSES:
-        _emit(
+        await _emit(
             source.id,
             "ready",
             stage_msg=f"rtstream status={rt_status}",
@@ -387,7 +394,7 @@ async def _ingest_rtstream(source, coll: Any) -> None:
         )
     else:
         # 'pending', '', unknown — surface but don't lie about readiness.
-        _emit(
+        await _emit(
             source.id,
             "ingesting",
             stage_msg=f"rtstream status={rt_status or 'unknown'} (waiting)",
@@ -396,7 +403,7 @@ async def _ingest_rtstream(source, coll: Any) -> None:
 
 
 async def _ingest_youtube(source, coll: Any) -> None:
-    _emit(source.id, "connecting", stage_msg="probing youtube live status")
+    await _emit(source.id, "connecting", stage_msg="probing youtube live status")
     is_live = await asyncio.to_thread(_is_youtube_live, source.input)
     if is_live is True:
         # Live YouTube can't be handed to VideoDB directly. Run the
@@ -414,7 +421,7 @@ async def _ingest_youtube(source, coll: Any) -> None:
         # Probe failed — fall through to archive-mode upload but surface a
         # warning so the operator can see the source booted on incomplete
         # info. If the URL was actually live, _ingest_url will fail loud.
-        _emit(
+        await _emit(
             source.id,
             "connecting",
             stage_msg="yt-dlp probe failed; treating as archive (may fail if live)",
@@ -430,7 +437,7 @@ async def dispatch(source_id: str, coll: Any) -> Any:
     if src is None:
         raise KeyError(source_id)
 
-    _emit(source_id, "connecting", stage_msg=f"starting {src.kind} handler")
+    await _emit(source_id, "connecting", stage_msg=f"starting {src.kind} handler")
     try:
         if src.kind == "upload":
             await _ingest_upload(src, coll)
@@ -444,5 +451,5 @@ async def dispatch(source_id: str, coll: Any) -> Any:
             raise ValueError(f"unsupported kind: {src.kind}")
     except Exception as e:
         logger.exception("ingest: dispatch failed for source %s", source_id)
-        _emit(source_id, "error", stage_msg="dispatch failed", error=str(e))
+        await _emit(source_id, "error", stage_msg="dispatch failed", error=str(e))
     return sources.get_source(source_id)

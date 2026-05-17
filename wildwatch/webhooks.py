@@ -21,7 +21,6 @@ import re
 import tempfile
 import threading
 import time
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
@@ -58,167 +57,19 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
 
-# Upload rate limit — per-IP token bucket. Three concurrent attackers
-# uploading 499 MB each would saturate the 4-worker SDK pool, fill disk,
-# and DoS the dashboard. A leaky bucket (capacity=3, refill=1/min/IP)
-# is enough to neutralise that without inconveniencing real operators
-# who upload at most a few clips per session.
-_UPLOAD_BUCKET_CAPACITY = 3
-_UPLOAD_BUCKET_REFILL_PER_SEC = 1.0 / 60.0  # one new token per minute per IP
-# Hard cap on the bucket dict to bound memory under attacker probing
-# (especially when WILDWATCH_TRUSTED_PROXY=1 lets an attacker rotate
-# X-Forwarded-For). OrderedDict gives O(1) LRU eviction via popitem(False).
-_UPLOAD_BUCKETS_MAX = 50_000
-# {ip: (tokens_float, last_refill_ts)}
-_upload_buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
-_upload_bucket_lock = threading.Lock()
-
-
-_IPV6_BRACKET_RE = re.compile(r"^\[(.+)\](?::\d+)?$")
-
-
-def _normalize_ip(raw: str) -> str:
-    """Strip surrounding `[...]` brackets and `:port` from an XFF token.
-
-    Without this, an attacker behind a trusted proxy could rotate the
-    port suffix on `[::1]:1`, `[::1]:2` … to mint 65k distinct bucket
-    keys from one host, defeating the per-IP limit. Returns "" for
-    empty / unparsable input.
-
-    Also defends against malformed bracket forms (`[::1`, no closing
-    `]`) and multi-colon IPv4-with-suffix (`192.0.2.1:80:foo`) — both
-    would otherwise pass through unnormalized and let an attacker mint
-    distinct bucket keys from a single host by varying the suffix.
-    """
-    raw = raw.strip()
-    if not raw:
-        return ""
-    m = _IPV6_BRACKET_RE.match(raw)
-    if m:
-        return m.group(1).strip()
-    # Bracket present but missing closing `]` — strip what we can rather
-    # than letting the raw malformed string be used as a fresh key.
-    if raw.startswith("["):
-        rest = raw[1:]
-        # If there's a stray `]` further on, treat up to it as the addr.
-        if "]" in rest:
-            return rest.split("]", 1)[0].strip()
-        # Bare `[::1` etc. — drop the bracket entirely.
-        return rest.strip().split(":")[0] if rest.count(":") > 2 else rest.strip()
-    # Strip a single trailing :port for plain IPv4 (one colon).
-    if raw.count(":") == 1:
-        return raw.split(":", 1)[0].strip()
-    # Multi-colon non-IPv6 (e.g. `192.0.2.1:80:foo`) — reject as
-    # malformed by returning the same fallback the empty-input path uses.
-    if raw.count(":") > 1 and not _looks_like_bare_ipv6(raw):
-        return ""
-    return raw
-
-
-def _looks_like_bare_ipv6(raw: str) -> bool:
-    """Heuristic: bare IPv6 is hex chars + colons, no other punctuation.
-
-    Used by _normalize_ip to distinguish a legitimate bare IPv6 address
-    (`2001:db8::1`) from an attacker-malformed multi-colon string
-    (`192.0.2.1:80:foo`). Not a full IPv6 parser — we just check that
-    every char is hex or `:`. Anything with letters beyond a-f or
-    other punctuation fails.
-    """
-    return all(c in "0123456789abcdefABCDEF:" for c in raw)
-
-
-def _client_ip_from(request: Request) -> str:
-    """Resolve the client IP, honouring X-Forwarded-For when configured.
-
-    Behind a reverse proxy (nginx, Cloudflare, ALB) every upload would
-    appear to come from the proxy, collapsing all real clients into a
-    single shared rate-limit bucket — a self-DoS vector. Operators
-    running behind a trusted proxy set ``WILDWATCH_TRUSTED_PROXY=1`` to
-    use the FIRST IP in the X-Forwarded-For chain (the original client)
-    instead of the TCP peer. Direct-exposure deployments leave the env
-    unset so a remote attacker can't spoof XFF to bypass the limit.
-
-    Result is normalised to strip `[...]` and `:port` so XFF token-
-    rotation can't be used to dodge per-IP buckets.
-    """
-    if os.environ.get("WILDWATCH_TRUSTED_PROXY") == "1":
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            first = _normalize_ip(xff.split(",")[0])
-            if first:
-                return first
-    peer = request.client.host if request.client else "unknown"
-    return _normalize_ip(peer or "") or "unknown"
-
-
-def _upload_rate_limit_check(client_ip: str) -> bool:
-    """Return True if the IP has an upload token, else False (429).
-
-    Token bucket per IP: starts full at capacity, refills at
-    _UPLOAD_BUCKET_REFILL_PER_SEC tokens/second up to capacity. Each
-    upload consumes one token. Lock-guarded so concurrent uploads from
-    one IP can't both observe a full bucket and double-spend.
-
-    Eviction: an IP that has refilled fully (idle long enough) is
-    removed from the dict — the next request resets to default-full so
-    the visible behaviour is identical. Plus a hard size cap with LRU
-    pop on overflow to bound memory under attacker probing.
-    """
-    # Special case: when we can't identify the client (request.client is
-    # None, e.g. some test harnesses or serverless deployments where the
-    # platform strips peer info), bypass the bucket rather than collapsing
-    # every unknown caller into a single shared 3-token pool. The shared
-    # pool produces spurious 429s for legit traffic. Operators behind a
-    # real proxy should set WILDWATCH_TRUSTED_PROXY=1 to read the actual
-    # client IP from X-Forwarded-For; if they don't, the rate limiter is
-    # ineffective by design — log a warning so it shows up.
-    if client_ip == "unknown":
-        logger.warning(
-            "upload rate limit: client_ip is 'unknown' — bypassing bucket. "
-            "Set WILDWATCH_TRUSTED_PROXY=1 if behind a reverse proxy."
-        )
-        return True
-
-    now = time.time()
-    with _upload_bucket_lock:
-        tokens, last = _upload_buckets.get(client_ip, (float(_UPLOAD_BUCKET_CAPACITY), now))
-        # Refill since last access, clamped to capacity.
-        tokens = min(
-            float(_UPLOAD_BUCKET_CAPACITY),
-            tokens + (now - last) * _UPLOAD_BUCKET_REFILL_PER_SEC,
-        )
-        if tokens < 1.0:
-            _upload_buckets[client_ip] = (tokens, now)
-            _upload_buckets.move_to_end(client_ip)
-            _evict_overflow_locked()
-            return False
-        new_tokens = tokens - 1.0
-        # An IP whose bucket was AT CAPACITY before this request consumed
-        # one token (i.e. fully idle long enough to refill) is worth
-        # GC'ing — its state is the default and re-inserting it on every
-        # request just pollutes the dict. Check the PRE-consume `tokens`
-        # value, not the post-consume `new_tokens`. (Previous condition
-        # `new_tokens >= capacity - 0.001` was unreachable arithmetic — a
-        # full bucket minus 1.0 can never satisfy that.)
-        if tokens >= float(_UPLOAD_BUCKET_CAPACITY) - 0.001:
-            _upload_buckets.pop(client_ip, None)
-        else:
-            _upload_buckets[client_ip] = (new_tokens, now)
-            _upload_buckets.move_to_end(client_ip)
-            _evict_overflow_locked()
-        return True
-
-
-def _evict_overflow_locked() -> None:
-    """Trim LRU entries when the bucket dict exceeds the hard cap.
-
-    Caller MUST hold _upload_bucket_lock — name suffix `_locked` is the
-    project convention. OrderedDict.popitem(last=False) drops the
-    least-recently-touched entry in O(1).
-    """
-    while len(_upload_buckets) > _UPLOAD_BUCKETS_MAX:
-        _upload_buckets.popitem(last=False)
-
+# Per-IP upload rate limiter — moved to wildwatch/rate_limit.py during
+# the size-split refactor. Re-export the names so existing call sites
+# + test fixtures keep working without churn.
+from wildwatch.rate_limit import (  # noqa: E402, F401
+    _UPLOAD_BUCKET_CAPACITY,
+    _client_ip_from,
+    _evict_overflow_locked,
+    _looks_like_bare_ipv6,
+    _normalize_ip,
+    _upload_bucket_lock,
+    _upload_buckets,
+    _upload_rate_limit_check,
+)
 
 # Strong refs to in-flight background dispatch tasks so the GC doesn't drop
 # them mid-flight (RUF006). Each task removes itself via a done_callback that
@@ -470,6 +321,28 @@ def _release_in_flight_slot(_fut: Any) -> None:
         _sdk_in_flight = max(0, _sdk_in_flight - 1)
 
 
+async def _require_coll(timeout_s: float = 10.0) -> Any:
+    """Async-acquire the cached VideoDB Collection or raise an HTTP error.
+
+    Every other route handler used to inline
+    ``coll = await _require_coll()`` — same call,
+    same translation to HTTPException, repeated 17 times across the
+    module. This helper centralises both the acquisition and the error
+    surface so individual handlers stay short.
+
+    Translates:
+      - ``SDKPoolSaturated`` → 503 (dashboard surfaces "VideoDB
+        unreachable" instead of looking hung)
+      - ``TimeoutError`` (from ``_async_sdk``) → 504
+    """
+    try:
+        return await _async_sdk(_get_coll, timeout_s=timeout_s)
+    except SDKPoolSaturated as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=f"VideoDB SDK timeout: {e}") from e
+
+
 # ── CSRF / cross-origin guard for mutating endpoints ────────────────────
 #
 # FastAPI is bound to 0.0.0.0 in the docker compose / quickstart path so any
@@ -639,7 +512,7 @@ async def receive_alert(
     final_expl: str | None = payload.explanation
     if payload.explanation and len(payload.explanation) >= 40:
         try:
-            coll = await _async_sdk(_get_coll, timeout_s=5.0)
+            coll = await _require_coll(timeout_s=5.0)
             # 15s timeout — `genai_friendly_explanation` caches by
             # hash(label, explanation), so most fires under multi-stream
             # load are cache hits and return in <50ms. First cold call
@@ -758,7 +631,7 @@ async def api_remote() -> JSONResponse:
         if (now - _remote_cache["at"]) < _REMOTE_TTL_S:
             return JSONResponse(_remote_cache["data"])
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         conn = await _async_sdk(_get_conn, timeout_s=10.0)
         rts = await _async_sdk(coll.list_rtstreams, timeout_s=5.0) or []
         sbs = await _async_sdk(conn.list_sandboxes, timeout_s=5.0) or []
@@ -991,7 +864,7 @@ async def api_create_source(payload: SourceCreate) -> dict:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch({s.id})")
     return s.__dict__
 
@@ -1165,7 +1038,7 @@ async def api_upload_source(
         await asyncio.to_thread(sources.update_source, s.id, status="error", error=str(e))
         raise
 
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch.upload({s.id})")
     return (await asyncio.to_thread(sources.get_source, s.id)).__dict__
 
@@ -1179,7 +1052,7 @@ async def api_delete_source(source_id: str) -> dict:
     # but collect every failure so the caller can see remote resources that
     # may still be running (and burning credits). All blocking SDK calls go
     # through asyncio.to_thread so the event loop stays responsive.
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     warnings: list[str] = []
     if s.rtstream_id:
         try:
@@ -1219,7 +1092,7 @@ async def api_disconnect_source(source_id: str) -> dict:
         raise HTTPException(status_code=404, detail="source not found")
     if not s.rtstream_id:
         return {"status": "noop", "reason": "no rtstream attached"}
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     try:
         rt = await _async_sdk(coll.get_rtstream, s.rtstream_id, timeout_s=5.0)
         await _async_sdk(rt.stop, timeout_s=10.0)
@@ -1244,7 +1117,7 @@ async def api_reconnect_source(source_id: str) -> dict:
         error=None,
         stage_msg="reconnect requested",
     )
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     _spawn_bg(
         ingest.dispatch(source_id, coll=coll), label=f"ingest.dispatch.reconnect({source_id})"
     )
@@ -1267,7 +1140,7 @@ async def api_list_videos() -> JSONResponse:
         if (now - _videos_cache["at"]) < _VIDEOS_TTL_S:
             return JSONResponse(_videos_cache["data"])
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         videos = await _async_sdk(coll.get_videos, timeout_s=8.0)
         items = []
         for v in videos:
@@ -1379,7 +1252,7 @@ async def api_video_indexes(video_id: str) -> dict:
     will never finish on a wordless clip.
     """
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         indexes = _coerce_to_list(
             await _async_sdk(video.list_scene_index, timeout_s=5.0),
@@ -1424,7 +1297,7 @@ async def api_delete_video_index(video_id: str, index_id: str) -> dict:
     the dashboard can toast a useful error instead of 500.
     """
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
@@ -1446,7 +1319,7 @@ async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dic
     `ready`, return the status + an empty list rather than blocking.
     """
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         all_idxs = _coerce_to_list(
             await _async_sdk(video.list_scene_index, timeout_s=5.0),
@@ -1522,7 +1395,7 @@ async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
     from wildwatch.prompts import format_prompt
 
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
@@ -1635,7 +1508,7 @@ async def api_delete_video(video_id: str) -> dict:
     via CLI). Surface SDK failures as 502 so the dashboard can toast.
     """
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connection failed: {e}") from e
     try:
@@ -1666,7 +1539,7 @@ async def api_video_clip(video_id: str, start: float, end: float) -> dict:
     if end - start > 600:  # 10 min cap — scenes are seconds, not hours
         raise HTTPException(status_code=400, detail="segment too long")
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
@@ -1691,7 +1564,7 @@ async def api_rtstream_indexes(rt_id: str) -> dict:
     than a generic SDK error banner.
     """
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"connection failed: {e}") from e
     try:
@@ -1726,7 +1599,7 @@ async def api_rtstream_indexes(rt_id: str) -> dict:
 @app.get("/api/rtstreams/{rt_id}/scenes/{index_id}")
 async def api_rtstream_scenes(rt_id: str, index_id: str, page_size: int = 20) -> dict:
     try:
-        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        coll = await _require_coll()
         rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
         idx = await _async_sdk(rt.get_scene_index, index_id, timeout_s=5.0)
         data = await _async_sdk(idx.get_scenes, page=1, page_size=page_size, timeout_s=5.0)
@@ -1787,184 +1660,21 @@ def _shot_to_dict(sh: Any) -> dict:
 
 
 def _estimate_credit_burn_usd() -> dict:
-    """Back-of-napkin estimate from .state.json + best-guess rates.
+    """Wrapper around ``wildwatch.billing._estimate_credit_burn_usd`` that
+    injects the FastAPI app's SDK helpers.
 
-    Rates (from PARALLEL_STREAM_HANDOVER analysis):
-      - Live RTStream visual+audio indexing at RELAXED batch_config: ~$5/h
-      - Sandbox Medium tier: $3.50/h flat
-      - Sandbox Small tier: $1/h flat
+    Logic moved to ``wildwatch/billing.py`` during the size-split
+    refactor. Route handlers + tests continue to call
+    ``webhooks._estimate_credit_burn_usd()`` unchanged.
     """
-    import json as _json
-    from pathlib import Path as _PPath
+    from wildwatch.billing import _estimate_credit_burn_usd as _impl
 
-    state_file = _PPath(__file__).resolve().parent.parent / ".state.json"
-    if not state_file.exists():
-        return {"total_usd": 0.0, "rtstreams_usd": 0.0, "sandboxes_usd": 0.0, "details": []}
-    try:
-        state = _json.loads(state_file.read_text())
-    except Exception as e:
-        logger.warning("_estimate_credit_burn_usd: %s unreadable: %r", state_file, e)
-        return {"total_usd": 0.0, "error": f"state unreadable: {e}"}
-
-    now = time.time()
-    rt_total = 0.0
-    sb_total = 0.0
-    details: list[dict] = []
-
-    # Live VideoDB-side status — only meter rtstreams actually running.
-    # IMPORTANT: if the SDK call fails (network blip, auth glitch), we DO NOT
-    # silently zero the estimate — that masks real burn. We flag the result
-    # as `live_status_unknown` and fall back to the legacy upper-bound for
-    # every entry that has a started_at, so operators still see a number.
-    live_status_by_id: dict[str, str] = {}
-    live_status_available = False
-    sdk_warning: str | None = None
-    try:
-        coll = _get_coll()
-        # _coerce_to_list rather than `or []` — the latter masks SDK
-        # contract violations (None when a list was promised) as "no
-        # rtstreams", which silently zeros the entire estimate.
-        rts = _coerce_to_list(
-            _with_timeout(coll.list_rtstreams, timeout_s=5.0),
-            source="list_rtstreams",
-        )
-        for rt in rts:
-            rt_id = getattr(rt, "id", None) or (rt.get("id") if isinstance(rt, dict) else None)
-            status = getattr(rt, "status", None) or (
-                rt.get("status") if isinstance(rt, dict) else None
-            )
-            if rt_id:
-                live_status_by_id[str(rt_id)] = str(status or "").lower()
-        live_status_available = True
-    except Exception as e:
-        logger.warning("_estimate_credit_burn_usd: list_rtstreams failed: %r", e)
-        sdk_warning = (
-            f"Could not verify live status against VideoDB ({type(e).__name__}). "
-            "Showing upper-bound estimate from local state — value may include stopped streams."
-        )
-
-    # Statuses VideoDB exposes that we treat as "billing is happening right now".
-    _RT_LIVE_STATUSES = {"connected", "running", "ingesting", "indexing", "ready"}
-
-    for key, rt_state in state.get("rtstreams", {}).items():
-        started_iso = rt_state.get("started_at") or rt_state.get("created_at")
-        if not started_iso:
-            continue
-        rt_id = rt_state.get("rtstream_id") or rt_state.get("id")
-        live_status = live_status_by_id.get(str(rt_id), "")
-
-        if live_status_available:
-            # SDK responded: trust it. Skip non-running or unknown-id entries.
-            if not rt_id or live_status not in _RT_LIVE_STATUSES:
-                continue
-            displayed_status = live_status
-        else:
-            # SDK unreachable: fall back to legacy upper-bound — better to
-            # show maybe-too-high than maybe-zero.
-            displayed_status = "unknown_sdk_unreachable"
-        try:
-            from datetime import datetime as _dt
-
-            if isinstance(started_iso, str):
-                started_ts = _dt.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp()
-            else:
-                started_ts = float(started_iso)
-        except Exception as e:
-            logger.warning(
-                "_estimate_credit_burn_usd: rtstream %s has unparseable started_at=%r: %r",
-                key,
-                started_iso,
-                e,
-            )
-            continue
-        hours = max(0.0, (now - started_ts) / 3600.0)
-        rate = 5.0  # relaxed cost rate
-        burn = hours * rate
-        rt_total += burn
-        details.append(
-            {
-                "kind": "rtstream",
-                "key": key,
-                "rtstream_id": rt_id,
-                "status": displayed_status,
-                "hours": round(hours, 2),
-                "rate_usd_per_h": rate,
-                "burn_usd": round(burn, 2),
-            }
-        )
-
-    sb = state.get("sandbox")
-    if sb and sb.get("created_at") and sb.get("id"):
-        # Verify sandbox is actually live on VideoDB. If the probe FAILS,
-        # default to "assume active" — masking real burn is worse than
-        # showing an unverified row, and the dashboard surfaces the
-        # `status` so operators see it.
-        sb_active = True
-        sb_status = "unverified"
-        try:
-            conn = _get_conn()
-            if hasattr(conn, "get_sandbox"):
-                sb_obj = _with_timeout(conn.get_sandbox, sb["id"], timeout_s=5.0)
-                if sb_obj is not None:
-                    status = str(
-                        getattr(sb_obj, "status", None)
-                        or (sb_obj.get("status") if isinstance(sb_obj, dict) else None)
-                        or ""
-                    ).lower()
-                    sb_status = status or "unknown"
-                    sb_active = status in ("active", "running", "ready")
-                else:
-                    # SDK returned None — sandbox is gone (idle-timeout)
-                    sb_active = False
-                    sb_status = "expired"
-        except Exception as e:
-            logger.warning("_estimate_credit_burn_usd: sandbox status probe failed: %r", e)
-            if sdk_warning is None:
-                sdk_warning = (
-                    f"Could not verify sandbox status ({type(e).__name__}). "
-                    "Showing upper-bound estimate — sandbox may have already shut down."
-                )
-
-        if sb_active:
-            try:
-                from datetime import datetime as _dt
-
-                started_ts = _dt.fromisoformat(sb["created_at"].replace("Z", "+00:00")).timestamp()
-                hours = max(0.0, (now - started_ts) / 3600.0)
-                rate = 3.5 if str(sb.get("tier", "")).endswith("medium") else 1.0
-                burn = hours * rate
-                sb_total += burn
-                details.append(
-                    {
-                        "kind": "sandbox",
-                        "id": sb.get("id"),
-                        "tier": sb.get("tier"),
-                        "status": sb_status,
-                        "hours": round(hours, 2),
-                        "rate_usd_per_h": rate,
-                        "burn_usd": round(burn, 2),
-                    }
-                )
-            except Exception as e:
-                logger.warning(
-                    "_estimate_credit_burn_usd: sandbox burn calc failed: %r (sb=%r)",
-                    e,
-                    sb,
-                )
-
-    return {
-        "total_usd": round(rt_total + sb_total, 2),
-        "rtstreams_usd": round(rt_total, 2),
-        "sandboxes_usd": round(sb_total, 2),
-        "details": details,
-        "live_status_available": live_status_available,
-        "warning": sdk_warning,
-        "note": (
-            "Upper-bound estimate from .state.json start timestamps to now. "
-            "Real usage shown by conn.check_usage() above. "
-            "Sandbox cost only counts the most-recent slot in state."
-        ),
-    }
+    return _impl(
+        coll_getter=_get_coll,
+        conn_getter=_get_conn,
+        with_timeout=_with_timeout,
+        coerce_to_list=_coerce_to_list,
+    )
 
 
 @app.get("/api/usage")
@@ -2022,7 +1732,7 @@ async def api_search(req: SearchRequest) -> dict:
         "No results found"); catch it and return ``shots: []`` instead of
         a 500. That's what every skill example does.
     """
-    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    coll = await _require_coll()
     # Late import — videodb is heavy + we want the SDK constants if available.
     try:
         from videodb import IndexType, SearchType
