@@ -521,9 +521,10 @@ def _looks_like_video(head: bytes) -> bool:
     Without this the upload endpoint accepts any bytes, renames them to
     `.mp4`, and hands them to VideoDB. An attacker can upload HTML/script
     that any downstream player or VideoDB previewer might interpret.
-    Cheap defence: require the first ~200 bytes to match a known video
-    container signature (the MPEG-TS check needs 189 bytes for the
-    sync-byte recurrence at offset 188; other containers need <32).
+    Cheap defence: require the first 32 bytes to match a known video
+    container signature (mp4 / mov / webm / mkv / avi / mpeg-ps / flv).
+    MPEG-TS is deliberately excluded — its sync-byte signature is too
+    weak to verify without a real packet parser.
     """
     if len(head) < 12:
         return False
@@ -536,13 +537,14 @@ def _looks_like_video(head: bytes) -> bool:
     # AVI — RIFF....AVI
     if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
         return True
-    # MPEG-TS — sync byte 0x47 recurs every 188 bytes. A single 0x47 at
-    # offset 0 matches any file starting with ASCII 'G' (e.g. an HTML
-    # tag like `<G...>`), so require the recurrence to confirm the
-    # container. If the head sniff is < 189 bytes we can't verify and
-    # err on the side of rejecting.
-    if head[:1] == b"\x47" and len(head) >= 189 and head[188:189] == b"\x47":
-        return True
+    # MPEG-TS deliberately NOT sniffed here. The sync-byte (0x47) check
+    # is bypassable with any crafted prefix that includes a non-zero
+    # second byte (e.g. b"\x47\x40 + padding" matches PUSI semantics).
+    # Defeating that needs a real TS packet parser (PID, continuity
+    # counter, adaptation-field flags) — out of scope for a sniff helper.
+    # TS streams normally enter WildWatch via RTSP/RTMP/HLS (live stream
+    # routes), not via this file-upload endpoint. Operators with a real
+    # TS file should remux to MP4 first.
     # MPEG-PS / MPEG-1 / MPEG-2 video
     if head[:4] == b"\x00\x00\x01\xba" or head[:4] == b"\x00\x00\x01\xb3":
         return True
@@ -578,16 +580,16 @@ async def api_upload_source(
             while chunk := await file.read(1024 * 1024):
                 # Reject obviously non-video uploads on the first chunk.
                 if not sniff_done:
-                    # 256 bytes covers both the simple ftyp/EBML/RIFF
-                    # signatures at the head AND the MPEG-TS sync byte
-                    # recurrence at offset 188.
-                    if not _looks_like_video(chunk[:256]):
+                    # 32 bytes covers ftyp/EBML/RIFF/FLV/MPEG-PS magic numbers.
+                    if not _looks_like_video(chunk[:32]):
                         raise HTTPException(
                             status_code=415,
                             detail=(
                                 "uploaded file does not look like a supported video "
-                                "container (mp4/mov/webm/mkv/avi/ts/mpeg/flv). "
-                                "Refusing to forward to VideoDB."
+                                "container (mp4/mov/webm/mkv/avi/mpeg/flv). "
+                                "MPEG-TS is not accepted via upload — use the live-"
+                                "stream RTSP/RTMP/HLS routes instead, or remux "
+                                "to MP4 first. Refusing to forward to VideoDB."
                             ),
                         )
                     sniff_done = True
