@@ -1,4 +1,18 @@
 version: "3.8"
+
+# YouTube live -> RTSP bridge for WildWatch.
+#
+# `mediamtx` runs an RTSP server on localhost:8554. `bore` tunnels
+# that port to a public bore.pub:<remote_port>. VideoDB cannot read
+# local addresses, so we always paste the bore.pub URL into the
+# dashboard's +Add -> RTSP form.
+#
+# Usage:
+#   docker compose -f bridge/docker-compose.yml up -d
+#   docker compose -f bridge/docker-compose.yml logs -f bore
+#     -> look for "listening at bore.pub:<port>"
+#   ./bridge/start_bridge.sh "<youtube_url>" <slug>
+#   # In the dashboard: + Add -> RTSP -> rtsp://bore.pub:<port>/<slug>
 services:
   mediamtx:
     image: bluenviron/mediamtx:latest
@@ -7,3 +21,15 @@ services:
     environment:
       - MTX_PROTOCOLS=tcp
     restart: unless-stopped
+
+  bore:
+    image: ekzhang/bore:latest
+    container_name: wildwatch-bore
+    network_mode: host
+    # `bore local 8554 --to bore.pub` forwards localhost:8554 to a
+    # public bore.pub:<remote_port>. Remote port changes per restart;
+    # grep `docker compose logs bore | grep "listening at"` for it.
+    command: ["local", "8554", "--to", "bore.pub"]
+    restart: unless-stopped
+    depends_on:
+      - mediamtx

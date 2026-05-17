@@ -58,8 +58,6 @@ def _emit(source_id: str, status: str, stage_msg: str | None = None, **extra: An
                 "video_id": src.video_id,
                 "rtstream_id": src.rtstream_id,
                 "error": src.error,
-                "bridge_command": src.bridge_command,
-                "bridge_rtsp": src.bridge_rtsp,
             }
         )
     except Exception:
@@ -343,31 +341,17 @@ async def _ingest_youtube(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg="probing youtube live status")
     is_live = await asyncio.to_thread(_is_youtube_live, source.input)
     if is_live is True:
-        # Live YouTube can't be handed to VideoDB directly. VideoDB rejects
-        # `rtsp://localhost:*` ("Local streams are not supported"), so just
-        # running mediamtx + streamlink locally isn't enough — we also need
-        # bore.pub (or any TCP tunnel) to give the stream a publicly-
-        # routable host:port. Park the source in `needs_bridge` and the
-        # dashboard renders a multi-step helper card.
-        slug = source.id[:8]
-        bridge_cmd = f'./bridge/start_bridge.sh "{source.input}" {slug}'
-        # Don't pre-fill rtsp://localhost:... — VideoDB rejects it. The
-        # bridge script prints the real public URL (rtsp://bore.pub:<port>/<slug>)
-        # which the operator copies from terminal output.
-        bridge_rtsp = ""
-        _emit(
-            source.id,
-            "needs_bridge",
-            stage_msg=(
-                "Live YouTube needs a PUBLIC RTSP bridge — VideoDB rejects "
-                "rtsp://localhost. Start mediamtx + bore, run the bridge "
-                "command, then paste the rtsp://bore.pub:<port>/<slug> URL "
-                "that the script prints."
-            ),
-            bridge_command=bridge_cmd,
-            bridge_rtsp=bridge_rtsp,
+        # Live YouTube can't be handed to VideoDB directly. Run the
+        # docker-compose bridge (`bridge/docker-compose.yml`) + the
+        # bridge/start_bridge.sh script to publish the stream as a
+        # public rtsp:// URL via bore.pub, then add THAT URL as a new
+        # source with kind=rtsp from the dashboard's +Add modal.
+        raise RuntimeError(
+            "YouTube live URL detected. VideoDB only accepts rtsp:// / rtmp:// "
+            "for live streams. Run bridge/docker-compose.yml + bridge/start_bridge.sh "
+            "to publish the stream as a public RTSP, then add the resulting "
+            "rtsp://bore.pub:<port>/<slug> URL as a new RTSP source."
         )
-        return
     if is_live is None:
         # Probe failed — fall through to archive-mode upload but surface a
         # warning so the operator can see the source booted on incomplete

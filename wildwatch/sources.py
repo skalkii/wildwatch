@@ -37,19 +37,7 @@ _STATE_LOCK = threading.Lock()
 
 SourceKind = Literal["upload", "youtube", "hls", "rtsp", "rtmp"]
 SourceStatus = Literal[
-    "queued",
-    "connecting",
-    "ingesting",
-    "indexing",
-    "ready",
-    "error",
-    "disconnected",
-    # `needs_bridge` — set by _ingest_youtube when the URL probes as live.
-    # VideoDB can't read YouTube live directly (only rtsp:// / rtmp://), so
-    # we park the source in this state and the dashboard renders a helper
-    # card with the one-command bridge setup + an input to paste the
-    # resulting RTSP URL back. Not an error — the source is recoverable.
-    "needs_bridge",
+    "queued", "connecting", "ingesting", "indexing", "ready", "error", "disconnected"
 ]
 # Runtime tuples for validation (Pydantic/dataclass enforcement is overkill
 # for hackathon scope; we validate in add_source / update_source instead).
@@ -71,11 +59,6 @@ class Source:
     rtstream_id: str | None = None
     indexes: dict[str, str] = field(default_factory=dict)
     credit_estimate_usd: float | None = None
-    # For sources parked in `needs_bridge` status — the shell command the
-    # operator should run + the expected RTSP URL to paste back. Populated
-    # by `wildwatch/ingest.py:_ingest_youtube`. None for every other state.
-    bridge_command: str | None = None
-    bridge_rtsp: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 

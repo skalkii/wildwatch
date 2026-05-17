@@ -346,8 +346,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .status-ready        { color: #10b981; background: color-mix(in oklab, #10b981 18%, transparent); }
     .status-error        { color: #ef4444; background: color-mix(in oklab, #ef4444 18%, transparent); }
     .status-disconnected { color: #94a3b8; background: color-mix(in oklab, #94a3b8 15%, transparent); }
-    .status-needs_bridge { color: #f59e0b; background: color-mix(in oklab, #f59e0b 18%, transparent); }
-    html:not(.dark) .status-needs_bridge { background: color-mix(in oklab, #f59e0b 30%, transparent); color: #92400e; }
     /* Light-mode pills lose contrast on white-ish bg — bump mix percent */
     html:not(.dark) .status-queued       { background: color-mix(in oklab, #94a3b8 32%, transparent); color: #475569; }
     html:not(.dark) .status-connecting   { background: color-mix(in oklab, #38bdf8 28%, transparent); color: #0369a1; }
@@ -1169,32 +1167,6 @@ function renderSource(s) {
   const disconnectBtn = isStreamKind
     ? `<button data-action="disconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Stop the live rtstream on VideoDB. Keeps the source row.">Disconnect</button>`
     : '';
-  // Bridge helper card — shown when `_ingest_youtube` detects a live URL.
-  // VideoDB requires a PUBLICLY-routable rtsp host (it rejects
-  // rtsp://localhost outright), so the helper walks the operator through
-  // 3 steps: start mediamtx, start bore (TCP tunnel), then run the bridge
-  // script. The script prints the public URL the operator pastes back.
-  const _step = (n, label, cmd, copy=true) =>
-    `<div class="text-[11.5px] muted mt-2"><span class="pill mono" style="color:#f59e0b; background:color-mix(in oklab,#f59e0b 14%,transparent); border-color:color-mix(in oklab,#f59e0b 30%,transparent);">${n}</span> ${label}</div>
-    <div class="flex items-stretch gap-1 mt-1">
-      <code class="mono text-[11px] flex-1 px-2 py-1.5 rounded" style="background:var(--bg-soft); border:1px solid var(--border); white-space:nowrap; overflow-x:auto;">${escapeHtml(cmd)}</code>
-      ${copy ? `<button data-action="copy-text" data-text="${escapeHtml(cmd)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Copy">&#x29C9;</button>` : ''}
-    </div>`;
-  const bridgeBlock = (s.status === 'needs_bridge' && s.bridge_command)
-    ? `<div class="card-soft p-3 mt-2" style="border-left:3px solid #f59e0b">
-        <div class="text-[12px] font-semibold mb-1" style="color:#f59e0b">Live stream &mdash; public RTSP bridge needed</div>
-        <div class="text-[11.5px] muted">VideoDB rejects <code class="mono">rtsp://localhost</code>. You need a public TCP tunnel. Three commands, three terminals (only the third needs to repeat per source):</div>
-        ${_step('1', 'one-time install (skip if already done):', 'brew install streamlink ffmpeg mediamtx bore-cli')}
-        ${_step('2', 'start mediamtx + bore (leave running):', 'mediamtx bridge/mediamtx.yml &amp; bore local 8554 --to bore.pub &amp;')}
-        ${_step('3', 'pump THIS source through the bridge:', s.bridge_command)}
-        <div class="text-[11.5px] muted mt-2">Step 3 prints a line like <code class="mono">PUBLIC URL: rtsp://bore.pub:&lt;port&gt;/${escapeHtml(s.bridge_command.split(' ').pop())}</code>. Paste that here:</div>
-        <div class="flex items-stretch gap-1 mt-1">
-          <input id="bridge-input-${escapeHtml(s.id)}" type="text" placeholder="rtsp://bore.pub:&lt;port&gt;/&lt;slug&gt;" value="${escapeHtml(s.bridge_rtsp || '')}" class="input flex-1 px-2 py-1.5 text-[11px] mono" style="min-width:0;">
-          <button data-action="use-bridge" data-id="${escapeHtml(s.id)}" class="btn btn-primary text-[11px] !py-1 !px-2" title="Submit the public bridge RTSP URL — flips this source to kind=rtsp and re-runs ingest.">Use bridge</button>
-        </div>
-      </div>`
-    : '';
-
   return `<div class="card p-4">
     <div class="flex justify-between items-start gap-3">
       <div class="min-w-0">
@@ -1206,7 +1178,6 @@ function renderSource(s) {
     <div class="text-[11px] muted mt-2 truncate mono" title="${escapeHtml(s.input || '')}">${escapeHtml(s.input || '')}</div>
     ${stage}
     ${errMsg}
-    ${bridgeBlock}
     <div class="text-[11px] muted mt-2">${remote}</div>
     <div class="flex gap-2 mt-3 flex-wrap">
       ${reconnectBtn}
@@ -1215,51 +1186,6 @@ function renderSource(s) {
       <button data-action="delete" data-id="${escapeHtml(s.id)}" class="btn text-[11px] !py-1 !px-2" style="background:color-mix(in oklab,#ef4444 14%,transparent); color:#ef4444; border:1px solid color-mix(in oklab,#ef4444 35%,transparent);">Delete</button>
     </div>
   </div>`;
-}
-
-async function copyTextToClipboard(text) {
-  // Shared with the bridge-command "copy" button + future use.
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      document.execCommand('copy'); ta.remove();
-    }
-    showToast(`Copied: ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`, { variant: 'success', duration: 2200 });
-  } catch (e) {
-    showToast(`Copy failed: ${e}`, { variant: 'error', duration: 4000 });
-  }
-}
-
-async function useBridge(sourceId) {
-  const input = document.getElementById(`bridge-input-${sourceId}`);
-  const rtsp = (input && input.value || '').trim();
-  if (!rtsp.startsWith('rtsp://') && !rtsp.startsWith('rtmp://')) {
-    showToast('Paste an rtsp:// or rtmp:// URL first.', { variant: 'warn', duration: 4000 });
-    return;
-  }
-  const progress = showToast('Submitting bridge URL…', { variant: 'info', duration: 0 });
-  try {
-    const r = await fetch(`/api/sources/${encodeURIComponent(sourceId)}/use-bridge`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rtsp_url: rtsp }),
-    });
-    const d = await r.json();
-    progress.dismiss();
-    if (!r.ok) {
-      showToast(`Bridge submission failed: ${d.detail || JSON.stringify(d)}`, { variant: 'error', duration: 6000 });
-      return;
-    }
-    showToast('Bridge configured. Reconnecting via RTSP…', { variant: 'success', duration: 3500 });
-    fetchSources();
-  } catch (e) {
-    progress.dismiss();
-    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
-  }
 }
 
 async function fetchSources() {
@@ -2511,8 +2437,6 @@ document.addEventListener('click', (e) => {
     case 'delete-video':    deleteVideo(id, t.dataset.name); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
     case 'copy-id':         copyIdToClipboard(t.dataset.id, t); break;
-    case 'copy-text':       copyTextToClipboard(t.dataset.text); break;
-    case 'use-bridge':      useBridge(id); break;
     case 'play-scene-clip': {
       const v = t.dataset.videoId;
       const s = parseFloat(t.dataset.start);

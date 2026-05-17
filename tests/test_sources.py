@@ -124,7 +124,6 @@ def test_status_values_complete() -> None:
         "ready",
         "error",
         "disconnected",
-        "needs_bridge",
     )
 
 

@@ -104,26 +104,21 @@ async def test_dispatch_youtube_routes_to_upload_for_archive(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_youtube_live_parks_in_needs_bridge(
+async def test_dispatch_youtube_live_sets_error_when_no_bridge(
     state_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Live YouTube URLs no longer error — they park in `needs_bridge`
-    status with a copy-paste command for the dashboard helper card.
-    `coll.upload` MUST NOT be called for a live URL — uploading a YouTube
-    live URL into VideoDB's archive endpoint silently bills credits for
-    a stream we can't read."""
+    """Live YouTube URLs error with a clear message pointing at the
+    docker-compose bridge. ``coll.upload`` MUST NOT be called for a
+    live URL — uploading it into VideoDB's archive endpoint would
+    silently bill credits for a stream we can't read."""
     monkeypatch.setattr(ingest, "_is_youtube_live", lambda url: True)
     s = add_source(kind="youtube", input="https://www.youtube.com/watch?v=live", name="ytl")
     coll = MagicMock()
 
     out = await ingest.dispatch(s.id, coll=coll)
 
-    assert out.status == "needs_bridge"
-    assert out.bridge_command and "start_bridge.sh" in out.bridge_command
-    # bridge_rtsp is intentionally empty — VideoDB rejects rtsp://localhost
-    # so we don't pre-fill the input. The bridge script prints the real
-    # rtsp://bore.pub:<port>/<slug> public URL which the operator pastes.
-    assert out.bridge_rtsp == ""
+    assert out.status == "error"
+    assert out.error and "bridge" in out.error.lower()
     coll.upload.assert_not_called()
 
 
