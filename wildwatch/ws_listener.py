@@ -102,6 +102,21 @@ def log(msg: str):
     print(f"[{ts}] {msg}", flush=True)
 
 
+def _open_user_only_append(path: Path):
+    """Open ``path`` for append with 0o600 perms (user-only).
+
+    Default `open(path, "a")` inherits process umask (typically 0o644 →
+    world-readable). The events JSONL contains alert metadata + stream
+    URLs + the ws_connection_id; PID file leaks the listener pid; ws_id
+    file leaks the active connection id (which a local attacker could
+    use to spoof events). Force 0o600 at open time so multi-user hosts
+    can't snoop.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    fd = os.open(str(path), flags, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def append_event(event: dict):
     """Append event to JSONL file with timestamps."""
     # Single clock read — using two separate datetime.now(UTC) calls
@@ -110,14 +125,22 @@ def append_event(event: dict):
     now = datetime.now(UTC)
     event["ts"] = now.isoformat()
     event["unix_ts"] = now.timestamp()
-    with open(EVENTS_FILE, "a") as f:
+    with _open_user_only_append(EVENTS_FILE) as f:
         f.write(json.dumps(event) + "\n")
+
+
+def _write_user_only(path: Path, contents: str) -> None:
+    """Write ``contents`` to ``path`` with 0o600 perms (user-only)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(str(path), flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(contents)
 
 
 def write_pid():
     """Write PID file for easy process management."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    _write_user_only(PID_FILE, str(os.getpid()))
 
 
 def cleanup_pid():
@@ -151,8 +174,10 @@ async def listen_with_retry():
                 log("Cleared events file")
             _first_connection = False
 
-            # Write ws_id to file for easy retrieval
-            WS_ID_FILE.write_text(ws_id)
+            # Write ws_id to file for easy retrieval. 0o600 because the
+            # ws_id is the live channel auth token — a local attacker
+            # with read access could connect and forge events.
+            _write_user_only(WS_ID_FILE, ws_id)
 
             # Print ws_id (parseable format for LLM)
             if retry_count == 0:

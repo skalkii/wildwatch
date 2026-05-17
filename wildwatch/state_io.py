@@ -37,22 +37,34 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         payload = json.dumps(data, indent=indent)
-        # Open + write + fsync the file handle. Using a raw open so we
-        # can call fsync; write_text doesn't expose the descriptor.
-        with tmp.open("w", encoding="utf-8") as f:
-            f.write(payload)
-            f.flush()
+        # Open with `os.open(..., O_CREAT | O_WRONLY | O_TRUNC, 0o600)`
+        # so the file is created with 0o600 permissions ATOMICALLY at
+        # creation. The previous `open(...)` + `chmod` sequence had a
+        # window (between open and chmod) where the file existed with
+        # the process umask permissions (usually 0o644 — world-readable).
+        # On containers with umask=0o000 this window let any local user
+        # read .state.json before the chmod corrected it.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(tmp), flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError as e:
+                    logger.warning("atomic_write_json: fsync failed on %s: %r", tmp, e)
+        except BaseException:
+            # If fdopen / write raised after the fd was opened, the fd
+            # was given to fdopen which closes it. If os.open succeeded
+            # but fdopen never ran, close fd here.
             try:
-                os.fsync(f.fileno())
-            except OSError as e:
-                # fsync can fail on some filesystems (e.g. some FUSE mounts
-                # in CI). Log but proceed — the rename below is still
-                # crash-atomic at the kernel level.
-                logger.warning("atomic_write_json: fsync failed on %s: %r", tmp, e)
-        # Tighten perms BEFORE the rename so the published file is 0600
-        # from the moment it exists. .state.json contains the
-        # webhook_base_url which we use as a VideoDB alert callback — a
-        # local-user attacker who can read+write it can hijack alerts.
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        # Belt-and-braces: re-chmod in case the underlying filesystem
+        # ignored the mode argument (some network filesystems do).
         try:
             os.chmod(tmp, 0o600)
         except OSError as e:
