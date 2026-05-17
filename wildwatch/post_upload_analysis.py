@@ -52,20 +52,34 @@ logger = logging.getLogger(__name__)
 # The mapping is keyed on ``id_var`` (the stable Python identifier from
 # EVENT_DEFINITIONS) so events.py reorgs don't break this mapping silently.
 _EVENT_QUERY = {
-    # ──── audio events (run against the audio index) ────
-    "gunshot": "gunshot",
-    "chainsaw": "chainsaw",
-    "human_intrusion_audio": "vehicle engine OR motorcycle OR human voices OR machinery",
-    "alarm_call": "alarm call OR alarm vocalization",
-    "predator_vocal": "lion roar OR leopard sawing OR hyena whoop OR predator vocalization",
-    "acoustic_silence": "abnormal silence",
+    # ──── audio events (run against the audio index when available, else
+    #      against the visual index as a fallback). The queries below
+    #      include both audio-flavoured terms (for hits in the audio
+    #      index's transcript-classified output) AND visual-flavoured
+    #      terms (so the same query produces useful hits when the
+    #      sweep falls back to the visual scene index on a silent clip). ──
+    "gunshot": (
+        "gunshot OR firearm discharge OR weapon OR rifle OR muzzle flash OR "
+        "person aiming firearm OR shooting"
+    ),
+    "chainsaw": "chainsaw OR power saw OR logging equipment OR person cutting tree",
+    "human_intrusion_audio": (
+        "vehicle engine OR motorcycle OR human voices OR machinery OR "
+        "vehicle visible OR person in scene OR human-made object"
+    ),
+    "alarm_call": "alarm call OR alarm vocalization OR animal alarm posture OR fleeing",
+    "predator_vocal": (
+        "lion roar OR leopard sawing OR hyena whoop OR predator vocalization OR "
+        "predator visible OR large carnivore"
+    ),
+    "acoustic_silence": "abnormal silence OR frozen animals OR vigilant scanning",
     # ──── species/visual events (run against the species scene index) ────
     "rare_species": "leopard OR rhino OR wild dog OR cheetah OR pangolin",
     "mixed_aggregation": "mixed species aggregation",
     "juvenile_present": "juvenile OR calf OR cub OR chick",
     "large_aggregation": "large aggregation OR many animals",
     "mortality_event": "carcass OR remains OR kill",
-    "human_intrusion_visual": "vehicle OR structure OR fence OR human-made object",
+    "human_intrusion_visual": "vehicle OR structure OR fence OR human-made object OR person",
 }
 
 # Which index kind each event id_var lives on (mirror INDEX_EVENT_MAP).
@@ -89,10 +103,13 @@ _READY = {"ready", "indexed", "complete", "completed", "done"}
 
 # How long to wait for an index to finish, total (seconds).
 _INDEX_WAIT_S = 20 * 60
-_POLL_INTERVAL_S = 8
-# How long to wait for the audio index specifically. Audio indexing can
-# stall for short clips with no speech — give up earlier.
-_AUDIO_WAIT_S = 8 * 60
+_POLL_INTERVAL_S = 6
+# How long to wait for the audio index specifically. VideoDB's
+# `video.index_audio` is transcript-based (extraction_type=transcript),
+# so for a silent clip with no speech it never produces output. We
+# gate audio kickoff on transcript existence (see `kick_off_audio_index`),
+# but as a belt-and-braces cap, give up after 3 min if it's still stuck.
+_AUDIO_WAIT_S = 3 * 60
 
 # Cap of webhook posts per upload — prevents an overly-permissive prompt
 # from spamming Telegram with 200 "gunshot" alerts on a single clip.
@@ -121,12 +138,72 @@ def _local_base_url() -> str:
     return os.getenv("LOCAL_WEBHOOK_URL", "http://localhost:8000").rstrip("/")
 
 
+def _has_transcript(video: Any, source_id: str) -> bool:
+    """Return True iff the video has a non-empty transcript.
+
+    VideoDB's `video.index_audio` is **transcript-based**
+    (`extraction_type=SceneExtractionType.transcript`) — it processes
+    transcript segments through an LLM with the audio prompt. A clip
+    with no spoken words has no transcript → `index_audio` sits in
+    `processing` forever waiting for segments that never come.
+
+    This helper triggers transcript generation if missing (idempotent
+    via `force=False`), then checks for non-empty content. If the
+    transcript is empty (silent / SFX-only clip), the caller should
+    skip the audio index entirely — VideoDB's audio path can't help.
+    """
+    try:
+        # Try to fetch existing transcript first — cheap if already generated.
+        existing = video.get_transcript()
+        if existing:
+            # Different shapes across SDK versions: list of {start,end,text}
+            # OR plain string. Treat any text presence as a transcript.
+            if isinstance(existing, list):
+                if any(str(seg.get("text", "")).strip() for seg in existing):
+                    return True
+            elif isinstance(existing, str) and existing.strip():
+                return True
+    except Exception as e:
+        logger.debug("post-analysis: get_transcript probe failed for %s: %r", source_id, e)
+
+    # No cached transcript — try to generate one.
+    try:
+        result = video.generate_transcript(force=False)
+    except Exception as e:
+        logger.info(
+            "post-analysis: generate_transcript failed for source=%s: %r — treating as silent clip",
+            source_id,
+            e,
+        )
+        return False
+
+    # The SDK returns either {"success": True, "text": "...", ...} OR a
+    # string OR a dict with word_timestamps. Tolerate all shapes.
+    if isinstance(result, dict):
+        text = (result.get("text") or "").strip()
+        if text:
+            return True
+        wts = result.get("word_timestamps") or []
+        return any(str(w.get("word", "")).strip() for w in wts)
+    if isinstance(result, str):
+        return bool(result.strip())
+    return False
+
+
 def kick_off_audio_index(video: Any, source_id: str) -> None:
     """Fire-and-forget audio index on a freshly-uploaded video.
 
-    Idempotent: if any audio-named index already exists on the video, skip.
-    This is the synchronous worker function — call it from a thread via
-    ``asyncio.to_thread`` so it doesn't block the event loop.
+    Three things happen:
+      1. List existing scene indexes; if any audio-named index already
+         exists, no-op (idempotent).
+      2. Verify the clip has a transcript. VideoDB's `index_audio` is
+         transcript-based — for a silent clip it would hang in
+         `processing` forever. We skip audio kickoff entirely on
+         silent clips and let the post-analysis sweep fall back to
+         the visual index.
+      3. Otherwise, kick off `video.index_audio` with the audio prompt.
+
+    Synchronous worker — call from a thread via `asyncio.to_thread`.
     """
     from wildwatch.prompts import format_prompt
 
@@ -141,12 +218,22 @@ def kick_off_audio_index(video: Any, source_id: str) -> None:
     except Exception as e:
         logger.warning("post-analysis: list_scene_index failed for %s: %r", source_id, e)
         existing = []
-    # Skip if any audio-named index already exists. Names are convention
-    # not contract — VideoDB doesn't expose `index_type` on the listing —
-    # so this is best-effort.
     has_audio = any("audio" in str(i.get("name", "")).lower() for i in existing)
     if has_audio:
         logger.info("post-analysis: source=%s already has an audio index; skipping", source_id)
+        return
+
+    # Gate on transcript — VideoDB's index_audio is transcript-based, so
+    # a silent / SFX-only clip will leave the index stuck in `processing`
+    # forever waiting for transcript segments that never come.
+    if not _has_transcript(video, source_id):
+        logger.info(
+            "post-analysis: source=%s has no transcript (silent / SFX-only clip); "
+            "skipping audio index — VideoDB's index_audio is transcript-based and "
+            "cannot classify wordless sound events. The visual index will still "
+            "be searched for events.",
+            source_id,
+        )
         return
 
     try:
@@ -326,9 +413,20 @@ async def run_post_upload_analysis(video: Any, source_id: str) -> None:
             ev = by_id_var.get(id_var)
             if ev is None or kind is None:
                 continue
-            # Pick the right index per event kind.
+            # Pick the right index per event kind, with a fallback: audio
+            # events run against the audio index when available, else the
+            # visual index (where scene descriptions may mention weapons,
+            # vehicles, etc. for clips with no transcript). Visual events
+            # always run against the visual scene index.
             if kind == "audio":
-                idx_meta = audio_idx
+                idx_meta = audio_idx or species_idx
+                if audio_idx is None and species_idx is not None:
+                    logger.debug(
+                        "post-analysis: audio index unavailable for %s; falling "
+                        "back to visual index for event=%s",
+                        source_id,
+                        id_var,
+                    )
             else:  # species/environment both live on the species visual index
                 idx_meta = species_idx
             if idx_meta is None:
