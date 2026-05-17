@@ -30,7 +30,12 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
-    import videodb as _videodb_types  # for type annotations only
+    # TYPE_CHECKING is False at runtime so this import never fires.
+    # Combined with `from __future__ import annotations` above, type
+    # annotations referencing `_videodb_types.Connection` etc. are stored
+    # as strings and only resolved by static checkers. DO NOT "fix" this
+    # into a runtime import — it would pull the heavy SDK on every test.
+    import videodb as _videodb_types
 
 import aiofiles
 from dotenv import load_dotenv
@@ -200,6 +205,10 @@ def _spawn_bg(coro, *, label: str) -> asyncio.Task:
 
 _RemoteData = dict[str, Any]  # {"rtstreams": list, "sandboxes": list, "error"?: str}
 _VideosData = dict[str, Any]  # {"videos": list, "error"?: str}
+# None as a sentinel here means "no usage payload fetched yet". The
+# /api/usage TTL check uses `data is not None` to distinguish an empty-
+# response cache hit (legitimate) from a never-populated cache (cold
+# start). Renaming would obscure that intent.
 _UsageData = dict[str, Any] | None
 
 
@@ -809,10 +818,14 @@ async def api_upload_source(
     """
     client_ip = _client_ip_from(request)
     if not _upload_rate_limit_check(client_ip):
+        # Don't echo the raw client_ip in the 429 detail — under
+        # WILDWATCH_TRUSTED_PROXY=1 it came from X-Forwarded-For and
+        # could contain attacker-controlled content reflected verbatim
+        # into log aggregators and dashboards.
         raise HTTPException(
             status_code=429,
             detail=(
-                f"upload rate limit exceeded for {client_ip} "
+                f"upload rate limit exceeded "
                 f"(bucket={_UPLOAD_BUCKET_CAPACITY}, refill 1/min); "
                 "retry after one minute."
             ),
