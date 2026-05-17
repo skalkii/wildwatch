@@ -218,43 +218,48 @@ flowchart TD
 
 ## Flow 5 — Daily highlight reel
 
-End-of-day operator hits "build digest" (or a cron does). 90 seconds later there's a playable, narrated, music-backed reel of the day's most important events.
+Operator clicks "Daily summary → Build" on the dashboard's Alerts tab. 30-90 seconds later there's a playable, narrated reel of the day's most important events — with a one-paragraph summary written by `generate_text` and a voiceover narrating it via `generate_voice`.
 
 ```mermaid
 flowchart TD
-    A[scripts/build_digest.py<br/>--since-hours 24 --top 10<br/>--music] --> B[event_log.read_since<br/>data/live_event_log.jsonl]
-    B --> C[pick_top_events<br/>sort by tier desc, recency desc]
-    C --> D{any events?}
-    D -->|no| E[Synthesise default<br/>3-clip montage<br/>tiers 3,2,1]
-    D -->|yes| F[For each picked event]
-    E --> F
-    F --> G[pick_corpus_video_id<br/>tier → preferred slug → video_id]
-    G --> H[Track 1: video<br/>VideoAsset + Transition fade]
-    H --> I[Track 2: text overlay<br/>TextAsset tier+label<br/>with Background]
-    I --> J{--music?}
-    J -->|yes| K[Track 3: audio<br/>coll.generate_music<br/>AudioAsset volume=0.25]
-    J -->|no| L
-    K --> L[timeline.generate_stream]
-    L --> M[player_url<br/>or console fallback]
-    M --> N[Optional: coll.generate_text<br/>natural-language summary]
-    N --> O[Print + return<br/>player URL + summary]
+    A[Dashboard button<br/>POST /api/digest/build] --> B[event_log.read_since<br/>data/live_event_log.jsonl]
+    B --> C[dedupe_events<br/>label + source[:48] + 60s bucket]
+    C --> D[pick_top_events<br/>sort by tier desc, recency desc]
+    D --> E{any events?}
+    E -->|no| F[Synthesise default<br/>3-clip montage<br/>tiers 3,2,1]
+    E -->|yes| G[For each picked event]
+    F --> G
+    G --> H[pick_corpus_video_id<br/>tier → preferred slug → video_id]
+    H --> I[Track 1: video<br/>VideoAsset + Transition fade]
+    I --> J[Track 2: text overlay<br/>TextAsset tier+label]
+    J --> K[coll.generate_text<br/>45-65 word ranger-friendly summary]
+    K --> L{add_voiceover?}
+    L -->|yes| M[coll.generate_voice<br/>voice_name=Default, wait=True]
+    M --> N[Track 3: audio<br/>AudioAsset volume=0.9]
+    L -->|no| O
+    N --> O{add_music?}
+    O -->|yes| P[Track 4: audio<br/>coll.generate_music<br/>AudioAsset volume=0.25]
+    O -->|no| Q
+    P --> Q[timeline.generate_stream]
+    Q --> R[Return {player_url,<br/>stream_url, summary,<br/>n_clips, n_events}]
 ```
 
 ### Node-by-node
 
-1. **Entry point** — `python scripts/build_digest.py --since-hours 24 --top 10 [--music] [--no-overlays]`.
-2. **Read event log** — `wildwatch/event_log.py:read_since` reads `data/live_event_log.jsonl` and returns every event with `received_at >= now - since_hours*3600`. Tolerates malformed lines (skips them with a warning).
-3. **Pick top events** — `digest.py:pick_top_events` sorts by `(-tier, -received_at)` and keeps the first N. Urgent events ALWAYS appear before notable ones.
-4. **Empty-log fallback** — if no events fired today, build a default 3-clip montage (one per tier) so the demo always has a reel to show.
-5. **Event iteration** — one clip per picked event.
-6. **Pick corpus clip** — `digest.py:pick_corpus_video_id` maps the event's tier to a list of preferred corpus slugs (from `TIER_SLUG_PREFERENCE`) and returns the first that has a `video_id` in `state["corpus"]`. Falls back to "any clip" if no slug matches.
-7. **Track 1 — video** — `VideoAsset(id=video_id, start=0)` wrapped in a `Clip(duration=4s, transition=fade-in/out)`. Added to the video `Track`.
-8. **Track 2 — text overlay** — `TextAsset(text="🟦 INFO\n<event label>", font=…, background=…)` with the same fade transition. The tier color (#38bdf8 / #f59e0b / #ef4444) sets the background. Renders as a burn-in label so a non-tech viewer instantly understands what each clip represents.
-9–10. **Track 3 — music (optional)** — `coll.generate_music(prompt="documentary ambient...", duration=total)` returns an `Audio` object whose id we wrap in `AudioAsset(volume=0.25)`. Failure is non-fatal — the reel just plays silent.
-11. **Generate stream** — `timeline.generate_stream()` is VideoDB's "compile and serve" call. Returns an HLS URL.
-12. **Player URL** — preferred path is `timeline.player_url` (skill convention). Fallback to hand-built `console.videodb.io/player?url=...`.
-13. **Natural-language summary (optional)** — `coll.generate_text(prompt="Summarise this digest in one paragraph...")` produces a one-paragraph caption for the reel. Failure is silent.
-14. **Output** — prints both URL and summary; returns them in the result dict.
+1. **Entry point** — Dashboard button fires `POST /api/digest/build` with `{since_hours, top_n, clip_seconds, add_text_overlays, add_voiceover}`. CLI fallback: `python scripts/build_digest.py`.
+2. **Read event log** — `wildwatch/event_log.py:read_since` reads `data/live_event_log.jsonl` and returns every event with `received_at >= now - since_hours*3600`. Tolerates malformed lines.
+3. **Dedupe** — `digest.py:dedupe_events` collapses `(label, source[:48], 60s bucket)` collisions. The same label firing five times in one minute on the same source contributes one clip, not five.
+4. **Pick top events** — `digest.py:pick_top_events` sorts by `(-tier, -received_at)` and keeps the first N. Urgent events ALWAYS appear before notable ones.
+5. **Empty-log fallback** — if no events fired today, build a default 3-clip montage (one per tier) so the demo always has a reel to show.
+6. **Pick corpus clip** — `digest.py:pick_corpus_video_id` maps the event's tier to a list of preferred corpus slugs (from `TIER_SLUG_PREFERENCE`) and returns the first with a `video_id` in `state["corpus"]`. Falls back to "any clip" if no slug matches.
+7. **Track 1 — video** — `VideoAsset(id=video_id, start=0)` wrapped in a `Clip(duration=4s, transition=fade)`.
+8. **Track 2 — text overlay** — `TextAsset(text="🟦 INFO\n<event label>", font=…, background=…)` with the tier color (#38bdf8 / #f59e0b / #ef4444) as the background.
+9. **Summary text** — `coll.generate_text(prompt="Summarise this wildlife monitoring digest...")` returns a 45-65 word ranger-friendly paragraph. The prompt explicitly forbids bracket tags and event-engine jargon. Failure is silent → no summary in result.
+10. **Voiceover (optional)** — `coll.generate_voice(text=summary, voice_name="Default", wait=True)` returns an audio asset whose id we wrap in `AudioAsset(volume=0.9)` on a new `Track`. Volume is higher than music because corpus clips are usually silent.
+11. **Music (optional)** — `coll.generate_music(prompt="documentary ambient...", duration=total)` on its own track at `volume=0.25`.
+12. **Generate stream** — `timeline.generate_stream()` compiles and serves. Returns HLS URL.
+13. **Player URL** — preferred path is `timeline.player_url`. Fallback to hand-built `console.videodb.io/player?url=...`.
+14. **Output** — `DigestResult` TypedDict: `{n_events, n_clips, stream_url, player_url, summary}`. Dashboard renders the summary paragraph + a "▶ Play reel" button.
 
 ---
 
@@ -379,7 +384,7 @@ flowchart TD
 3. **Load state** — `.state.json` if present, otherwise empty dict.
 4. **Tunnel check** — refuse to proceed if no `webhook_base_url`; otherwise the alerts we create would point at a dead URL.
 5. **VideoDB connect** — `videodb.connect()` + `get_collection()`. Cached for the rest of the script.
-6. **Optional WebSocket id** — if `--ws`, read `/tmp/videodb_ws_id` written by `wildwatch/ws_listener.py`. This id gets threaded through every subsequent index and alert call.
+6. **Optional WebSocket id** — if `--ws`, read `/tmp/videodb_ws_id` written by `scripts/ws_listener.py`. This id gets threaded through every subsequent index and alert call.
 7. **`_ensure_events`** — pre-fetches `conn.list_events()` once, then for each of the 18 definitions in `wildwatch/events.py`: if a same-labelled event already exists, reuse its id; otherwise `conn.create_event()`. Saves the mapping into `state["events"]`.
 8. **Idempotent rtstream** — if a previous bootstrap saved an rtstream id and it's still `connected`, reuse it. Otherwise call `_bootstrap_stream` to provision a fresh one with all four indexes.
 9. **`_bootstrap_stream`** — `rt = coll.connect_rtstream(url, media_types=["video","audio"], store=True)`, then four index calls in order (species → behavior → environment → audio). If `--ws`, also calls `rt.start_transcript(ws_connection_id=...)`.

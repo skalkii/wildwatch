@@ -161,6 +161,35 @@ TIER_SLUG_PREFERENCE: dict[int, list[str]] = {
 DEFAULT_CLIP_SECONDS = 4
 
 
+def dedupe_events(events: list[dict]) -> list[dict]:
+    """Collapse near-duplicate alert fires before timeline construction.
+
+    Same event-engine event prompt can match the same scene multiple times
+    in a short window (especially for `potential_human_intrusion_visual`
+    on the intruder cam). One reel shouldn't include the same shot ten
+    times. Dedupe key is `(label, video_id_or_stream_label, 60s bucket of
+    start_time)` — same label, same source, same minute = same scene.
+    """
+    seen: set[tuple[str, str, int]] = set()
+    out: list[dict] = []
+    for ev in events:
+        label = str(ev.get("label") or "")
+        source = str(ev.get("video_id") or ev.get("stream_url") or "")[:48]
+        # Coerce start_time to a 60-second bucket. Accepts float / int /
+        # iso string. Falls back to received_at when start_time is missing.
+        st = ev.get("start_time") or ev.get("received_at") or 0
+        try:
+            bucket = int(float(st)) // 60
+        except (TypeError, ValueError):
+            bucket = 0
+        key = (label, source, bucket)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ev)
+    return out
+
+
 def pick_top_events(
     events: list[dict[str, Any]],
     top_n: int = 10,
@@ -308,6 +337,7 @@ def build_digest(
     *,
     add_text_overlays: bool = True,
     add_music: bool = False,
+    add_voiceover: bool = False,
 ) -> DigestResult:
     """End-to-end: read log -> pick top N -> Timeline -> playable URL.
 
@@ -318,6 +348,8 @@ def build_digest(
 
     min_ts = time.time() - (since_hours * 3600)
     events = event_log.read_since(min_ts)
+    # Dedupe BEFORE pick_top — same label/source/minute is one scene.
+    events = dedupe_events(events)
     picked = pick_top_events(events, top_n=top_n)
     corpus = state.get("corpus", {})
 
@@ -350,6 +382,68 @@ def build_digest(
             "summary": None,
         }
 
+    # ──── 1. Natural-language summary FIRST (drives voiceover script too).
+    summary: str | None = None
+    coll = conn.get_collection()
+    try:
+        n_t1 = sum(1 for e in events if int(e.get("tier", 0)) == 1)
+        n_t2 = sum(1 for e in events if int(e.get("tier", 0)) == 2)
+        n_t3 = sum(1 for e in events if int(e.get("tier", 0)) == 3)
+        prompt = (
+            "Summarise this wildlife monitoring digest in ONE short paragraph "
+            "for a non-technical conservation audience (rangers, donors). "
+            "Lead with the most urgent finding. Use plain English, no jargon, "
+            "no event-engine terminology, no bracket tags. 45-65 words. "
+            f"Window: last {since_hours}h. Counts: {n_t1} routine sightings, "
+            f"{n_t2} notable events, {n_t3} urgent events. Top events: "
+            + "; ".join((ev.get("label") or "").replace("_", " ") for ev in picked[:5])
+            + "."
+        )
+        if hasattr(coll, "generate_text"):
+            out = coll.generate_text(prompt=prompt, model_name="basic")
+            if isinstance(out, dict):
+                out = out.get("output") or out.get("text") or out.get("response") or ""
+            summary = (out or "").strip() or None
+    except Exception as e:
+        logger.warning("digest: generate_text failed (%s: %s)", type(e).__name__, e)
+
+    # ──── 2. Optional voiceover — turn the summary into a narration track
+    # that plays over the visual reel. AudioAsset volume=0.9 because the
+    # corpus clips themselves are usually silent or near-silent.
+    if add_voiceover and summary and hasattr(coll, "generate_voice"):
+        try:
+            audio = coll.generate_voice(
+                text=summary,
+                voice_name="Default",
+                wait=True,
+            )
+            audio_id = getattr(audio, "id", None)
+            if audio_id:
+                # Total reel length so far — sum of cursor across all clips.
+                # build_timeline returned n_clips; clip_seconds is uniform.
+                vo_duration = n_clips * clip_seconds
+                vo_track = Track()
+                vo_track.add_clip(
+                    0,
+                    Clip(
+                        asset=AudioAsset(id=audio_id, start=0, volume=0.9),
+                        duration=vo_duration,
+                    ),
+                )
+                timeline.add_track(vo_track)
+                logger.info(
+                    "digest: added voiceover track id=%s duration=%ss",
+                    audio_id,
+                    vo_duration,
+                )
+        except Exception as e:
+            logger.warning(
+                "digest: generate_voice failed (%s: %s); reel will have no narration",
+                type(e).__name__,
+                e,
+            )
+
+    # ──── 3. Commit timeline → playable stream + player URLs.
     stream_url = timeline.generate_stream()
 
     # Prefer the SDK's own player_url helper over hand-built console URLs —
@@ -369,30 +463,6 @@ def build_digest(
         from urllib.parse import quote
 
         player_url = f"https://console.videodb.io/player?url={quote(stream_url, safe='')}"
-
-    # Best-effort natural-language summary card for the reel intro. Uses
-    # `coll.generate_text` (skill's go-to for LLM-as-tool); failure is silent.
-    summary: str | None = None
-    try:
-        n_t1 = sum(1 for e in events if int(e.get("tier", 0)) == 1)
-        n_t2 = sum(1 for e in events if int(e.get("tier", 0)) == 2)
-        n_t3 = sum(1 for e in events if int(e.get("tier", 0)) == 3)
-        prompt = (
-            "Summarise this wildlife monitoring digest in one short paragraph "
-            "(<=40 words) for a non-technical conservation audience. "
-            f"Last {since_hours}h: {n_t1} routine sightings, {n_t2} notable "
-            f"events, {n_t3} urgent events. Highlight labels: "
-            + ", ".join((ev.get("label") or "") for ev in picked[:5])
-            + "."
-        )
-        coll = conn.get_collection()
-        if hasattr(coll, "generate_text"):
-            summary = coll.generate_text(prompt=prompt, model_name="basic")
-    except Exception as e:
-        # WARNING not INFO — a quota/auth failure on the LLM call should
-        # be visible at the same level as other SDK errors so it isn't
-        # confused with the legitimate "module not installed" skip.
-        logger.warning("digest: generate_text failed (%s: %s)", type(e).__name__, e)
 
     return {
         "n_events": len(events),

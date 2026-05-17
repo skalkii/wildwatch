@@ -524,6 +524,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <p class="text-[11px] faint mb-2.5 mt-0.5">VideoDB sandbox running the vision + audio models.</p>
         <div id="sandboxes" class="text-xs space-y-1.5">loading…</div>
       </div>
+      <div class="card p-4" id="digest-card">
+        <div class="flex items-start justify-between gap-2">
+          <div>
+            <h2 class="text-sm font-semibold tracking-tight">Daily summary</h2>
+            <p class="text-[11px] faint mt-0.5">One paragraph + voiceover reel of the last 24h, deduped.</p>
+          </div>
+          <button id="digest-build-btn" class="btn btn-primary text-[11.5px] !py-1 !px-2.5">Build</button>
+        </div>
+        <div id="digest-status" class="text-[11px] faint mt-2 hidden"></div>
+        <div id="digest-result" class="mt-3 hidden text-[12px] space-y-2"></div>
+      </div>
       <details class="card p-4">
         <summary class="text-sm font-semibold tracking-tight cursor-pointer select-none flex items-center justify-between">
           <span>Test the alert system</span>
@@ -1133,6 +1144,60 @@ async function fireTest(tier) {
       stream_url: null
     })
   });
+}
+
+// ──── Daily summary ────
+// Synchronous build — generate_voice waits server-side. UI shows
+// "Building…" with a spinning button label and disables the button.
+async function buildDigest() {
+  const btn = $('digest-build-btn');
+  const statusEl = $('digest-status');
+  const resultEl = $('digest-result');
+  if (!btn) return;
+  const origLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Building…';
+  statusEl.classList.remove('hidden');
+  statusEl.textContent = 'Generating summary + voiceover reel — this can take 30-90s.';
+  resultEl.classList.add('hidden');
+  resultEl.innerHTML = '';
+  try {
+    const r = await fetch('/api/digest/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        since_hours: 24,
+        top_n: 10,
+        clip_seconds: 4,
+        add_text_overlays: true,
+        add_voiceover: true,
+      }),
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      throw new Error(`HTTP ${r.status}: ${errText.slice(0, 200)}`);
+    }
+    const d = await r.json();
+    statusEl.classList.add('hidden');
+    const parts = [];
+    parts.push(`<div class="muted">${d.n_clips || 0} clips from ${d.n_events || 0} events.</div>`);
+    if (d.summary) {
+      parts.push(`<div style="line-height:1.5;">${escapeHtml(d.summary)}</div>`);
+    }
+    if (d.player_url) {
+      parts.push(`<a href="${escapeHtml(d.player_url)}" target="_blank" rel="noopener" class="btn btn-primary text-[11.5px] !py-1 !px-2.5 inline-block mt-1">▶ Play reel</a>`);
+    } else {
+      parts.push('<div class="faint">No reel — event log empty and no corpus clips available.</div>');
+    }
+    resultEl.innerHTML = parts.join('');
+    resultEl.classList.remove('hidden');
+  } catch (e) {
+    statusEl.textContent = `Failed: ${e.message || e}`;
+    statusEl.style.color = '#ef4444';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
 }
 
 function startSSE() {
@@ -2524,6 +2589,7 @@ document.querySelectorAll('.modal-tab-btn').forEach(b => {
 });
 
 $('add-source-btn').addEventListener('click', () => { $('add-modal').classList.remove('hidden'); $('modal-error').classList.add('hidden'); });
+{ const _b = document.getElementById('digest-build-btn'); if (_b) _b.addEventListener('click', buildDigest); }
 $('modal-cancel').addEventListener('click', () => $('add-modal').classList.add('hidden'));
 
 $('modal-submit').addEventListener('click', async () => {

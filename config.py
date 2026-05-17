@@ -10,10 +10,10 @@ from __future__ import annotations
 STREAMS: dict[str, dict[str, object]] = {
     "namibia_waterhole": {
         "name": "Namibia Waterhole (HDOnTap)",
-        # bore.pub:59061 — current docker bridge session. Remote port
+        # bore.pub:8700 — current docker bridge session. Remote port
         # changes on every `docker compose down/up`; update here OR
         # override via WILDWATCH_RTSP_NAMIBIA env at bootstrap time.
-        "rtsp_url": "rtsp://bore.pub:59061/namibia",
+        "rtsp_url": "rtsp://bore.pub:8700/namibia",
         "youtube_url": "https://www.youtube.com/watch?v=AeMUdOPFcXI",
         "use_bridge": True,
         "location_context": "Namib Desert waterhole, Gondwana Namibia Park",
@@ -29,7 +29,7 @@ STREAMS: dict[str, dict[str, object]] = {
     },
     "wild_africa_live": {
         "name": "Hwange Waterhole (Wilderness Linkwasha)",
-        "rtsp_url": "rtsp://bore.pub:59061/hwange",
+        "rtsp_url": "rtsp://bore.pub:8700/hwange",
         # Old vr4o_AsrU1k went offline 2026-05-16; swapped to Africam's Hwange
         # Linkwasha 24/7 cam which is reliably live and matches the waterhole prompt
         # orientation. Zimbabwe reserve, still inside the rotating-reserves context.

@@ -2,41 +2,35 @@
 
 **Real-time perception agent for protected-area wildlife monitoring.**
 
-WildWatch turns continuous wildlife livestreams into structured ecological observations — species, behavior, environment, threats — with tiered alerts, cross-modal reasoning, and auto-generated daily highlight reels. Built on the [VideoDB](https://videodb.io) SDK for the **Eyes & Ears** 48-hour hackathon (May 16–18, 2026).
-
-> Submission target: GitHub repo + 60–180s demo video + 200-word writeup at https://hackday.videodb.io.
+WildWatch turns continuous wildlife livestreams (and uploaded clips) into structured ecological observations — species, behavior, environment, threats — with tiered alerts, cross-modal reasoning, and a one-click daily summary reel narrated by AI. Built end-to-end on the [VideoDB](https://videodb.io) SDK for the **Eyes & Ears** hackathon.
 
 ---
 
-## WildWatch in 60 seconds — for everyone
+## What it does in 60 seconds
 
-Imagine a single ranger trying to protect a 100 km² reserve with three or four wildlife cameras streaming day and night. There's no human way to watch every frame, and yet the meaningful moments — a leopard at the waterhole, a herd of elephants in distress, the sound of a chainsaw at 2 a.m. — are exactly the moments a ranger needs to know about right away.
+A single ranger trying to protect a 100 km² reserve with three or four wildlife cameras streaming day and night can't possibly watch every frame — yet the meaningful moments (leopard at the waterhole, herd in distress, chainsaw at 2 a.m.) are exactly the moments they need to know about.
 
-**WildWatch is the always-on observer that watches and listens for them.** A team of four AI "lenses" (one for species, one for behaviour, one for the surrounding environment, one for audio) sits on top of every livestream we plug in. The moment any of them spots something noteworthy, an alert lands on the ranger's phone within seconds — colour-coded by urgency, with a tappable clip of the actual moment. At the end of every day a 90-second highlight reel summarises what happened.
+**WildWatch is the always-on observer that watches and listens for them.** Four AI "lenses" (species, behaviour, environment, audio) sit on top of every livestream or uploaded clip. When any lens spots something noteworthy, an alert lands on Telegram and the dashboard within seconds — colour-coded by urgency, with a tappable clip of the actual moment.
 
-The smartest part is **cross-modal reasoning**: instead of firing on a single signal (which is often noise), the system waits for two independent signals to agree. *"An alarm call AND fleeing animals within 90 seconds"* is far more likely to be a real predator event than either signal alone, so that's what gets escalated to red.
+**Cross-modal reasoning** stops single-signal noise: *"an alarm call AND fleeing animals within 90 seconds"* escalates to red, where either signal alone would not. **Daily summary** stitches deduped highlights into a narrated 90-second reel via VideoDB's `generate_text` + `generate_voice` + Timeline editor.
 
-It works because we don't train any of our own AI — we use carefully written prompts to steer VideoDB's general-purpose perception model into a wildlife specialist. That makes the project cheap to run, easy to extend (drop a new prompt file in to add a new "lens"), and accurate enough for real-world conservation work.
+No in-house ML. The whole project leans on VideoDB's prompt-driven VLM indexing — drop a new prompt file in to add a new lens.
 
-**Two diagrams that explain everything visually:**
-
-- 📁 [`docs/REPO_MAP.md`](docs/REPO_MAP.md) — every folder and file in plain English. Read this first if you're new.
-- 🔀 [`docs/FEATURE_FLOWS.md`](docs/FEATURE_FLOWS.md) — step-by-step diagrams of every feature, from "AI sees a leopard" to "phone buzzes" to "daily reel is built."
-
-If you're a non-technical reader, **start with the two docs above** — they avoid jargon and explain each step with file references for anyone who wants to follow up in code.
+**Read these next:**
+- 📁 [`docs/REPO_MAP.md`](docs/REPO_MAP.md) — every folder and file explained.
+- 🔀 [`docs/FEATURE_FLOWS.md`](docs/FEATURE_FLOWS.md) — diagrams of every feature.
+- ⚠️ [`docs/GENAI_ROADMAP.md`](docs/GENAI_ROADMAP.md) — what's wired, what's not, and the one real platform limitation.
 
 ---
 
 ## The problem
 
-Existing conservation AI (SpeciesNet, Wildlife Insights, MegaDetector) processes **single camera-trap images** for **species classification only**. The unsolved problems in the conservation tech literature:
+Existing conservation AI (SpeciesNet, Wildlife Insights, MegaDetector) processes **single camera-trap images** for **species classification only**. WildWatch tackles four gaps in the literature simultaneously:
 
-1. **Continuous stream processing** — nobody runs these models against 24/7 livestreams in real time.
-2. **Behavioral classification** — current tools stop at "what species"; they don't say "what is the animal doing."
-3. **Multimodal reasoning** — bioacoustic tools (BirdNET) and visual tools are separate stacks today.
-4. **Anthropogenic threat detection** — gunshots, chainsaws, vehicles in protected areas; some products exist (Rainforest Connection) but they're audio-only.
-
-WildWatch attacks all four simultaneously using VideoDB's prompt-driven VLM indexing.
+1. **Continuous stream processing** — 24/7 livestreams in real time, not snapshots.
+2. **Behavioral classification** — not just "what species" but "what is it doing".
+3. **Multimodal reasoning** — audio + visual co-witnessing in one stack.
+4. **Anthropogenic threat detection** — gunshots, chainsaws, vehicles in protected areas.
 
 ---
 
@@ -45,15 +39,16 @@ WildWatch attacks all four simultaneously using VideoDB's prompt-driven VLM inde
 ```
 ┌────────────────────────┐
 │  Stream sources        │
-│  - HDOnTap direct RTSP │
+│  - RTSP / RTMP camera  │
 │  - YouTube Live (via   │
 │    mediamtx bridge)    │
+│  - Uploaded file / URL │
 └──────────┬─────────────┘
            │
            ▼
 ┌─────────────────────────┐
-│ VideoDB RTStream        │
-│ coll.connect_rtstream() │
+│ VideoDB RTStream OR     │
+│ Video (uploaded)        │
 └──────────┬──────────────┘
            │
    ┌───────┼───────┬─────────────┐
@@ -65,175 +60,189 @@ WildWatch attacks all four simultaneously using VideoDB's prompt-driven VLM inde
    └───────┼───────┼─────────────┘
            ▼
 ┌─────────────────────────┐
-│ Events (reusable across │
-│ streams) + Alerts       │
+│ Events + Alerts         │
+│ (rtstreams)             │
+│ Path-B sweep (uploads)  │
 └──────────┬──────────────┘
            │
      ┌─────┴─────┐
      ▼           ▼
 ┌─────────┐ ┌──────────────┐
-│Webhooks │ │ WebSocket    │
-│→Telegram│ │ → live UI    │
+│Telegram │ │ Dashboard    │
+│ (bot)   │ │ (SSE live)   │
 └─────────┘ └──────────────┘
            │
            ▼
-┌─────────────────────────┐
-│ Correlation engine      │
-│ (cross-modal reasoning) │
-│ Search every 30s,       │
-│ fire confirmed events   │
-└──────────┬──────────────┘
-           ▼
-┌─────────────────────────┐
-│ Daily digest reel       │
-│ (programmable editing)  │
-└─────────────────────────┘
+┌─────────────────────────────┐
+│ Daily summary (manual)      │
+│ generate_text + generate_   │
+│ voice + Timeline reel       │
+└─────────────────────────────┘
 ```
 
 ---
 
 ## Depth of VideoDB SDK usage
 
-WildWatch exercises **all 10 VideoDB primitives** across the See / Understand / Act layers — most submissions stop at 4–5.
-
 | Layer | Primitive | How WildWatch uses it |
 |---|---|---|
-| See | `coll.connect_rtstream()` | Two streams: direct RTSP + YouTube-bridged. Demonstrates production portability. |
-| See | `coll.upload()` | Recorded clips for offline prompt iteration and the digest reel source pool. |
-| Understand | `rtstream.index_visuals()` | THREE separate visual indexes (species, behavior, environment) — not one omnibus prompt. |
-| Understand | `rtstream.index_audio()` | One audio index covering biophony + anthropophony. The differentiator. |
-| Understand | `rtstream.search()` | Cross-index queries inside the correlation engine. |
-| Act | `conn.create_event()` | Events defined ONCE, reused across both streams (the design intent). |
+| See | `coll.connect_rtstream()` | Live RTSP feeds (direct cameras, or YouTube-bridged via mediamtx + bore). |
+| See | `coll.upload()` | Uploaded clips + URL ingest for offline iteration and the demo trigger flow. |
+| Understand | `rtstream.index_visuals()` / `video.index_scenes()` | Three visual lenses (species, behaviour, environment) — separate indexes, not one prompt. |
+| Understand | `rtstream.index_audio()` / `video.index_audio()` | Audio lens (biophony + anthropophony). See limitation below. |
+| Understand | `rtstream.search()` / `video.search()` | Cross-index queries in the correlation loop + Path-B sweep. |
+| Act | `conn.create_event()` | 18 events defined ONCE on the connection, reused across streams. |
 | Act | `index.create_alert()` | Webhooks → FastAPI → Telegram with playable clip URLs. |
-| Act | `conn.connect_websocket()` | Live channel for the dashboard demo. |
-| Act | `rtstream.generate_stream()` | Generates playable clip URLs attached to alerts. |
-| Act | Programmable editing (`Timeline`, `VideoAsset`, `TextAsset`) | Auto-generated daily highlight reel. |
+| Act | `conn.connect_websocket()` | Optional dual-delivery channel (skill convention). |
+| Act | `rtstream.generate_stream()` / `video.generate_stream(timeline=…)` | Playable clip URLs attached to every alert. |
+| Act | `coll.generate_text()` | Telegram alert rewriter + daily summary paragraph. |
+| Act | `coll.generate_voice()` | Daily summary narration (`AudioAsset` on the reel timeline). |
+| Act | `coll.generate_music()` | Optional reel soundtrack. |
+| Act | Programmable editor (`Timeline`, `Track`, `Clip`, `VideoAsset`, `TextAsset`, `AudioAsset`, `Transition`) | Daily summary reel composition. |
 
-**Sandbox-aware:** every index/generation call passes `sandbox_id` to a single shared Medium `SandboxTier` (gemma-4-31B-it for visual, Qwen3.5-9B for audio). One sandbox lifecycle, idle-timeout 600s, status-gated before submitting jobs.
+One shared Medium `SandboxTier` for every index/generation call, status-gated, idle-timeout 600s — so credit burn is bounded.
 
-**Built with the official [VideoDB Skills plugin](https://github.com/video-db/skills).** Installed in this repo's Claude Code session via `/plugin install videodb@videodb-skills`. The skill surfaces server-side perception primitives (See / Understand / Act) directly to the coding agent, keeping SDK shape and best-practice prompts in lockstep with `docs.videodb.io`. WildWatch is a real-world build of that pattern: continuous wildlife streams → indexed perception → tiered alerts → auto-edited reels.
+Built with the official [VideoDB Skills plugin](https://github.com/video-db/skills). Installed via `/plugin install videodb@videodb-skills` in Claude Code.
 
 ---
 
-## Quickstart
+## Local setup (free-tier, no paid services)
 
-### Path A — Docker compose (recommended)
+Tested on macOS 14+ (Apple Silicon and Intel) and Ubuntu 22.04.
+
+### Prerequisites
+
+| Tool | Why | Install |
+|---|---|---|
+| Python 3.12 | the app | `brew install python@3.12` / `apt install python3.12` |
+| Docker Desktop | RTSP relay + tunnel (live feeds only) | https://docs.docker.com/desktop/ |
+| ffmpeg + streamlink | YouTube → RTSP bridge (live feeds only) | `brew install ffmpeg streamlink` |
+| `cloudflared` | public webhook URL (so VideoDB can call back) | `brew install cloudflare/cloudflare/cloudflared` |
+| A VideoDB account | the AI brain | https://console.videodb.io — free credits on signup |
+| A Telegram bot | alerts | message [@BotFather](https://t.me/BotFather), `/newbot`, copy the token |
+
+### 1. Clone + Python env
 
 ```bash
-git clone https://github.com/skalkii/wildwatch.git && cd wildwatch
-cp .env.example .env
-# Edit .env: VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-docker compose up                  # starts mediamtx + wildwatch + bore
-# (or)
-docker compose --profile tunnel up # also brings up cloudflared (needs CLOUDFLARED_TUNNEL_TOKEN in .env)
+git clone https://github.com/skalkii/wildwatch.git
+cd wildwatch
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-Then open **http://localhost:8000/** — the live dashboard.
-
-Services spun:
-- `wildwatch` — FastAPI app on `:8000` (dashboard + webhook + REST API)
-- `mediamtx` — RTSP relay on `:8554` for YouTube/HLS-bridged streams
-- `bore` — TCP tunnel exposing `mediamtx:8554` to `bore.pub:<remote_port>` (so VideoDB can reach your local RTSP)
-- `cloudflared` *(optional)* — public HTTPS tunnel for the webhook receiver
-
-### Path B — Local dev (faster iteration)
+### 2. Configure `.env`
 
 ```bash
-# 1. Set up Python env + fill .env (TELEGRAM_*, VIDEO_DB_API_KEY)
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
 cp .env.example .env
+```
 
-# 2. Public webhook URL for VideoDB callbacks. Copy the printed
-#    *.trycloudflare.com URL into .env as WEBHOOK_BASE_URL.
+Fill in:
+- `VIDEO_DB_API_KEY` — from https://console.videodb.io → API Keys.
+- `TELEGRAM_BOT_TOKEN` — from BotFather.
+- `TELEGRAM_CHAT_ID` — send any message to your bot, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` → copy the `chat.id`.
+- `WEBHOOK_BASE_URL` — set in step 4.
+
+### 3. Start the server
+
+```bash
+uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Open http://localhost:8000/ — the dashboard.
+
+### 4. Public webhook URL (for live alerts to reach you)
+
+In a separate terminal:
+
+```bash
 cloudflared tunnel --url http://localhost:8000
+```
 
-# 3. RTSP bridge (only needed for live wildlife streams). One
-#    docker compose brings up mediamtx (port 8554) + bore (public
-#    bore.pub tunnel — read the remote port from bore container logs).
+Copy the printed `https://*.trycloudflare.com` URL into `.env` as `WEBHOOK_BASE_URL`, then restart uvicorn. (Skip this step for the upload-only demo flow below — Path-B sweep delivers locally.)
+
+---
+
+## Demo flow (no live feed needed)
+
+The point of the demo is to show the full pipeline. Live wildlife feeds are stale most of the day and unreliable for scheduled demos — so this flow uses uploaded sample clips.
+
+1. **Open the dashboard.** Sources tab → **+ Add source** → **File upload** or paste a YouTube URL.
+2. **Wait for `ready`.** The card pulses through `queued → connecting → ingesting → indexing → ready` (1-3 min depending on length). Auto scene + audio indexing kicks off the moment upload finishes.
+3. **Watch the Alerts feed.** Path-B sweep searches each index for gunshot / chainsaw / rare-species / alarm-call / human-intrusion patterns and fires synthesised webhooks. Telegram buzzes; the dashboard's Alerts tab fills in.
+4. **(Optional) Fire test alerts.** Alerts tab → "Test the alert system" panel → 🟢 / 🟡 / 🔴 buttons. Useful for sanity-checking Telegram setup.
+5. **Build the daily summary.** Alerts tab → **Daily summary → Build**. The backend:
+   - reads the last 24h of events from `data/live_event_log.jsonl`;
+   - dedupes by `(label, source[:48], 60s bucket)` so one scene contributes one shot;
+   - picks the top 10 by tier + recency;
+   - composes a Timeline reel (one VideoAsset per event + tier-label TextAsset overlays);
+   - calls `coll.generate_text` to write a 45-65 word ranger-friendly paragraph;
+   - calls `coll.generate_voice` to narrate that paragraph and attach the audio as an `AudioAsset` track;
+   - returns the player URL + summary text. UI shows both.
+6. **Click "▶ Play reel"** to watch the narrated compilation.
+
+Total demo length: ~3 minutes once a clip is uploaded.
+
+---
+
+## Live feeds (optional, hacky free-tier)
+
+Live YouTube wildlife streams work — but the path involves a bridge container because VideoDB only accepts `rtsp://` / `rtmp://` for live, and YouTube serves HLS.
+
+```bash
+# 1. Bring up mediamtx (RTSP relay on :8554) + bore (public TCP tunnel)
 docker compose -f bridge/docker-compose.yml up -d
 docker compose -f bridge/docker-compose.yml logs bore | grep "listening at"
+# → "listening at bore.pub:<remote_port>"  — copy that port
 
-# 4. Per live stream, pump YouTube → RTSP via streamlink+ffmpeg
-#    (brew install streamlink ffmpeg). Repeat for each source.
-./bridge/start_bridge.sh "https://www.youtube.com/watch?v=..." namibia
+# 2. Pump a YouTube live URL into the relay (one terminal per stream)
+./bridge/start_bridge.sh "https://www.youtube.com/watch?v=8J9USywkGmw" madikwe
 
-# 5. Dashboard + API
-uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 --reload
-
-# 6. (Optional) Wire live AI events: bootstrap iterates every
-#    config.STREAMS entry with rtsp_url + adds the VideoDB sample
-#    intruder cam. Idempotent on rerun.
-python scripts/bootstrap.py --observe 300 --no-stop
+# 3. In the dashboard: + Add source → RTSP → rtsp://bore.pub:<remote_port>/madikwe
 ```
 
-Then add the bore RTSP URL (`rtsp://bore.pub:<port>/<slug>`) as a new
-RTSP source from the dashboard's +Add modal — that's where the
-operator-facing flow starts.
+Known caveats:
 
-> **Security & limits notes** — applied automatically; see `.env.example` for the env vars:
->
-> - **CSRF / Origin guard** — every mutating `/api/*` request needs an `Origin`/`Referer` matching `localhost` / `127.0.0.1` / `0.0.0.0` (or a host in `WILDWATCH_ALLOWED_ORIGINS=hostA,hostB`). Browsers send `Origin` automatically. CLI clients can set `WILDWATCH_ALLOW_NO_ORIGIN=1` to bypass; a startup log line surfaces when that's active. `/webhook/*` is exempt (VideoDB calls it cross-origin).
-> - **Upload rate limit** — `POST /api/sources/upload` is rate-limited per client IP via a token bucket (3 uploads, refill 1/min). Returns `429` over the cap. Set `WILDWATCH_TRUSTED_PROXY=1` if you're behind nginx / Cloudflare / ALB so the bucket reads the first `X-Forwarded-For` IP — otherwise every client collapses to the proxy's IP.
-> - **Upload MIME sniff** — first 32 bytes must match a known video container (`mp4` / `mov` / `webm` / `mkv` / `avi` / `mpeg-ps` / `flv`). MIME-rejected (`415`) and oversize (`413`) uploads are deleted server-side and emit a `source_deleted` SSE event so the dashboard card disappears immediately.
-> - **SDK pool saturation tripwire** — blocking VideoDB SDK calls run through a bounded thread pool (4 workers). When 2× saturated, new calls raise `SDKPoolSaturated → 503` instead of queueing forever. Hung VideoDB calls can't lock up the dashboard.
-> - **State file perms** — `.state.json` is written with `0o600` atomically; same for `/tmp/videodb_*` files written by the WebSocket listener. `O_NOFOLLOW` on creation defeats symlink TOCTOU on multi-user hosts.
+- **bore.pub rotates the remote port on every reconnect.** VideoDB rtstreams point at a fixed URL, so a bore disconnect silently stales the live feed. Re-wire manually with a re-bootstrap. (A paid tunnel like Cloudflare Spectrum or ngrok reserved would fix this.)
+- **Video re-encode is needed.** `bridge/start_bridge.sh` re-encodes to H.264 Main@720p — VideoDB's rtstream segmenter drops video from High@1080p YouTube feeds and produces audio-only `.ts` segments otherwise.
+- Live feeds are mostly empty (waterholes at night, sleepy daytime). Expect long stretches with no alerts. The demo uses uploads precisely because of this.
 
 ---
 
-## Use the dashboard
+## Known limitations
 
-Open `http://localhost:8000/`. Four tabs:
+See [`docs/GENAI_ROADMAP.md`](docs/GENAI_ROADMAP.md) for the full discussion. Summary:
 
-| Tab | What it does |
-|---|---|
-| **Alerts** | Live SSE feed of every event the webhook receives. Per-tier counters. Manual 🟢🟡🔴 fire buttons. RTStream + Sandbox state panels. |
-| **Sources** | Add any source: file upload (≤500 MB), URL (YouTube archive / HLS), or RTSP/RTMP. Each card shows live status (`queued` → `connecting` → `ingesting` → `indexing` → `ready`). Uploads auto-trigger BOTH a visual scene index (species) AND an audio index, then a background sweep searches each index for gunshot / chainsaw / rare-species / alarm-call patterns and fires Telegram alerts on hits — no cloudflared tunnel needed. **Live YouTube URLs:** VideoDB only accepts `rtsp://` / `rtmp://` for live streams. Run `docker compose -f bridge/docker-compose.yml up -d` (mediamtx + bore) + `./bridge/start_bridge.sh "<url>" <slug>`, then add the printed `rtsp://bore.pub:<port>/<slug>` as a new RTSP source. Per-kind actions: live streams get **Reconnect / Disconnect / Delete**; uploaded files and URL sources get **Re-index / Delete**. |
-| **Indexed Content** | Browse every uploaded video and active rtstream, their scene + audio indexes, and recent scene records. **Library shows only currently-ingesting rtstreams** (rtstream.status must be running AND the source row must be `ready`). Sticky toolbar (filter by name/id, sort by name/length/id, kind filter); list scrolls inside the card. Per-row delete button (videos only). Each index card carries a "Visual / Audio / Environment / Behavior" pill. **Audio-blocked clips** (silent / SFX-only) get an amber "no speech — skipped" pill + Remove button instead of a misleading "processing" — VideoDB's `index_audio` is transcript-based and hangs forever without speech (see `docs/GENAI_ROADMAP.md` Phase 7). Bracket-tagged AI output renders as friendly scene cards (visual + audio variants); every card is clickable → inline HLS player. Three re-index buttons: video / audio / both. Search input has a ✕ clear button. Cross-scope search fans out across per-video scene indexes. |
-| **Usage** | Three stacked cards in this order: **(1) What we're paying for right now (local estimate)** — hours × hourly rate per running resource; **(2) Recent activity (VideoDB invoices)** — top 10 line-items billed; **(3) Real VideoDB billing this period** — live `conn.check_usage()` output with credit balance + per-resource breakdown. Technical-details collapsible at the bottom for raw SDK output. |
+- **VideoDB has no native non-speech audio classification.** `video.index_audio(prompt=…)` is transcript-based and hangs `processing` forever on silent / SFX-only clips. The dashboard surfaces this with an amber "no speech — skipped" pill. Path-B sweep falls back to running audio-event queries against the visual index. A future VideoDB `index_type=audio_event` would fix this; alternatively a PANNs / YAMNet sidecar (out of scope here to keep SDK depth high).
+- **bore.pub rotates ports** — see above.
+- **macOS Docker Desktop** doesn't expose `network_mode: host` ports — `bridge/docker-compose.yml` uses explicit port mappings instead.
 
-### Add a source from the UI
+---
 
-1. Sources tab → **+ Add source**
-2. Pick file / URL / RTSP tab
-3. Name it, paste/select, submit
-4. Watch the card progress in real-time
+## Security defences (applied automatically)
 
-### Manual API examples
-
-```bash
-# RTSP from sample stream
-curl -X POST http://localhost:8000/api/sources \
-  -H 'Content-Type: application/json' \
-  -d '{"kind":"rtsp","input":"rtsp://samples.rts.videodb.io:8554/intruder","name":"sample"}'
-
-# YouTube archive video (live URLs need bridge — paste the bore.pub RTSP)
-curl -X POST http://localhost:8000/api/sources \
-  -H 'Content-Type: application/json' \
-  -d '{"kind":"youtube","input":"https://www.youtube.com/watch?v=...","name":"my-clip"}'
-
-# Search across collection
-curl -X POST http://localhost:8000/api/search \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"elephant OR oryx","scope":"collection"}'
-
-# Usage snapshot
-curl http://localhost:8000/api/usage | jq
-```
+- **CSRF / Origin guard** — every mutating `/api/*` request needs an `Origin`/`Referer` matching `localhost` / `127.0.0.1` / `0.0.0.0` (or a host in `WILDWATCH_ALLOWED_ORIGINS`). `/webhook/*` is exempt. CLI clients can set `WILDWATCH_ALLOW_NO_ORIGIN=1`.
+- **Upload rate limit** — `POST /api/sources/upload` is token-bucketed per client IP (capacity 3, refill 1/min). Set `WILDWATCH_TRUSTED_PROXY=1` behind nginx / Cloudflare / ALB so the bucket reads `X-Forwarded-For`.
+- **Upload MIME sniff** — first 32 bytes must match a known video container. Rejected uploads get deleted + a `source_deleted` SSE so the dashboard card disappears.
+- **SDK pool saturation** — blocking SDK calls run through a 4-worker pool. At 2× saturation new calls raise `SDKPoolSaturated → 503` instead of queueing.
+- **State file perms** — `.state.json` written `0o600` atomically (`.tmp` + fsync + rename + parent fsync). Same for `/tmp/videodb_*` files.
 
 ---
 
 ## State
 
-Everything persists to `.state.json` (atomic .tmp + rename, single-process safe). `data/live_event_log.jsonl` is the append-only alert log used by the digest builder. Re-running `bootstrap.py` is idempotent.
+Everything persists to `.state.json` (atomic write, single-process safe). `data/live_event_log.jsonl` is the append-only alert log used by the digest builder.
 
 ---
 
-## Demo
+## Tests
 
-<!-- TODO(T-39): embed final demo video link -->
-*Demo video coming soon.*
+```bash
+pip install pytest pytest-asyncio pytest-mock respx httpx
+pytest
+```
+
+Per-module coverage is documented in [`docs/REPO_MAP.md`](docs/REPO_MAP.md) §6.
 
 ---
 
@@ -241,30 +250,31 @@ Everything persists to `.state.json` (atomic .tmp + rename, single-process safe)
 
 ```
 wildwatch/
-├── prompts/             # The four index prompts (see CLAUDE.md §6)
+├── prompts/             # The four index prompts (species, behavior, environment, audio)
 ├── wildwatch/           # Python package
-│   ├── sandbox.py       # Lifecycle: ensure / managed / stop
-│   ├── pipeline.py      # Stream connect, index creation, event wiring
-│   ├── events.py        # 17 event definitions, INDEX_EVENT_MAP
-│   ├── correlation.py   # Cross-modal reasoning loop
-│   ├── webhooks.py      # FastAPI webhook receiver
-│   ├── telegram.py      # Bot API send_alert
-│   └── digest.py        # Daily highlight reel via programmable editing
-├── bridge/              # mediamtx + streamlink/ffmpeg YouTube → RTSP
-├── scripts/             # bootstrap.py, iterate_prompt.py, smoke tests
-├── docs/                # SDK cheatsheet, budget, programmable-editing recipes
-└── demo/                # storyboard, recording notes, final video
+│   ├── webhooks.py      #   FastAPI app: dashboard, /api/*, /webhook/{tier}, /api/digest/build
+│   ├── dashboard.py     #   Single-page UI (HTML+CSS+JS in one file)
+│   ├── sources.py       #   Source CRUD + status machine
+│   ├── ingest.py        #   File / URL / RTSP → VideoDB
+│   ├── events.py        #   18 event definitions + INDEX_EVENT_MAP
+│   ├── wiring.py        #   index ↔ event ↔ webhook connector
+│   ├── correlation.py   #   Cross-modal reasoning loop
+│   ├── digest.py        #   Daily summary reel (Timeline + generate_text + generate_voice)
+│   ├── telegram.py      #   Bot API send_alert with GenAI rewriter
+│   ├── post_upload_analysis.py  # Path-B sweep (Telegram on uploaded clips)
+│   ├── event_log.py     #   Append-only JSONL alert log
+│   ├── state_io.py      #   Atomic .state.json writes
+│   ├── sandbox.py       #   Shared sandbox lifecycle
+│   └── prompts.py       #   Prompt loader + per-stream context
+├── bridge/              # mediamtx + bore + streamlink/ffmpeg YouTube → RTSP
+├── scripts/             # bootstrap.py, build_digest.py, run_correlation.py, ws_listener.py, smoke tests
+├── docs/                # REPO_MAP.md, FEATURE_FLOWS.md, GENAI_ROADMAP.md, videodb-sdk-cheatsheet.md
+├── samples/             # Curated reference clips + trigger manifest
+└── tests/               # pytest suite
 ```
-
----
-
-## Writeup
-
-<!-- TODO(T-40): 200-word writeup for hackathon submission -->
-*Writeup coming with submission.*
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [`LICENSE`](LICENSE).

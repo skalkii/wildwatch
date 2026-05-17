@@ -239,6 +239,18 @@ def build_message(
     return "\n".join(parts)
 
 
+_REWRITE_CACHE: dict[str, str] = {}
+_REWRITE_CACHE_MAX = 256
+
+
+def _rewrite_cache_key(label: str, raw: str) -> str:
+    """Cache key — collapses near-identical fires so a stream that emits
+    the same event-engine prose 50 times doesn't run 50 GenAI round-trips."""
+    import hashlib
+
+    return f"{label}:{hashlib.sha256(raw.encode('utf-8', errors='replace')).hexdigest()[:16]}"
+
+
 def genai_friendly_explanation(
     coll: Any,
     tier: int,
@@ -256,6 +268,15 @@ def genai_friendly_explanation(
     Hard timeout via httpx in the SDK; if it stalls the alert ships with
     the parser-rendered fallback instead.
     """
+    # Cache hit short-circuit — VideoDB's event engine emits very similar
+    # prose for repeat fires of the same event. Under multi-stream load
+    # the GenAI round-trip (12-18s cold start) blocked the webhook handler
+    # until the SDK pool saturated. Cache keeps everything snappy.
+    ckey = _rewrite_cache_key(label, raw_explanation)
+    cached = _REWRITE_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
     try:
         prompt = (
             "Rewrite the alert below as ONE short plain-English sentence "
@@ -285,6 +306,11 @@ def genai_friendly_explanation(
         # Defensive trim — genai may sometimes ignore the 200-char cap.
         if len(out) > 400:
             out = out[:400].rstrip() + "..."
+        # Cache the successful rewrite for future identical fires.
+        if len(_REWRITE_CACHE) > _REWRITE_CACHE_MAX:
+            # Cheap LRU-ish eviction: drop one arbitrary entry.
+            _REWRITE_CACHE.pop(next(iter(_REWRITE_CACHE)))
+        _REWRITE_CACHE[ckey] = out
         return out
     except Exception as e:
         logger.debug("genai_friendly_explanation failed: %r", e)

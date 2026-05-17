@@ -44,8 +44,7 @@ wildwatch/
 │   ├── event_log.py           # Append-only log of every alert that fired
 │   ├── state_io.py            # Crash-safe JSON file writes
 │   ├── telegram.py            # Sends alerts to a Telegram bot
-│   ├── post_upload_analysis.py# Path-B: post-upload audio+visual sweep → synthesised webhooks
-│   └── ws_listener.py         # Optional WebSocket listener (skill's verbatim drop-in)
+│   └── post_upload_analysis.py# Path-B: post-upload audio+visual sweep → synthesised webhooks
 │
 ├── prompts/                   # The four AI prompts that drive every observation
 │   ├── species.txt            # "What animals do you see?"
@@ -61,6 +60,7 @@ wildwatch/
 │   ├── upload_corpus.py       # Helper to push corpus clips
 │   ├── index_corpus.py        # Bulk scene-index every corpus video + smoke-test search
 │   ├── iterate_prompt.py      # Test a single prompt against one clip (no rtstream cost)
+│   ├── ws_listener.py         # Optional WebSocket subscriber (skill's verbatim drop-in)
 │   ├── start_live_test.py     # Run a live waterhole stream end-to-end
 │   ├── event_smoke.py         # Smoke test: events get created
 │   ├── audio_chain_smoke.py   # Smoke test: audio prompt → alert
@@ -169,9 +169,9 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | What it is | At the end of a day, picks the top-N events from the log, maps each to a corpus clip, and stitches them into a 90-second video using VideoDB's programmable editor. |
 | --- | --- |
 | Why it exists | A real ranger crew can't watch 24 hours of footage. A 90-second reel of the day's highlights is the operational deliverable. |
-| Key technology | VideoDB's `Timeline`, `Track`, `Clip`, `VideoAsset`, `TextAsset`, `AudioAsset`, `Transition` — the editor model. Optional `coll.generate_music()` for soundtrack and `coll.generate_text()` for a natural-language summary card. |
-| Who runs it | `python scripts/build_digest.py [--music] [--no-overlays]`. |
-| Notable bits | Multi-track timeline (video + tier-label overlays + optional music) so the reel reads cleanly. Falls back to a synthesised montage if the event log is empty. |
+| Key technology | VideoDB's `Timeline`, `Track`, `Clip`, `VideoAsset`, `TextAsset`, `AudioAsset`, `Transition` — the editor model. `coll.generate_text()` for the 45-65 word summary paragraph, `coll.generate_voice()` for the narration `AudioAsset`, optional `coll.generate_music()` for soundtrack. |
+| Who runs it | Dashboard's Alerts tab → "Daily summary → Build" button (`POST /api/digest/build`) for the demo flow. CLI fallback: `python scripts/build_digest.py [--music] [--no-overlays]`. |
+| Notable bits | `dedupe_events` collapses `(label, source[:48], 60s bucket)` collisions BEFORE pick_top_events so one scene contributes one shot. Multi-track timeline (video + tier-label overlays + optional music + optional voiceover) so the reel reads cleanly. Falls back to a synthesised montage if the event log is empty. |
 
 ### 3.9 `prompts.py` — the prompt loader
 
@@ -225,14 +225,6 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Key technology | Telegram Bot API via `httpx`. Bot token + chat id come from `.env`. `parse_mode=HTML` (not Markdown) so `<a href="...">Play clip</a>` hides the 110-char m3u8 URL behind a label, and `disable_web_page_preview=true` kills the empty preview box that the console player used to render on mobile. |
 | Who calls it | `webhooks.py:receive_alert` after every alert lands (the rewrite happens at the receiver, not here, so the dashboard + event_log + Telegram all see the same friendly text). |
 | Notable bits | `genai_friendly_explanation(coll, tier, label, raw)` calls `coll.generate_text(prompt, model_name='basic')` to convert raw event-engine prose ("The alert condition is met as flags contain human_made_object_visible AND the time is night") into one ranger-friendly sentence ("A human-made object is visible at night"). Fail-soft: returns None on timeout / SDK error; caller falls back to `humanise_explanation` (a local bracket-tag parser). `friendly_label(label)` title-cases snake_case event IDs (`potential_human_intrusion_visual` → `Potential Human Intrusion Visual`) while preserving a small acronym whitelist (HLS / RTSP / RTMP / AI / VLC / AAC / URL / API / ID). `_COLL_GETTER` is wired from `webhooks.py` via `configure_coll_getter(_get_coll)` so the rewriter reuses the cached SDK connection without re-creating it on every alert. |
-
-### 3.14 `ws_listener.py` — optional WebSocket subscriber
-
-| What it is | A standalone script (verbatim from the official `video-db/skills` plugin) that connects to VideoDB's WebSocket channel, writes the connection id to a file, and logs every event it receives as JSONL. |
-| --- | --- |
-| Why it exists | The VideoDB skill prescribes dual-delivery: alerts should fire via both the webhook callback AND the WebSocket. That's higher reliability and the "depth of SDK usage" axis the judges weight. |
-| Key technology | `videodb` SDK `conn.connect_websocket()`, asyncio with retry/backoff. |
-| Who runs it | `python wildwatch/ws_listener.py --cwd /Users/kal/Desktop/wildwatch &` then `python scripts/bootstrap.py --ws`. |
 
 ---
 
@@ -320,7 +312,7 @@ These are the executable entry points. You run them, they do one thing, they exi
   - `WILDWATCH_ALLOWED_ORIGINS` — optional comma-separated hosts whitelisted by the CSRF/Origin guard (in addition to `localhost`/`127.0.0.1`/`0.0.0.0`).
   - `WILDWATCH_ALLOW_NO_ORIGIN=1` — optional escape hatch for trusted CLI clients (curl/scripts) that don't send an `Origin` header. Read once at module import + WARNING-logged at startup so it shows up in every log rotation.
   - `WILDWATCH_TRUSTED_PROXY=1` — set when the server runs behind nginx / Cloudflare / ALB. The upload rate limiter then reads the first IP from `X-Forwarded-For` instead of the TCP peer (which would be the proxy itself, collapsing all clients into one shared bucket). NEVER set in a direct-exposure deployment — an attacker can spoof `X-Forwarded-For` to bypass per-IP limits.
-  - `VIDEODB_EVENTS_DIR` — optional directory where `wildwatch/ws_listener.py` writes the `videodb_ws_id` file (defaults to `/tmp`). Files there are created with `0o600` + `O_NOFOLLOW`.
+  - `VIDEODB_EVENTS_DIR` — optional directory where `scripts/ws_listener.py` writes the `videodb_ws_id` file (defaults to `/tmp`). Files there are created with `0o600` + `O_NOFOLLOW`.
 - `.env.example` — template; copy to `.env` and fill in.
 
 ### Built-in upload protections

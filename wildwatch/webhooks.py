@@ -599,11 +599,12 @@ async def receive_alert(
     if payload.explanation and len(payload.explanation) >= 40:
         try:
             coll = await _async_sdk(_get_coll, timeout_s=5.0)
-            # 25s — VideoDB's basic model occasionally takes 12-18s on a
-            # cold start. 12s was too aggressive (2 of 3 manual test fires
-            # timed out). Real cost of a longer wait is fine: webhook
-            # already returns 200 only after Telegram delivers, so 25s
-            # extra is acceptable; VideoDB only retries on 5xx anyway.
+            # 15s timeout — `genai_friendly_explanation` caches by
+            # hash(label, explanation), so most fires under multi-stream
+            # load are cache hits and return in <50ms. First cold call
+            # takes 12-18s; 15s leaves headroom for that without
+            # jamming the SDK thread pool under burst load. Failures
+            # fall back to the local bracket-tag parser.
             rewritten = await asyncio.wait_for(
                 asyncio.to_thread(
                     genai_friendly_explanation,
@@ -612,7 +613,7 @@ async def receive_alert(
                     payload.label,
                     payload.explanation,
                 ),
-                timeout=25.0,
+                timeout=15.0,
             )
             if rewritten:
                 final_expl = rewritten
@@ -1999,3 +2000,51 @@ async def api_search(req: SearchRequest) -> dict:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ──── Daily digest reel — manual trigger ────
+# Demo flow: operator clicks "Build Daily Summary" on the dashboard.
+# Backend reads .state.json (for corpus video IDs), reads the last-24h
+# event log, dedupes by (label, source, minute), picks top-N events,
+# stitches a Timeline reel, generates a text summary via coll.generate_text,
+# and (optionally) a voiceover via coll.generate_voice. Returns the player
+# URL + summary text. ~30-90s synchronous run because generate_voice waits.
+class DigestRequest(BaseModel):
+    since_hours: int = 24
+    top_n: int = 10
+    clip_seconds: int = 4
+    add_text_overlays: bool = True
+    add_voiceover: bool = True
+
+
+@app.post("/api/digest/build")
+async def api_build_digest(req: DigestRequest) -> dict:
+    """Manual digest reel build. Returns {player_url, stream_url, summary, ...}."""
+    from pathlib import Path as _PPath
+
+    from wildwatch import digest as _digest
+
+    state_file = _PPath(__file__).resolve().parent.parent / ".state.json"
+    state: dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+        except Exception as e:
+            logger.warning("api_build_digest: .state.json unreadable: %r", e)
+
+    conn = await _async_sdk(_get_conn, timeout_s=10.0)
+    try:
+        result = await asyncio.to_thread(
+            _digest.build_digest,
+            conn,
+            state,
+            since_hours=req.since_hours,
+            top_n=req.top_n,
+            clip_seconds=req.clip_seconds,
+            add_text_overlays=req.add_text_overlays,
+            add_voiceover=req.add_voiceover,
+        )
+    except Exception as e:
+        logger.exception("api_build_digest failed")
+        raise HTTPException(status_code=500, detail=f"digest build failed: {e}") from e
+    return dict(result)
