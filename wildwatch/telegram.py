@@ -13,10 +13,13 @@ plain-text rows so the message reads as a digest, not a config dump.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import os
 import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -239,15 +242,21 @@ def build_message(
     return "\n".join(parts)
 
 
-_REWRITE_CACHE: dict[str, str] = {}
+# Bounded LRU keyed by sha256(label+raw). Accessed from multiple SDK
+# worker threads (genai_friendly_explanation is invoked via
+# asyncio.to_thread by send_alert), so the check-then-evict sequence
+# below needs a lock — dict ops are individually atomic under the GIL
+# but ``if len(c) > MAX: c.pop(next(iter(c)))`` is multi-step. Using
+# OrderedDict + move_to_end gives real LRU semantics without
+# breaking the public surface.
+_REWRITE_CACHE: OrderedDict[str, str] = OrderedDict()
 _REWRITE_CACHE_MAX = 256
+_REWRITE_CACHE_LOCK = threading.Lock()
 
 
 def _rewrite_cache_key(label: str, raw: str) -> str:
     """Cache key — collapses near-identical fires so a stream that emits
     the same event-engine prose 50 times doesn't run 50 GenAI round-trips."""
-    import hashlib
-
     return f"{label}:{hashlib.sha256(raw.encode('utf-8', errors='replace')).hexdigest()[:16]}"
 
 
@@ -273,9 +282,12 @@ def genai_friendly_explanation(
     # the GenAI round-trip (12-18s cold start) blocked the webhook handler
     # until the SDK pool saturated. Cache keeps everything snappy.
     ckey = _rewrite_cache_key(label, raw_explanation)
-    cached = _REWRITE_CACHE.get(ckey)
-    if cached is not None:
-        return cached
+    with _REWRITE_CACHE_LOCK:
+        cached = _REWRITE_CACHE.get(ckey)
+        if cached is not None:
+            # Touch for LRU recency.
+            _REWRITE_CACHE.move_to_end(ckey)
+            return cached
 
     try:
         prompt = (
@@ -307,13 +319,19 @@ def genai_friendly_explanation(
         if len(out) > 400:
             out = out[:400].rstrip() + "..."
         # Cache the successful rewrite for future identical fires.
-        if len(_REWRITE_CACHE) > _REWRITE_CACHE_MAX:
-            # Cheap LRU-ish eviction: drop one arbitrary entry.
-            _REWRITE_CACHE.pop(next(iter(_REWRITE_CACHE)))
-        _REWRITE_CACHE[ckey] = out
+        # Lock the eviction → insert pair so a concurrent caller can't
+        # see an over-sized cache or drop the entry we just inserted.
+        with _REWRITE_CACHE_LOCK:
+            while len(_REWRITE_CACHE) >= _REWRITE_CACHE_MAX:
+                _REWRITE_CACHE.popitem(last=False)  # drop oldest
+            _REWRITE_CACHE[ckey] = out
         return out
     except Exception as e:
-        logger.debug("genai_friendly_explanation failed: %r", e)
+        # Promoted from DEBUG to WARNING: a stuck or failing
+        # generate_text call means every alert is falling back to the
+        # raw bracket-tag parser, which the operator can't see without
+        # this log line at default level.
+        logger.warning("genai_friendly_explanation failed: %r", e)
         return None
 
 
@@ -393,7 +411,9 @@ async def send_alert(
             if rewritten:
                 final_explanation = rewritten
         except Exception as e:
-            logger.debug("send_alert: genai rewrite skipped: %r", e)
+            # WARNING not DEBUG — a stuck rewrite path is invisible at
+            # default log level otherwise.
+            logger.warning("send_alert: genai rewrite skipped: %r", e)
 
     text = build_message(
         tier=tier, label=label, explanation=final_explanation, stream_url=stream_url

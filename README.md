@@ -222,25 +222,16 @@ Total demo length: ~3 minutes once a clip is uploaded.
 
 ## Live feeds (optional, hacky free-tier)
 
-Live YouTube wildlife streams work — but the path involves a bridge container because VideoDB only accepts `rtsp://` / `rtmp://` for live, and YouTube serves HLS.
+Live YouTube wildlife streams work — but VideoDB only accepts `rtsp://` / `rtmp://` for live, and YouTube serves HLS. A small bridge module (mediamtx + bore + streamlink + ffmpeg) plugs the gap.
 
-```bash
-# 1. Bring up mediamtx (RTSP relay on :8554) + bore (public TCP tunnel)
-docker compose -f bridge/docker-compose.yml up -d
-docker compose -f bridge/docker-compose.yml logs bore | grep "listening at"
-# → "listening at bore.pub:<remote_port>"  — copy that port
+**Full instructions are centralised in [`bridge/README.md`](bridge/README.md)** — setup, per-stream pump, codec caveat, bore-port rotation, teardown, architecture diagram. Read that file first if you're adding any live source whose URL isn't already `rtsp://` / `rtmp://`.
 
-# 2. Pump a YouTube live URL into the relay (one terminal per stream)
-./bridge/start_bridge.sh "https://www.youtube.com/watch?v=8J9USywkGmw" madikwe
+Three-step summary (full detail in `bridge/README.md`):
+1. `docker compose -f bridge/docker-compose.yml up -d` — starts mediamtx + bore.
+2. `./bridge/start_bridge.sh "<youtube_url>" <slug>` — one terminal per live stream.
+3. In the dashboard, **+ Add source → RTSP** → paste `rtsp://bore.pub:<port>/<slug>`.
 
-# 3. In the dashboard: + Add source → RTSP → rtsp://bore.pub:<remote_port>/madikwe
-```
-
-Known caveats:
-
-- **bore.pub rotates the remote port on every reconnect.** VideoDB rtstreams point at a fixed URL, so a bore disconnect silently stales the live feed. Re-wire manually with a re-bootstrap. (A paid tunnel like Cloudflare Spectrum or ngrok reserved would fix this.)
-- **Video re-encode is needed.** `bridge/start_bridge.sh` re-encodes to H.264 Main@720p — VideoDB's rtstream segmenter drops video from High@1080p YouTube feeds and produces audio-only `.ts` segments otherwise.
-- Live feeds are mostly empty (waterholes at night, sleepy daytime). Expect long stretches with no alerts. The demo uses uploads precisely because of this.
+Live feeds are mostly empty (waterholes at night, sleepy daytime). The demo flow above uses uploads precisely because of this.
 
 ---
 
