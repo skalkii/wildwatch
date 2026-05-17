@@ -1613,14 +1613,16 @@ async function showRtstreamDetail(rtId) {
     }
     const idxs = d.indexes || [];
     if (idxs.length === 0) {
+      // Friendly hold message — no CLI instructions in the user-facing
+      // panel. Operators wire bootstrap.py from a terminal; rangers
+      // reading the dashboard just need to know the AI hasn't started
+      // looking at this stream yet.
       el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
-          <div class="text-[11px] faint inline-flex items-center gap-2">RTStream ${_idPill(rtId, {truncate: true})}</div>
+          <div class="text-[11px] faint inline-flex items-center gap-2">Live stream ${_idPill(rtId, {truncate: true})}</div>
         </div>
         <div class="card-soft p-4">
-          <div class="text-sm font-medium">No indexes wired yet</div>
-          <div class="text-[11.5px] faint mt-1">Live rtstreams need <code class="mono">scripts/bootstrap.py</code> to wire the four AI indexes (species / behavior / environment / audio) and the 18 event alerts. From a terminal:</div>
-          <pre class="mono text-[11px] mt-2 p-2 rounded" style="background:var(--bg-soft); border:1px solid var(--border); overflow-x:auto;">uv run python scripts/bootstrap.py --observe 300</pre>
-          <div class="text-[11.5px] faint mt-1">You also need <code class="mono">WEBHOOK_BASE_URL</code> in <code class="mono">.env</code> pointing at a public tunnel (cloudflared) so VideoDB can POST alert callbacks back to your laptop.</div>
+          <div class="text-sm font-medium">AI is not watching this stream yet</div>
+          <div class="text-[11.5px] muted mt-1">This live camera is connected but the AI lenses (species, behaviour, environment, audio) haven't been pointed at it. New observations will appear here once they are. Check back in a minute.</div>
         </div>`;
       return;
     }
