@@ -1185,6 +1185,61 @@ async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dic
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/api/videos/{video_id}/reindex")
+async def api_video_reindex(video_id: str) -> dict:
+    """Force a fresh scene index for a video.
+
+    Useful when:
+      - The auto-index kicked off at upload time failed silently.
+      - The video was uploaded before auto-indexing existed.
+      - The operator wants to retry with a different prompt context.
+
+    Implementation: do NOT delete the existing index (deletion is its
+    own kind of irreversible). Just call `index_scenes` again — VideoDB
+    creates a separate, fresh index. The dashboard's index list shows
+    both.
+    """
+    from wildwatch.prompts import format_prompt
+
+    try:
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
+
+    # Use the same default prompt context as the ingest auto-index path.
+    # Keeps re-index behaviour consistent with first-upload behaviour.
+    from wildwatch.ingest import _DEFAULT_SCENE_PROMPT_CONTEXT
+
+    try:
+        prompt = format_prompt("species", **_DEFAULT_SCENE_PROMPT_CONTEXT)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"prompt format failed: {e}") from e
+
+    try:
+        idx_id = await _async_sdk(
+            video.index_scenes,
+            timeout_s=30.0,
+            prompt=prompt,
+            name=f"wildwatch-reindex-{int(time.time())}",
+        )
+    except Exception as e:
+        # Common case: VideoDB might reject a duplicate index. Surface
+        # the SDK message so the dashboard can show a useful error
+        # instead of a generic 500.
+        raise HTTPException(status_code=502, detail=f"index_scenes failed: {e}") from e
+
+    return {
+        "video_id": video_id,
+        "scene_index_id": str(idx_id) if idx_id is not None else None,
+        "status": "processing",
+        "message": (
+            "Fresh scene index requested. Status will update as VideoDB "
+            "processes the video — check the Indexed Content tab in a moment."
+        ),
+    }
+
+
 @app.get("/api/rtstreams/{rt_id}/indexes")
 async def api_rtstream_indexes(rt_id: str) -> dict:
     try:

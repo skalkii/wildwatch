@@ -1102,6 +1102,8 @@ function _indexStatusPill(status) {
   return `<span class="pill ${cls}">${escapeHtml(label)}</span>`;
 }
 
+const _READY_INDEX_STATUSES = ['ready', 'indexed', 'complete', 'completed', 'done'];
+
 async function showVideoDetail(videoId) {
   const el = $('content-detail');
   el.innerHTML = `<span class="faint">loading ${escapeHtml(videoId)} …</span>`;
@@ -1109,22 +1111,34 @@ async function showVideoDetail(videoId) {
     const r = await fetch(`/api/videos/${videoId}/indexes`);
     const d = await r.json();
     const idxs = d.indexes || [];
+    const reindexBtn = `<button data-action="reindex-video" data-id="${escapeHtml(videoId)}" class="btn btn-ghost text-[11.5px]">↻ Re-index</button>`;
     if (idxs.length === 0) {
       el.innerHTML = `<div class="card-soft p-4">
-        <div class="text-sm font-medium">Scene index still being prepared</div>
-        <div class="text-[11.5px] faint mt-1">VideoDB is reading this clip. Scene indexes show up here once the AI finishes its first pass — typically a minute or two per minute of footage. Refresh in a moment.</div>
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <div class="text-sm font-medium">Scene index still being prepared</div>
+          ${reindexBtn}
+        </div>
+        <div class="text-[11.5px] faint">VideoDB is reading this clip. Scene indexes show up here once the AI finishes its first pass — typically a minute or two per minute of footage. Refresh in a moment, or click <strong class="muted">Re-index</strong> to force a fresh pass.</div>
       </div>`;
       return;
     }
-    el.innerHTML = `<div class="text-[11px] faint mb-2">Video <code class="mono">${escapeHtml(videoId)}</code></div>
+    el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2">
+        <div class="text-[11px] faint">Video <code class="mono">${escapeHtml(videoId)}</code></div>
+        ${reindexBtn}
+      </div>
       <div class="space-y-2">
         ${idxs.map(i => {
           const idxId = i.scene_index_id || i.id || '';
-          const name = i.name || `Scene Index ${escapeHtml(idxId.slice(0, 8))}…`;
+          const name = i.name || `Scene Index ${idxId.slice(0, 8)}…`;
           const status = String(i.status || 'unknown').toLowerCase();
-          const isReady = ['ready','indexed','complete','completed'].includes(status);
+          const isReady = _READY_INDEX_STATUSES.includes(status);
           const btnClass = isReady ? 'btn btn-primary text-[11.5px]' : 'btn btn-ghost text-[11.5px]';
           const btnLabel = isReady ? '▶ View scenes' : `${status} — view anyway`;
+          // Scene-pane lives INSIDE this card so scenes render right
+          // below the index they belong to (not in a global pane at the
+          // bottom of the panel). data-pane id pairs to data-idx via the
+          // delegated handler.
+          const paneId = `scenes-pane-${idxId}`;
           return `<div class="card-soft p-3">
             <div class="flex items-center justify-between gap-2">
               <div class="min-w-0">
@@ -1136,15 +1150,47 @@ async function showVideoDetail(videoId) {
             <div class="flex justify-end mt-2">
               <button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="${btnClass}">${btnLabel}</button>
             </div>
+            <div id="${paneId}" class="mt-3"></div>
           </div>`;
         }).join('')}
-      </div>
-      <div id="scenes-pane" class="mt-4"></div>`;
+      </div>`;
+    // Auto-load scenes for the first ready index inline so the panel
+    // shows real content immediately. Users can still click other index
+    // cards individually if there are multiple.
+    const firstReady = idxs.find(i => _READY_INDEX_STATUSES.includes(String(i.status || '').toLowerCase()));
+    if (firstReady) {
+      showVideoScenes(videoId, firstReady.scene_index_id || firstReady.id);
+    } else if (idxs.length > 0) {
+      // No ready index — preview the first one's status inline so the
+      // user sees the "still preparing" message in-place.
+      const first = idxs[0];
+      showVideoScenes(videoId, first.scene_index_id || first.id);
+    }
   } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
+async function reindexVideo(videoId) {
+  if (!confirm('Trigger a fresh scene index for this video?\\n\\nVideoDB will re-read every frame. This costs credits and takes a few minutes.')) return;
+  const el = $('content-detail');
+  el.innerHTML = `<span class="faint">requesting fresh scene index for ${escapeHtml(videoId)} …</span>`;
+  try {
+    const r = await fetch(`/api/videos/${videoId}/reindex`, { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) {
+      el.innerHTML = `<div class="card-soft p-4" style="color:#ef4444">re-index failed: ${escapeHtml(d.detail || JSON.stringify(d))}</div>`;
+      return;
+    }
+    // Reload the detail panel so the new processing index appears.
+    showVideoDetail(videoId);
+  } catch (e) {
+    el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`;
+  }
+}
+
 async function showVideoScenes(videoId, indexId) {
-  const pane = $('scenes-pane');
+  // Per-index pane lives inside each index card (id="scenes-pane-<idxId>")
+  // so scenes render directly below the index they belong to.
+  const pane = $(`scenes-pane-${indexId}`);
   if (!pane) return;
   pane.innerHTML = '<div class="faint text-sm">loading scenes …</div>';
   try {
@@ -1155,7 +1201,7 @@ async function showVideoScenes(videoId, indexId) {
     const header = `<div class="flex items-center justify-between mb-2">
       <div class="text-[11.5px] faint">Index ${_indexStatusPill(status)} · ${scenes.length} scene${scenes.length===1?'':'s'} shown</div>
     </div>`;
-    if (status === 'processing' || status === 'queued') {
+    if (status === 'processing' || status === 'queued' || status === 'unknown') {
       pane.innerHTML = header + `<div class="card-soft p-3 text-sm">
         <strong class="muted">AI is still reading this video.</strong>
         <div class="faint text-[11.5px] mt-1">Scene index is in <code class="mono">${escapeHtml(status)}</code> state. VideoDB needs a minute or two per minute of footage. Refresh the dashboard or click the button again shortly.</div>
@@ -1581,6 +1627,7 @@ document.addEventListener('click', (e) => {
     case 'delete':          deleteSource(id);        break;
     case 'show-video':      showVideoDetail(id);     break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
+    case 'reindex-video':   reindexVideo(id); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
   }
 });
