@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -119,8 +120,12 @@ def _post_correlation(base_url: str, hit, rt=None, window_s: int = 30) -> bool:
         "stream_url": stream_url,
     }
     url = f"{base_url}/webhook/{hit.tier}"
+    headers = {}
+    secret = os.getenv("WILDWATCH_WEBHOOK_SECRET", "").strip()
+    if secret:
+        headers["X-WildWatch-Secret"] = secret
     try:
-        resp = httpx.post(url, json=payload, timeout=10.0)
+        resp = httpx.post(url, json=payload, headers=headers, timeout=10.0)
         if resp.status_code == 200:
             print(f"   POSTED correlation hit -> {url}")
             return True

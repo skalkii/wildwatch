@@ -412,8 +412,17 @@ async def _fire_synthesised(
         "end_time": end,
         "stream_url": stream_url or "",
     }
+    # Forward the webhook secret when one is configured — the receiver
+    # rejects unsigned POSTs in that mode. Path-B is a trusted local
+    # caller so we read the same env var the receiver reads.
+    headers = {}
+    secret = os.getenv("WILDWATCH_WEBHOOK_SECRET", "").strip()
+    if secret:
+        headers["X-WildWatch-Secret"] = secret
     try:
-        r = await client.post(f"{base_url}/webhook/{tier}", json=payload, timeout=10.0)
+        r = await client.post(
+            f"{base_url}/webhook/{tier}", json=payload, headers=headers, timeout=10.0
+        )
         if r.status_code >= 400:
             logger.warning(
                 "post-analysis: webhook %s/{tier=%s} returned %s: %s",

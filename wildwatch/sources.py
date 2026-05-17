@@ -79,12 +79,30 @@ _UPDATABLE_FIELDS: frozenset[str] = _SOURCE_FIELD_NAMES - _IMMUTABLE_FIELDS
 
 
 def _load_state() -> dict[str, Any]:
+    """Internal — must be called WITH ``_STATE_LOCK`` held.
+
+    The lock-free read paths (``get_source`` / ``list_sources`` /
+    ``_sources_dict``) wrap this in their own lock acquisition so a
+    concurrent write can't return a stale or half-written dict. The
+    silent-failure-hunter audit flagged the bare ``return {}`` on
+    corrupt state as a state-wipe risk; promote to ERROR + dump the
+    first 200 chars so diagnosis is faster.
+    """
     if not STATE_FILE.exists():
         return {}
     try:
         return json.loads(STATE_FILE.read_text())
-    except json.JSONDecodeError:
-        logger.warning("state file %s corrupt; treating as empty", STATE_FILE)
+    except json.JSONDecodeError as e:
+        try:
+            preview = STATE_FILE.read_text(encoding="utf-8", errors="replace")[:200]
+        except Exception:
+            preview = "<unreadable>"
+        logger.error(
+            "state file %s corrupt (%s); treating as empty — preview: %r",
+            STATE_FILE,
+            e,
+            preview,
+        )
         return {}
 
 
@@ -93,7 +111,11 @@ def _save_state(state: dict[str, Any]) -> None:
 
 
 def _sources_dict() -> dict[str, dict]:
-    return _load_state().get("sources", {})
+    # Lock-guarded — without this, a concurrent ``update_source`` write
+    # can interleave between the load + the caller's downstream use,
+    # producing a stale snapshot.
+    with _STATE_LOCK:
+        return _load_state().get("sources", {})
 
 
 def _from_dict(d: dict) -> Source:
@@ -157,6 +179,7 @@ def delete_source(source_id: str) -> None:
 
 
 def get_source(source_id: str) -> Source | None:
+    # _sources_dict is now lock-guarded; this is a single atomic read.
     d = _sources_dict().get(source_id)
     return _from_dict(d) if d else None
 

@@ -41,7 +41,7 @@ import aiofiles
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Path, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Load .env at import time so uvicorn-launched processes see TELEGRAM_*
 # and other vars without requiring the operator to pre-export them.
@@ -560,19 +560,27 @@ class AlertPayload(BaseModel):
     both so neither path 422s.
     """
 
-    label: str = Field(..., description="Event label (e.g. POACHING_ALERT_GUNSHOT)")
-    event_id: str | None = None
+    # Length caps so a malicious / malformed caller can't inflate the
+    # event log + SSE broadcast with megabyte-sized strings. VideoDB's
+    # own callbacks stay well under these limits in practice.
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="Event label (e.g. POACHING_ALERT_GUNSHOT)",
+    )
+    event_id: str | None = Field(default=None, max_length=256)
     confidence: float | None = None
-    explanation: str | None = None
-    timestamp: str | None = None
+    explanation: str | None = Field(default=None, max_length=8000)
+    timestamp: str | None = Field(default=None, max_length=64)
     start_time: str | float | None = None
     end_time: str | float | None = None
-    stream_url: str | None = None
+    stream_url: str | None = Field(default=None, max_length=4096)
     # Path-B post-upload sweep sends the source video id so the digest
     # builder can pull the actual triggering scene into the reel
     # instead of falling back to a generic corpus clip. rtstream
     # callbacks omit this — they don't have a stable video id.
-    video_id: str | None = None
+    video_id: str | None = Field(default=None, max_length=128)
 
     # `extra="ignore"` rather than "allow": we build the persisted record
     # explicitly from named fields below, so extras would be silently
@@ -587,11 +595,35 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+_WEBHOOK_SECRET = os.environ.get("WILDWATCH_WEBHOOK_SECRET", "").strip() or None
+if _WEBHOOK_SECRET is None:
+    logger.warning(
+        "WILDWATCH_WEBHOOK_SECRET unset — /webhook/{tier} accepts ANY caller. "
+        "Set this env var (and configure VideoDB rtstream alerts with the "
+        "X-WildWatch-Secret header) before exposing the server over a tunnel."
+    )
+else:
+    logger.info("Webhook auth enabled — X-WildWatch-Secret header required on /webhook/*")
+
+
 @app.post("/webhook/{tier}")
 async def receive_alert(
     tier: Annotated[int, Path(ge=1, le=3, description="Alert tier 1=info, 2=notable, 3=urgent")],
     payload: AlertPayload,
+    request: Request,
 ) -> dict:
+    # Optional shared-secret auth on the webhook surface. When
+    # WILDWATCH_WEBHOOK_SECRET is set in the env, every callback (VideoDB's
+    # rtstream alerts AND our own Path-B synthesised POSTs) must carry an
+    # X-WildWatch-Secret header that matches. Closes the "anyone over the
+    # cloudflared tunnel can inject alerts" gap from the security review.
+    # Unset → warn at startup but accept all (back-compat for the demo
+    # path where the webhook is only reachable via localhost).
+    if _WEBHOOK_SECRET is not None:
+        provided = request.headers.get("x-wildwatch-secret") or ""
+        if not _constant_time_eq(provided, _WEBHOOK_SECRET):
+            logger.warning("receive_alert: rejected — bad/missing X-WildWatch-Secret header")
+            raise HTTPException(status_code=401, detail="invalid webhook secret")
     # GenAI rewrite ONCE at the front, then use the friendly text for
     # every downstream consumer (event_log, dashboard SSE, Telegram).
     # Previously the rewrite only ran inside send_alert, so the dashboard
@@ -790,6 +822,96 @@ async def events_stream() -> StreamingResponse:
 # ──── Source CRUD routes ──────────────────────────────────────────────────
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    """Timing-safe string compare for the webhook secret.
+
+    ``str.__eq__`` short-circuits on the first byte mismatch, which
+    leaks the prefix length to a timing-attack adversary. ``hmac.compare_digest``
+    is the stdlib equivalent for this use case.
+    """
+    import hmac
+
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+# ──── Source input validation ────
+# Closes the SSRF surface flagged by the security review: each source
+# kind narrows the acceptable URL scheme + bans internal-network hosts
+# so an LAN/tunneled caller can't make our SDK / FastAPI proxy fetch
+# private resources on their behalf.
+_PRIVATE_HOST_PATTERNS = re.compile(
+    r"^(?:"
+    r"localhost|"
+    r"0\.0\.0\.0|"
+    r"127\.|"
+    r"10\.|"
+    r"192\.168\.|"
+    r"172\.(?:1[6-9]|2[0-9]|3[0-1])\.|"
+    r"169\.254\.|"  # link-local + AWS/GCP metadata
+    r"::1|"
+    r"fe80::|"
+    r"fc00::|"
+    r"fd00::"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _validate_source_input(kind: str | None, raw: str) -> str:
+    """Validate a SourceCreate.input value against its declared kind.
+
+    Returns the original string on success; raises ``ValueError``
+    (which Pydantic surfaces as a 422 with a clear field error) on
+    invalid scheme or private-network host.
+
+    Allowed schemes per kind:
+      - rtsp  → rtsp:// only
+      - rtmp  → rtmp:// or rtmps://
+      - hls   → http:// or https:// (any non-private host) OR a
+                rtsp:// fallback (some operators paste an rtsp URL
+                under the 'hls' tab during quick demos)
+      - youtube → https://www.youtube.com or youtu.be host
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("input is empty")
+    # file://, gopher://, ftp://, javascript: — all hard-blocked.
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(raw)
+    except Exception as e:
+        raise ValueError(f"input is not a parseable URL: {e}") from None
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme:
+        raise ValueError("input must include a scheme (rtsp://, rtmp://, https://, …)")
+    if scheme not in {"rtsp", "rtmps", "rtmp", "http", "https"}:
+        raise ValueError(f"scheme {scheme!r} not allowed; use rtsp / rtmp / http / https")
+    # Per-kind scheme guard.
+    if kind == "rtsp" and scheme != "rtsp":
+        raise ValueError("rtsp source requires rtsp:// URL")
+    if kind == "rtmp" and scheme not in {"rtmp", "rtmps"}:
+        raise ValueError("rtmp source requires rtmp:// or rtmps:// URL")
+    if kind == "youtube":
+        if scheme not in {"http", "https"}:
+            raise ValueError("youtube source must be a https:// link")
+        if "youtube.com" not in host and "youtu.be" not in host:
+            raise ValueError("youtube source host must be youtube.com or youtu.be")
+    if kind == "hls":
+        if scheme not in {"http", "https", "rtsp"}:
+            raise ValueError("hls source must be http(s):// or rtsp://")
+    # Private-network host block — only matters for http/https/rtsp
+    # variants where the URL is fetched server-side. ``bore.pub`` is
+    # public so legitimate live-bridge URLs pass.
+    if host and _PRIVATE_HOST_PATTERNS.match(host):
+        raise ValueError(
+            f"input host {host!r} is on a private / link-local network "
+            "and cannot be used as a remote source"
+        )
+    return raw
+
+
 class SourceCreate(BaseModel):
     # `upload` excluded — uploads use the dedicated multipart endpoint
     # /api/sources/upload. Narrowing here means Pydantic rejects "upload"
@@ -798,8 +920,22 @@ class SourceCreate(BaseModel):
     kind: Literal["youtube", "hls", "rtsp", "rtmp"] = Field(
         ..., description="youtube|hls|rtsp|rtmp"
     )
-    input: str
-    name: str
+    # Length caps + per-kind scheme validation prevent two classes of
+    # abuse on the LAN-reachable / cloudflared-tunneled API:
+    #   1. SSRF — without scheme enforcement, ``{"kind":"hls",
+    #      "input":"file:///etc/passwd"}`` or ``http://169.254.169.254/...``
+    #      would get handed to ``coll.upload(url=...)`` which then makes the
+    #      VideoDB cloud worker fetch that URL.
+    #   2. Resource flooding — unbounded string fields could be persisted
+    #      to the event log + broadcast over every SSE connection.
+    input: str = Field(..., min_length=1, max_length=2000)
+    name: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("input")
+    @classmethod
+    def _validate_input_scheme(cls, v: str, info: Any) -> str:  # type: ignore[override]
+        kind = (info.data or {}).get("kind") if info else None
+        return _validate_source_input(kind, v)
 
 
 # Process-cached VideoDB connection. `videodb.connect()` does an auth round
