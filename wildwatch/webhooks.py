@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     # annotations referencing `_videodb_types.Connection` etc. are stored
     # as strings and only resolved by static checkers. DO NOT "fix" this
     # into a runtime import — it would pull the heavy SDK on every test.
-    import videodb as _videodb_types
+    pass
 
 import aiofiles
 from dotenv import load_dotenv
@@ -947,41 +947,10 @@ class SourceCreate(BaseModel):
 # latency and turns the dashboard into a slow disaster. Lock prevents two
 # cold-cache callers from each running `videodb.connect()` and the second
 # overwriting the first.
-class _ConnCache(TypedDict):
-    # Annotated with the real SDK types when TYPE_CHECKING; runtime stays
-    # `None | Any` so the videodb import isn't pulled in for callers who
-    # only need the FastAPI app object.
-    conn: _videodb_types.Connection | None
-    coll: _videodb_types.Collection | None
-
-
-_conn_cache: _ConnCache = {"conn": None, "coll": None}
-# RLock not Lock — _get_coll acquires the lock and then calls _get_conn
-# which acquires it again. A plain threading.Lock would deadlock on the
-# same thread. RLock allows recursive acquisition by the holder.
-_conn_lock = threading.RLock()
-
-
-def _get_conn() -> Any:
-    if _conn_cache["conn"] is None:
-        with _conn_lock:
-            # Double-checked locking: the first caller paid the auth cost,
-            # subsequent waiters get the cached handle without re-running.
-            if _conn_cache["conn"] is None:
-                import videodb
-
-                _conn_cache["conn"] = videodb.connect()
-    return _conn_cache["conn"]
-
-
-def _get_coll() -> Any:
-    """Lazy-load VideoDB collection, cached for the life of the process."""
-    if _conn_cache["coll"] is None:
-        with _conn_lock:
-            if _conn_cache["coll"] is None:
-                _conn_cache["coll"] = _get_conn().get_collection()
-    return _conn_cache["coll"]
-
+# Conn / coll cache moved to wildwatch/sdk_pool.py. Re-exported as
+# ``_get_conn`` / ``_get_coll`` so test fixtures that monkeypatch
+# ``wildwatch.webhooks._get_coll`` keep working unchanged.
+from wildwatch.sdk_pool import _conn_cache, _get_coll, _get_conn  # noqa: E402, F401
 
 # Wire telegram.send_alert's optional GenAI rewriter to our cached
 # collection. send_alert calls `_get_coll` in a worker thread so it

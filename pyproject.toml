@@ -42,6 +42,12 @@ dev = [
 include = ["wildwatch*"]
 exclude = ["tests*", "scripts*", "bridge*", "prompts*", "samples*", "demo*", "docs*"]
 
+[tool.setuptools.package-data]
+# Include static/dashboard.html when packaged as a wheel so
+# importlib.resources.files("wildwatch").joinpath("static/...") works
+# in installed environments, not just editable installs.
+wildwatch = ["static/*.html"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
