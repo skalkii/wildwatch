@@ -861,27 +861,27 @@ async def api_upload_source(
         )
     except HTTPException as e:
         tmp_path.unlink(missing_ok=True)
-        # 415 specifically means we refused to accept the file at all —
-        # don't leave an orphan `status=error` source row behind. Delete
-        # the record entirely so /api/sources doesn't show a phantom.
-        if e.status_code == 415:
+        # Both 415 (bad MIME) and 413 (oversize) mean we refused the file
+        # entirely. Delete the orphan source row + broadcast source_deleted
+        # so the dashboard card disappears immediately. Other statuses
+        # leave the row in status=error for the operator to inspect.
+        if e.status_code in (413, 415):
+            reason = "rejected_mime" if e.status_code == 415 else "rejected_size"
             try:
                 await asyncio.to_thread(sources.delete_source, s.id)
             except Exception as del_err:
-                # Logging-only — don't mask the original 415 with a 500.
+                # Logging-only — don't mask the original 4xx with a 500.
                 logger.warning(
                     "api_upload_source: cleanup delete failed for %s: %s",
                     s.id,
                     del_err,
                 )
-            # Notify SSE subscribers so the open dashboard tab doesn't
-            # keep showing a stale card after the source row vanishes.
             try:
                 dashboard.broadcast(
                     {
                         "type": "source_deleted",
                         "source_id": s.id,
-                        "reason": "rejected_mime",
+                        "reason": reason,
                     }
                 )
             except Exception:
