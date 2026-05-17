@@ -1185,18 +1185,69 @@ async function fetchSources() {
 }
 
 async function deleteSource(id) {
-  if (!confirm('Delete this source? Remote video/rtstream will be cleaned up.')) return;
-  await fetch(`/api/sources/${id}`, { method: 'DELETE' });
+  const ok = await confirmToast(
+    'This removes the source row AND cleans up the remote video / rtstream on VideoDB. Cannot be undone.',
+    { title: 'Delete source?', confirmLabel: 'Delete', cancelLabel: 'Keep', danger: true }
+  );
+  if (!ok) return;
+  const progress = showToast(`Deleting source ${id.slice(0, 12)}…`, { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/sources/${id}`, { method: 'DELETE' });
+    progress.dismiss();
+    if (!r.ok) {
+      let detail = 'unknown error';
+      try { detail = (await r.json()).detail || detail; } catch (e) {}
+      showToast(`Delete failed: ${detail}`, { variant: 'error', duration: 5000 });
+      return;
+    }
+    showToast('Source deleted.', { variant: 'success', duration: 2500 });
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
+  }
   fetchSources();
 }
 
 async function disconnectSource(id) {
-  await fetch(`/api/sources/${id}/disconnect`, { method: 'POST' });
+  const ok = await confirmToast(
+    'Stops the live rtstream on VideoDB. The source row stays so you can Reconnect later.',
+    { title: 'Disconnect stream?', confirmLabel: 'Disconnect', cancelLabel: 'Cancel' }
+  );
+  if (!ok) return;
+  const progress = showToast(`Disconnecting ${id.slice(0, 12)}…`, { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/sources/${id}/disconnect`, { method: 'POST' });
+    progress.dismiss();
+    if (!r.ok) {
+      let detail = 'unknown error';
+      try { detail = (await r.json()).detail || detail; } catch (e) {}
+      showToast(`Disconnect failed: ${detail}`, { variant: 'error', duration: 5000 });
+      return;
+    }
+    showToast('Stream disconnected.', { variant: 'success', duration: 2500 });
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
+  }
   fetchSources();
 }
 
 async function reconnectSource(id) {
-  await fetch(`/api/sources/${id}/reconnect`, { method: 'POST' });
+  const progress = showToast(`Reconnecting ${id.slice(0, 12)}…`, { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/sources/${id}/reconnect`, { method: 'POST' });
+    progress.dismiss();
+    if (!r.ok) {
+      let detail = 'unknown error';
+      try { detail = (await r.json()).detail || detail; } catch (e) {}
+      showToast(`Reconnect failed: ${detail}`, { variant: 'error', duration: 5000 });
+      return;
+    }
+    showToast('Reconnect kicked off. Watch the card for status updates.', { variant: 'success', duration: 3500 });
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
+  }
   fetchSources();
 }
 
