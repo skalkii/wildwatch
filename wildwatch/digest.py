@@ -84,6 +84,17 @@ class _EditorUnavailable:
         )
 
     def __getattr__(self, attr: str) -> Any:  # pragma: no cover — diagnostic
+        # Dunder / private names → AttributeError, not ImportError.
+        # pytest's parametrize machinery, mypy's runtime inspection,
+        # copy.copy, pickle, repr() etc. all introspect dunders. If we
+        # raise ImportError on `__class__`, `__reduce__`, `__module__`,
+        # collection silently dies with a confusing ImportError. Returning
+        # AttributeError lets the normal protocol skip the attribute.
+        # Underscored attrs (`_name` etc.) also use AttributeError so a
+        # mid-construction recursion (if __init__ raised before _name was
+        # bound) doesn't infinitely loop through this dispatch.
+        if attr.startswith("_"):
+            raise AttributeError(attr)
         raise ImportError(
             f"videodb.editor.{self._name}.{attr} access requested but the editor "
             "import failed at startup. See logger.warning above."
