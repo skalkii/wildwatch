@@ -10,10 +10,13 @@ phone app opens a playable view, not a raw HLS manifest.
 
 from __future__ import annotations
 
+import logging
 import os
 from urllib.parse import quote
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 TIER_EMOJI: dict[int, str] = {1: "🟢", 2: "🟡", 3: "🔴"}
 TIER_LABEL: dict[int, str] = {1: "INFO", 2: "NOTABLE", 3: "URGENT"}
@@ -103,6 +106,16 @@ async def send_alert(
         # `from e`, logger.exception(..., exc_info=True) prints the chained
         # traceback INCLUDING the URL, leaking the token to logs.
         # Re-raise WITHOUT `from e` to break the exception chain.
+        #
+        # Preserve diagnostic info via a separate log line — operators
+        # need to know what failed (timeout vs DNS vs reset) but should
+        # not get the token in any traceback. `e.args` is the safe
+        # surface: it carries the error message without the URL chain.
+        logger.warning(
+            "telegram network error: %s (args=%r)",
+            type(e).__name__,
+            getattr(e, "args", ()),
+        )
         raise RuntimeError(f"telegram network error: {type(e).__name__}") from None
     # Don't call resp.raise_for_status() either — HTTPStatusError ALSO
     # stringifies the URL with the bot token. Surface status + sanitized
