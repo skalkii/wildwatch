@@ -16,11 +16,63 @@ import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 logger = logging.getLogger(__name__)
 
 MAX_RECENT_EVENTS = 50
+
+
+# ── Broadcast event types ───────────────────────────────────────────────
+#
+# Two distinct payload shapes flow through the same SSE channel:
+#   * AlertEvent — produced by webhook handler. Counted into tier stats
+#     and stored in _recent_events. No `type` key.
+#   * UISignalEvent — produced by ingest / delete paths to push reactive
+#     UI updates. Tagged with `type: source_progress | source_deleted`.
+#     Never counted as an alert.
+#
+# Runtime discriminator: presence/absence of the `type` key. The
+# TypedDicts below document the invariant; static checkers can flag a
+# caller that accidentally puts a `type` key in an alert dict, which
+# would silently route it to the UI-signal branch and drop it from
+# tier counts. The runtime check stays as `"type" not in event` to
+# avoid touching every existing emit site.
+
+
+class AlertEvent(TypedDict, total=False):
+    """Alert payload — NO `type` key. Tier counts + _recent_events."""
+
+    tier: int
+    label: str
+    event_id: str | None
+    confidence: float | None
+    explanation: str | None
+    timestamp: str | None
+    start_time: str | None
+    end_time: str | None
+    stream_url: str | None
+    received_at: float
+
+
+class UISignalEvent(TypedDict, total=False):
+    """UI signal payload — `type` key REQUIRED. Routed to SSE only."""
+
+    type: Literal["source_progress", "source_deleted"]
+    source_id: str
+    status: str
+    stage_msg: str | None
+    progress_pct: int | None
+    kind: str
+    name: str
+    video_id: str | None
+    rtstream_id: str | None
+    error: str | None
+    reason: str
+    received_at: float
+
+
+BroadcastEvent = AlertEvent | UISignalEvent
 
 # Module-level state ------------------------------------------------------
 
@@ -47,7 +99,7 @@ def reset_state() -> None:
     _started_at = time.time()
 
 
-def broadcast(event: dict[str, Any]) -> None:
+def broadcast(event: AlertEvent | UISignalEvent) -> None:
     """Record + fanout to every subscriber.
 
     Two classes of broadcasts share this channel:

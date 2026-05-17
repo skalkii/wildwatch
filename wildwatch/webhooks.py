@@ -449,7 +449,7 @@ async def receive_alert(
 ) -> dict:
     # Log the alert BEFORE attempting Telegram delivery so the digest
     # builder still sees the event even if Telegram is down.
-    record = {
+    record: dashboard.AlertEvent = {
         "received_at": time.time(),
         "tier": tier,
         "label": payload.label,
