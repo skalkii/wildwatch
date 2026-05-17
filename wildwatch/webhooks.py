@@ -1249,6 +1249,32 @@ async def api_video_reindex(video_id: str) -> dict:
     }
 
 
+@app.delete("/api/videos/{video_id}")
+async def api_delete_video(video_id: str) -> dict:
+    """Delete a video from the VideoDB collection.
+
+    Mirrors the Sources tab delete UX but for raw videos that may not
+    have a corresponding Source row (e.g. corpus uploads bootstrapped
+    via CLI). Surface SDK failures as 502 so the dashboard can toast.
+    """
+    try:
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"connection failed: {e}") from e
+    try:
+        await _async_sdk(coll.delete_video, video_id, timeout_s=15.0)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"delete_video failed: {e}") from e
+    # Bust the videos cache so the next /api/videos call hits VideoDB.
+    _videos_cache["at"] = 0.0
+    _videos_cache["data"] = {"videos": []}
+    try:
+        dashboard.broadcast({"type": "video_deleted", "video_id": video_id})
+    except Exception:
+        logger.exception("video_deleted broadcast failed")
+    return {"video_id": video_id, "status": "deleted"}
+
+
 @app.get("/api/videos/{video_id}/clip")
 async def api_video_clip(video_id: str, start: float, end: float) -> dict:
     """Return a playable stream URL for a [start, end] segment of a video.

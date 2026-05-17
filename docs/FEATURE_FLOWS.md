@@ -111,6 +111,16 @@ flowchart TD
 15–16. **Ready** — the source now has a `video_id` (for uploads/URLs) or `rtstream_id` (for live streams) and is searchable.
 17. **Card flips to ready** — the dashboard re-fetches `/api/sources` on `source_progress` AND on `source_deleted`, so both happy-path and rejection-path UI updates are instant.
 
+### Per-kind action buttons
+
+Once a source is `ready`, the action row on its card depends on `kind`:
+
+- **`rtsp` / `rtmp`** — shows **Reconnect** + **Disconnect** + **Delete**. Reconnect re-runs `coll.connect_rtstream(...)` against the same upstream URL — useful when the live feed drops or the bridge container restarts. Disconnect stops the rtstream on VideoDB but keeps the source row so you can re-enable it later.
+- **`upload`** — shows **Re-index** + **Delete**. Reconnect is hidden because the local temp file is gone after the first ingest; re-running it would just fail. Re-index calls `POST /api/videos/{video_id}/reindex` which fires a fresh `video.index_scenes(...)` on the existing video.
+- **`youtube` / `hls`** — shows **Re-index** + **Delete**. Reconnect is hidden because re-running `coll.upload(url=...)` would create a duplicate VideoDB video, wasting credits and cluttering the library. Re-index does the right thing on the already-uploaded copy.
+
+This split is enforced in `dashboard.py:renderSource` via the `isStreamKind` boolean. Tooltips on every button explain what it does.
+
 ---
 
 ## Flow 3 — Search "elephant drinking"
@@ -419,6 +429,58 @@ flowchart TD
 10. **Cleanup** — Esc, X button, or clicking the backdrop calls `cleanup()`: destroys the hls.js instance, pauses + nullifies `<video>` src, removes the DOM nodes, detaches the keydown listener. No leaked players, no leaked media decoders.
 
 > **Why a modal player and not `window.open(m3u8)`?** Raw m3u8 manifests don't render in plain browser tabs (no built-in HLS in Chrome/Firefox; Safari downloads it). Embedding hls.js inside the dashboard gives the operator inline playback with controls and looks like a real ops tool instead of a "here's a download" flow.
+
+---
+
+## Flow 10 — Library: browse, filter, sort, delete
+
+The Library panel inside the Indexed Content tab lists every video VideoDB knows about. The toolbar at the top (filter / sort / kind) runs entirely in the browser against a cached payload so changing any control re-renders instantly without hitting the API. The list scrolls inside the card with the toolbar pinned to the top.
+
+```mermaid
+flowchart TD
+    A[Indexed Content tab opens] --> B[fetchVideos]
+    B --> C[GET /api/videos]
+    C --> D[webhooks.py:api_list_videos<br/>60s cache]
+    D --> E[Response: { videos: [...] }]
+    E --> F[Client cache _libraryVids]
+    F --> G[_renderLibrary]
+    G --> T0[Sticky toolbar:<br/>filter / sort / kind]
+    G --> T1[Scrollable list of cards]
+    T0 -->|input/change| H[_renderLibrary again<br/>no API call]
+    H --> T1
+    T1 -->|click row| I[showVideoDetail<br/>indexes + scenes]
+    T1 -->|click delete| J[deleteVideo]
+    J --> K[confirmToast danger]
+    K -->|cancel| K0[Stop]
+    K -->|confirm| L[showToast 'Deleting…']
+    L --> M[DELETE /api/videos/&#123;id&#125;]
+    M --> N[webhooks.py:api_delete_video]
+    N --> O[coll.delete_video&#40;id&#41;]
+    O --> P[_videos_cache reset]
+    P --> Q[dashboard.broadcast<br/>type=video_deleted]
+    Q --> R[Optimistic local filter +<br/>showToast 'Video deleted']
+    R --> F
+```
+
+### Node-by-node
+
+1. **Tab open** — `activateTab('content')` triggers `fetchVideos()`.
+2. **`GET /api/videos`** — `webhooks.py:api_list_videos` returns the cached list (60s TTL) or refetches via `coll.get_videos()`.
+3. **Client cache `_libraryVids`** — the raw payload is stored in module-level JS state. The toolbar reads + filters this in-memory rather than re-fetching.
+4. **`_renderLibrary()`** — pure function: reads filter/sort/kind from the toolbar inputs, applies them in order:
+   - **Filter** (case-insensitive substring on `name` OR `id`).
+   - **Kind** (`_libraryKindKey(name)` maps any video name to `clip` / `uploaded` / `stream` / `reel`).
+   - **Sort** (name asc/desc, length asc/desc, id asc/desc).
+   Then it renders one row per surviving video. The header count updates to `${shown} / ${total}` so the operator knows how aggressive the filter is.
+5. **Sticky toolbar** — the `<header>` element has `position: sticky; top: 0` so it stays visible while the list scrolls. `overflow-hidden` on the parent + `overflow-y: auto` on the list creates the inner-scroll behaviour.
+6. **Row click → detail panel** — fires `data-action="show-video"` → `showVideoDetail(videoId)` which loads indexes + scenes into the right-hand pane. The detail panel's root element stores `dataset.videoId` so a subsequent delete can clear it if it matches.
+7. **Row click → delete button** — the row has nested `data-stop-propagation` so clicking the delete button doesn't also fire the row's "show" action. Dispatcher routes `data-action="delete-video"` to `deleteVideo(id, name)`.
+8. **`deleteVideo(id, name)`** — opens `confirmToast({danger: true})` with a clear "this is permanent" message.
+9. **Confirm path** — shows a progress toast and fires `DELETE /api/videos/{id}`.
+10. **`webhooks.py:api_delete_video`** — wraps `coll.delete_video(video_id)` in the bounded SDK thread pool with a 15s deadline. Failure surfaces as `502` with the SDK message so the dashboard can toast a useful error.
+11. **Cache bust + SSE** — the in-process `_videos_cache` is zeroed (so the next `/api/videos` actually hits the SDK) and a `{"type": "video_deleted", "video_id": id}` event is broadcast to every open dashboard.
+12. **Optimistic UI** — the client immediately filters the deleted id out of `_libraryVids` and re-renders, then kicks `fetchVideos()` again to reconcile against the server's truth.
+13. **Detail panel cleanup** — if the deleted video was the one open in the right pane, the pane resets to its placeholder text.
 
 ---
 

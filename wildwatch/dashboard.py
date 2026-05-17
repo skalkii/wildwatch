@@ -593,10 +593,38 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="search-results" class="space-y-2 mb-6"></div>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <section class="card p-4">
-        <h3 class="text-sm font-semibold tracking-tight">Library</h3>
-        <p class="text-[11.5px] faint mt-0.5 mb-2.5">Every video uploaded into VideoDB. Click one to see what the AI extracted.</p>
-        <div id="videos-list" class="text-xs space-y-1 max-h-[500px] overflow-y-auto">loading…</div>
+      <section class="card p-0 overflow-hidden flex flex-col" style="max-height:640px;">
+        <header class="p-4 pb-2 border-b divider" style="background:var(--bg); position:sticky; top:0; z-index:2;">
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold tracking-tight">Library</h3>
+              <p class="text-[11.5px] faint mt-0.5">Every video uploaded into VideoDB. Click one to see what the AI extracted.</p>
+            </div>
+            <div class="text-[11px] faint mono" id="library-count">&mdash;</div>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 mt-2.5">
+            <div class="sm:col-span-7 relative">
+              <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 faint" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input id="library-filter" placeholder="Filter by name or ID&hellip;" class="input w-full pl-8 pr-2 py-1.5 text-[12px]">
+            </div>
+            <select id="library-sort" class="sm:col-span-3 input w-full px-2 py-1.5 text-[12px]">
+              <option value="name-asc">Name (A&ndash;Z)</option>
+              <option value="name-desc">Name (Z&ndash;A)</option>
+              <option value="length-desc" selected>Longest first</option>
+              <option value="length-asc">Shortest first</option>
+              <option value="id-desc">Newest (by id)</option>
+              <option value="id-asc">Oldest (by id)</option>
+            </select>
+            <select id="library-kind" class="sm:col-span-2 input w-full px-2 py-1.5 text-[12px]">
+              <option value="all">All kinds</option>
+              <option value="clip">Clips</option>
+              <option value="uploaded">Uploaded</option>
+              <option value="stream">Stream snippets</option>
+              <option value="reel">Reels</option>
+            </select>
+          </div>
+        </header>
+        <div id="videos-list" class="text-xs space-y-1 overflow-y-auto p-4 pt-3" style="flex:1; min-height:0;">loading&hellip;</div>
       </section>
       <section class="card p-4">
         <h3 class="text-sm font-semibold tracking-tight">Inside this video</h3>
@@ -1035,11 +1063,30 @@ function renderSource(s) {
   const remote = s.video_id ? `video <code class="mono link">${escapeHtml(s.video_id)}</code>` :
                  s.rtstream_id ? `rtstream <code class="mono link">${escapeHtml(s.rtstream_id)}</code>` : '';
   const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString() : '';
+  // Action buttons depend on the source kind:
+  //   - rtsp / rtmp: stream actually reconnects to a remote feed. Reconnect
+  //     is useful when the upstream drops or the bridge restarts.
+  //   - upload: source file is gone after first ingest. Re-running
+  //     reconnect would just fail. Offer Re-index instead (re-runs the
+  //     AI scene index on the existing video).
+  //   - youtube / hls: reconnect would re-upload the same URL and create
+  //     a duplicate VideoDB video. Offer Re-index instead.
+  const isStreamKind = (s.kind === 'rtsp' || s.kind === 'rtmp');
+  const reindexable = !!s.video_id && !isStreamKind;
+  const reconnectBtn = isStreamKind
+    ? `<button data-action="reconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Re-establish the live stream connection on VideoDB.">Reconnect</button>`
+    : '';
+  const reindexBtn = reindexable
+    ? `<button data-action="reindex-video" data-id="${escapeHtml(s.video_id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Re-run the AI scene index on this video without re-uploading.">&#8634; Re-index</button>`
+    : '';
+  const disconnectBtn = isStreamKind
+    ? `<button data-action="disconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Stop the live rtstream on VideoDB. Keeps the source row.">Disconnect</button>`
+    : '';
   return `<div class="card p-4">
     <div class="flex justify-between items-start gap-3">
       <div class="min-w-0">
         <div class="font-semibold truncate" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</div>
-        <div class="text-[11px] faint mt-1">${escapeHtml(s.kind)} · ${created}</div>
+        <div class="text-[11px] faint mt-1">${escapeHtml(s.kind)} &middot; ${created}</div>
       </div>
       <span class="pill ${statusClass}">${escapeHtml(s.status || 'queued')}</span>
     </div>
@@ -1047,9 +1094,10 @@ function renderSource(s) {
     ${stage}
     ${errMsg}
     <div class="text-[11px] muted mt-2">${remote}</div>
-    <div class="flex gap-2 mt-3">
-      <button data-action="reconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2">Reconnect</button>
-      <button data-action="disconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2">Disconnect</button>
+    <div class="flex gap-2 mt-3 flex-wrap">
+      ${reconnectBtn}
+      ${reindexBtn}
+      ${disconnectBtn}
       <button data-action="delete" data-id="${escapeHtml(s.id)}" class="btn text-[11px] !py-1 !px-2" style="background:color-mix(in oklab,#ef4444 14%,transparent); color:#ef4444; border:1px solid color-mix(in oklab,#ef4444 35%,transparent);">Delete</button>
     </div>
   </div>`;
@@ -1126,51 +1174,137 @@ function videoKindIcon(name) {
   return { label, color };
 }
 
+// Cached video list — filter/sort run client-side so toolbar changes don't
+// hit the API. _libraryVids is the raw payload from /api/videos.
+let _libraryVids = [];
+
+function _libraryKindKey(name) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('live') || n.includes('rtsp') || n.includes('segment')) return 'stream';
+  if (n.includes('digest') || n.includes('reel') || n.includes('highlight')) return 'reel';
+  if (n.includes('upload') || n.includes('sample')) return 'uploaded';
+  return 'clip';
+}
+
+function _renderLibrary() {
+  const el = $('videos-list');
+  const countEl = $('library-count');
+  if (!el) return;
+  const filter = ($('library-filter')?.value || '').trim().toLowerCase();
+  const sort = $('library-sort')?.value || 'length-desc';
+  const kind = $('library-kind')?.value || 'all';
+  let vids = (_libraryVids || []).slice();
+  if (filter) {
+    vids = vids.filter(v =>
+      (v.name || '').toLowerCase().includes(filter) ||
+      (v.id || '').toLowerCase().includes(filter)
+    );
+  }
+  if (kind !== 'all') {
+    vids = vids.filter(v => _libraryKindKey(v.name) === kind);
+  }
+  const cmp = {
+    'name-asc':    (a,b) => (a.name||'').localeCompare(b.name||''),
+    'name-desc':   (a,b) => (b.name||'').localeCompare(a.name||''),
+    'length-desc': (a,b) => (Number(b.length)||0) - (Number(a.length)||0),
+    'length-asc':  (a,b) => (Number(a.length)||0) - (Number(b.length)||0),
+    'id-desc':     (a,b) => (b.id||'').localeCompare(a.id||''),
+    'id-asc':      (a,b) => (a.id||'').localeCompare(b.id||''),
+  }[sort];
+  if (cmp) vids.sort(cmp);
+
+  const total = _libraryVids.length;
+  const shown = vids.length;
+  const totalSec = vids.reduce((a,v) => a + (Number(v.length)||0), 0);
+  if (countEl) {
+    countEl.innerHTML = (shown === total)
+      ? `${total} video${total===1?'':'s'} &middot; ${formatDuration(totalSec)}`
+      : `${shown} / ${total} &middot; ${formatDuration(totalSec)}`;
+  }
+
+  if (total === 0) {
+    el.innerHTML = `<div class="card-soft p-4 text-center">
+      <div class="text-sm muted">No videos in the library yet.</div>
+      <div class="text-[11px] faint mt-1">Upload a file or connect a live source from the <strong class="muted">Sources</strong> tab to get started.</div>
+    </div>`;
+    return;
+  }
+  if (shown === 0) {
+    el.innerHTML = `<div class="card-soft p-4 text-center text-[12px] faint">No videos match the current filter.</div>`;
+    return;
+  }
+  el.innerHTML = vids.map(v => {
+    const dur = formatDuration(v.length);
+    const kindMeta = videoKindIcon(v.name);
+    const thumb = v.thumbnail_url
+      ? `<img src="${escapeHtml(v.thumbnail_url)}" alt="" class="w-14 h-14 rounded-md object-cover shrink-0" loading="lazy">`
+      : `<div class="w-14 h-14 rounded-md shrink-0 flex items-center justify-center" style="background:color-mix(in oklab,${kindMeta.color} 14%,transparent); color:${kindMeta.color}">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        </div>`;
+    const playUrl = safeUrl(v.stream_url);
+    const playBtn = playUrl
+      ? `<a href="${escapeHtml(playUrl)}" target="_blank" rel="noopener" data-stop-propagation class="link text-[11px] mono shrink-0">&#9658; play</a>`
+      : '';
+    const deleteBtn = `<button data-action="delete-video" data-id="${escapeHtml(v.id)}" data-name="${escapeHtml(v.name || v.id)}" data-stop-propagation class="text-[11px] shrink-0" style="background:none; border:1px solid var(--border); color:#ef4444; padding:0.15rem 0.45rem; border-radius:5px; cursor:pointer;" title="Delete this video from VideoDB">&times; delete</button>`;
+    return `<div class="card-soft p-2.5 flex items-center gap-3 cursor-pointer hover:border-[var(--border-strong)] transition" style="border:1px solid var(--border)" data-action="show-video" data-id="${escapeHtml(v.id)}">
+      ${thumb}
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <div class="text-sm font-medium truncate" title="${escapeHtml(v.name || 'untitled')}">${escapeHtml(v.name || 'Untitled clip')}</div>
+          <span class="pill" style="color:${kindMeta.color}; background:color-mix(in oklab,${kindMeta.color} 14%,transparent);">${kindMeta.label}</span>
+        </div>
+        <div class="text-[11px] faint flex items-center gap-2 mt-0.5">
+          <span class="mono">${dur}</span>
+          <span>&middot;</span>
+          <span class="mono truncate" title="${escapeHtml(v.id)}">${escapeHtml(v.id.slice(0, 18))}&hellip;</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0" data-stop-propagation>
+        ${playBtn}
+        ${deleteBtn}
+      </div>
+    </div>`;
+  }).join('');
+}
+
 async function fetchVideos() {
   try {
     const r = await fetch('/api/videos');
     const d = await r.json();
-    const el = $('videos-list');
-    const vids = d.videos || [];
-    if (vids.length === 0) {
-      el.innerHTML = `<div class="card-soft p-4 text-center">
-        <div class="text-sm muted">No videos in the library yet.</div>
-        <div class="text-[11px] faint mt-1">Upload a file or connect a live source from the <strong class="muted">Sources</strong> tab to get started.</div>
-      </div>`;
+    _libraryVids = d.videos || [];
+    _renderLibrary();
+  } catch (e) { console.warn('videos fetch failed', e); }
+}
+
+async function deleteVideo(videoId, name) {
+  const ok = await confirmToast(
+    `This permanently removes "${name || videoId.slice(0, 18)}" from VideoDB. The video, its indexes, and any scenes will be gone.`,
+    { title: 'Delete video?', confirmLabel: 'Delete', cancelLabel: 'Keep', danger: true }
+  );
+  if (!ok) return;
+  const progress = showToast(`Deleting ${name || videoId.slice(0, 12)}&hellip;`, { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/videos/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+    const d = await r.json();
+    progress.dismiss();
+    if (!r.ok) {
+      showToast(`Delete failed: ${d.detail || 'unknown error'}`, { variant: 'error', duration: 5000 });
       return;
     }
-    // Count summary line
-    const totalSec = vids.reduce((a,v) => a + (Number(v.length)||0), 0);
-    const summary = `<div class="text-[11px] faint mb-2 px-1">${vids.length} video${vids.length===1?'':'s'} · ${formatDuration(totalSec)} of footage</div>`;
-    el.innerHTML = summary + vids.map(v => {
-      const dur = formatDuration(v.length);
-      const kind = videoKindIcon(v.name);
-      const thumb = v.thumbnail_url
-        ? `<img src="${escapeHtml(v.thumbnail_url)}" alt="" class="w-14 h-14 rounded-md object-cover shrink-0" loading="lazy">`
-        : `<div class="w-14 h-14 rounded-md shrink-0 flex items-center justify-center" style="background:color-mix(in oklab,${kind.color} 14%,transparent); color:${kind.color}">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-          </div>`;
-      const playUrl = safeUrl(v.stream_url);
-      const playBtn = playUrl
-        ? `<a href="${escapeHtml(playUrl)}" target="_blank" rel="noopener" data-stop-propagation class="link text-[11px] mono shrink-0">▶ play</a>`
-        : '';
-      return `<div class="card-soft p-2.5 flex items-center gap-3 cursor-pointer hover:border-[var(--border-strong)] transition" style="border:1px solid var(--border)" data-action="show-video" data-id="${escapeHtml(v.id)}">
-        ${thumb}
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2 flex-wrap">
-            <div class="text-sm font-medium truncate" title="${escapeHtml(v.name || 'untitled')}">${escapeHtml(v.name || 'Untitled clip')}</div>
-            <span class="pill" style="color:${kind.color}; background:color-mix(in oklab,${kind.color} 14%,transparent);">${kind.label}</span>
-          </div>
-          <div class="text-[11px] faint flex items-center gap-2 mt-0.5">
-            <span class="mono">${dur}</span>
-            <span>·</span>
-            <span class="mono truncate" title="${escapeHtml(v.id)}">${escapeHtml(v.id.slice(0, 18))}…</span>
-          </div>
-        </div>
-        ${playBtn}
-      </div>`;
-    }).join('');
-  } catch (e) { console.warn('videos fetch failed', e); }
+    showToast('Video deleted.', { variant: 'success', duration: 3000 });
+    // Optimistic local update + background re-fetch.
+    _libraryVids = _libraryVids.filter(v => v.id !== videoId);
+    _renderLibrary();
+    // If the deleted video was the one in the detail panel, clear it.
+    if ($('content-detail') && $('content-detail').dataset.videoId === videoId) {
+      $('content-detail').innerHTML = '<span class="faint">Pick a video on the left to see its indexes and recent scenes.</span>';
+      $('content-detail').dataset.videoId = '';
+    }
+    fetchVideos();
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 5000 });
+  }
 }
 
 function _indexStatusPill(status) {
@@ -1193,7 +1327,8 @@ const _READY_INDEX_STATUSES = ['ready', 'indexed', 'complete', 'completed', 'don
 
 async function showVideoDetail(videoId) {
   const el = $('content-detail');
-  el.innerHTML = `<span class="faint">loading ${escapeHtml(videoId)} …</span>`;
+  el.dataset.videoId = videoId;
+  el.innerHTML = `<span class="faint">loading ${escapeHtml(videoId)} &hellip;</span>`;
   try {
     const r = await fetch(`/api/videos/${videoId}/indexes`);
     const d = await r.json();
@@ -1531,6 +1666,14 @@ async function showVideoScenes(videoId, indexId) {
 }
 
 // search
+// Library toolbar — client-side filter/sort/kind controls, re-render only.
+['library-filter','library-sort','library-kind'].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  const evt = el.tagName === 'INPUT' ? 'input' : 'change';
+  el.addEventListener(evt, () => _renderLibrary());
+});
+
 $('search-scope').addEventListener('change', () => {
   const scope = $('search-scope').value;
   $('search-target-id').classList.toggle('hidden', scope === 'collection');
@@ -1934,6 +2077,7 @@ document.addEventListener('click', (e) => {
     case 'show-video':      showVideoDetail(id);     break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
     case 'reindex-video':   reindexVideo(id); break;
+    case 'delete-video':    deleteVideo(id, t.dataset.name); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
     case 'play-scene-clip': {
       const v = t.dataset.videoId;
