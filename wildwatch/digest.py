@@ -186,6 +186,33 @@ def pick_corpus_video_id(
     return None
 
 
+def _discover_collection_fallback(
+    conn: Any,
+    cache: dict[str, bool],
+    skip: set[str],
+) -> list[str]:
+    """List collection videos that pass the video_info probe.
+
+    Called only when every corpus_state entry has been rejected, so the
+    cost (one ``coll.get_videos`` + N probes) is bounded and worth it —
+    the alternative is an empty reel.
+    """
+    try:
+        vids = conn.get_collection().get_videos() or []
+    except Exception as e:
+        logger.warning("digest: collection-scan failed (%s); no fallback", e)
+        return []
+    out: list[str] = []
+    for v in vids:
+        vid = getattr(v, "id", None)
+        if not vid or vid in skip:
+            continue
+        if _video_has_info(conn, vid, cache):
+            out.append(vid)
+    logger.info("digest: collection fallback discovered %d usable videos", len(out))
+    return out
+
+
 def _video_has_info(conn: Any, vid_id: str, cache: dict[str, bool]) -> bool:
     """True if VideoDB can render this video into a Timeline.
 
@@ -269,6 +296,11 @@ def build_timeline(
     n_clips = 0
     video_info_cache: dict[str, bool] = {}
     skip_ids: set[str] = set()
+    # Live-collection fallback list. When every entry in corpus_state is
+    # stale (videos deleted off VideoDB), scan the collection ONCE for
+    # any usable upload and use those instead. Lazy-built so we don't
+    # pay the SDK call when state's corpus works.
+    collection_fallback: list[str] | None = None
     for ev in events:
         tier = int(ev.get("tier", 1))
         # Walk every preferred corpus slug + fallback list, skipping any
@@ -284,6 +316,15 @@ def build_timeline(
                 vid_id = cand
                 break
             skip_ids.add(cand)
+        # If state's corpus is entirely dead, fall back to ANY usable
+        # video the collection currently has uploaded. Built once.
+        if not vid_id:
+            if collection_fallback is None:
+                collection_fallback = _discover_collection_fallback(
+                    conn, video_info_cache, skip_ids
+                )
+            if collection_fallback:
+                vid_id = collection_fallback[n_clips % len(collection_fallback)]
         if not vid_id:
             logger.warning(
                 "digest: no usable corpus clip for tier=%s (exhausted %d candidates); "
