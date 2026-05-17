@@ -44,6 +44,61 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
 
+# Upload rate limit — per-IP token bucket. Three concurrent attackers
+# uploading 499 MB each would saturate the 4-worker SDK pool, fill disk,
+# and DoS the dashboard. A leaky bucket (capacity=3, refill=1/min/IP)
+# is enough to neutralise that without inconveniencing real operators
+# who upload at most a few clips per session.
+_UPLOAD_BUCKET_CAPACITY = 3
+_UPLOAD_BUCKET_REFILL_PER_SEC = 1.0 / 60.0  # one new token per minute per IP
+# {ip: (tokens_float, last_refill_ts)}
+_upload_buckets: dict[str, tuple[float, float]] = {}
+_upload_bucket_lock = threading.Lock()
+
+
+def _client_ip_from(request: Request) -> str:
+    """Resolve the client IP, honouring X-Forwarded-For when configured.
+
+    Behind a reverse proxy (nginx, Cloudflare, ALB) every upload would
+    appear to come from the proxy, collapsing all real clients into a
+    single shared rate-limit bucket — a self-DoS vector. Operators
+    running behind a trusted proxy set ``WILDWATCH_TRUSTED_PROXY=1`` to
+    use the FIRST IP in the X-Forwarded-For chain (the original client)
+    instead of the TCP peer. Direct-exposure deployments leave the env
+    unset so a remote attacker can't spoof XFF to bypass the limit.
+    """
+    if os.environ.get("WILDWATCH_TRUSTED_PROXY") == "1":
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+    return (request.client.host if request.client else "unknown") or "unknown"
+
+
+def _upload_rate_limit_check(client_ip: str) -> bool:
+    """Return True if the IP has an upload token, else False (429).
+
+    Token bucket per IP: starts full at capacity, refills at
+    _UPLOAD_BUCKET_REFILL_PER_SEC tokens/second up to capacity. Each
+    upload consumes one token. Lock-guarded so concurrent uploads from
+    one IP can't both observe a full bucket and double-spend.
+    """
+    now = time.time()
+    with _upload_bucket_lock:
+        tokens, last = _upload_buckets.get(client_ip, (float(_UPLOAD_BUCKET_CAPACITY), now))
+        # Refill since last access, clamped to capacity.
+        tokens = min(
+            float(_UPLOAD_BUCKET_CAPACITY),
+            tokens + (now - last) * _UPLOAD_BUCKET_REFILL_PER_SEC,
+        )
+        if tokens < 1.0:
+            _upload_buckets[client_ip] = (tokens, now)
+            return False
+        _upload_buckets[client_ip] = (tokens - 1.0, now)
+        return True
+
+
 # Strong refs to in-flight background dispatch tasks so the GC doesn't drop
 # them mid-flight (RUF006). Each task removes itself via a done_callback that
 # ALSO logs exceptions — otherwise a failed task only surfaces as
@@ -556,16 +611,30 @@ def _looks_like_video(head: bytes) -> bool:
 
 @app.post("/api/sources/upload")
 async def api_upload_source(
+    request: Request,
     file: Annotated[UploadFile, File(...)],
     name: Annotated[str, Form(...)],
 ) -> dict:
     """Multipart upload path. Streams to a tempfile, then dispatches.
+
+    Per-IP rate-limited (token bucket, capacity 3, refill 1/min) so a
+    flood of 500 MB uploads can't saturate the SDK pool or fill disk.
 
     Bytes are streamed through aiofiles (already async). Everything else
     that touches .state.json or the SDK goes through asyncio.to_thread to
     keep the event loop unblocked. On 415 we DELETE the source row rather
     than leaving an orphan `status=error` entry.
     """
+    client_ip = _client_ip_from(request)
+    if not _upload_rate_limit_check(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"upload rate limit exceeded for {client_ip} "
+                f"(bucket={_UPLOAD_BUCKET_CAPACITY}, refill 1/min); "
+                "retry after one minute."
+            ),
+        )
     s = await asyncio.to_thread(sources.add_source, kind="upload", input="", name=name)
 
     tmp = tempfile.NamedTemporaryFile(
