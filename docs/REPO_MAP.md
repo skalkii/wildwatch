@@ -14,6 +14,8 @@ This map walks through every folder in `wildwatch/` and explains, in plain Engli
 
 **Why it's split into folders:** each folder has one job. Configuration in one place, AI prompts in another, the live perception pipeline in another, helper scripts in a fourth, tests in a fifth. You can dip into any one folder without needing to read the rest.
 
+**Why this exists at all:** 286,000 rangers manage 20+ million km² of protected land — one per 72 km² when IUCN recommends one per 5 km². See [README → Why this matters](../README.md#why-this-matters) for the citable numbers and per-camera ROI math.
+
 ---
 
 ## 2. Top-level tree

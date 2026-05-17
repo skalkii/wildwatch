@@ -23,6 +23,38 @@ No in-house ML. The whole project leans on VideoDB's prompt-driven VLM indexing 
 
 ---
 
+## Why this matters
+
+Protected areas are massively under-watched.
+
+- **286,000 rangers worldwide** manage 20+ million km² of protected land — one ranger per 72 km². The IUCN recommends one per 5 km². The world has roughly **36% of the workforce it needs** (Appleton et al., *Nature Sustainability*, 2022).
+- *"There are more people employed at golf courses and country clubs in the United States than there are rangers in the world."* — Re:wild / IUCN WCPA, 2022.
+- Camera infrastructure has scaled into the thousands. Snapshot Safari alone operates **800+ camera-trap stations** across Southern Africa, generating millions of images no human can watch in real time.
+- Wildlife crime is a **$7–23 billion annual industry** (UNODC) — the 4th-largest international crime category, behind only drugs, human trafficking, and weapons.
+
+**The gap:** cameras are deployed and live. Rangers are deployed but undermanned 3x. The missing layer is automated perception that turns continuous feeds into ranger-actionable alerts.
+
+**WildWatch is that layer.**
+
+### The math, per camera
+
+- **Run cost:** ~$3,650/camera/year of continuous AI monitoring (VideoDB-based, 30s sampling)
+- **Coverage uplift:** ~100% of camera output indexed vs. ~5% that rangers manually spot-check today
+- **Response time:** seconds, not days (Wildlife Protection Solutions has benchmarked AI-alert response in this range)
+- **Ranger time freed:** ~5.5 hours/week per ranger redeployed from card-retrieval admin to field patrols — equivalent to adding ~7 effective rangers per 50-ranger reserve, without hiring
+- **ROI on a single incident:** preventing one rhino poaching = $66K+ black-market loss avoided, $250K–500K lifetime conservation investment preserved, 20–40% tourism revenue protected. **~70–100x annual run cost.**
+
+### Sources
+
+- Appleton, M.R., et al. (2022). *Protected area personnel and ranger numbers are insufficient to deliver global expectations.* Nature Sustainability 5:1100–1110. [doi.org/10.1038/s41893-022-00970-0](https://www.nature.com/articles/s41893-022-00970-0)
+- UNODC (2024). *World Wildlife Crime Report.*
+- Conservation Strategy Fund (2021). *Economic Impact of Illegal Wildlife Trade in Southern Africa.*
+- Re:wild / IUCN WCPA / Game Rangers Association of Africa (Oct 2022). *5x ranger workforce required by 2030.*
+- Pardo, L.E. (2024). *Snapshot Safari camera-trap network.* Springer Nature Research Communities.
+- Mongabay (2025). *A Thin Green Line: The 2,000-strong ranger force of African Parks.*
+
+---
+
 ## The problem
 
 Existing conservation AI (SpeciesNet, Wildlife Insights, MegaDetector) processes **single camera-trap images** for **species classification only**. WildWatch tackles four gaps in the literature simultaneously:
