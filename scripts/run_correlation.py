@@ -81,8 +81,29 @@ def _build_search_fn(rt, index_ids_by_kind: dict[str, str]):
     return search
 
 
-def _post_correlation(base_url: str, hit) -> bool:
-    """POST synthesised event to our /webhook/{tier}. Returns True on 200."""
+def _post_correlation(base_url: str, hit, rt=None, window_s: int = 30) -> bool:
+    """POST synthesised event to our /webhook/{tier}. Returns True on 200.
+
+    If ``rt`` is provided, generates a playable clip URL for the window
+    ``[fired_at - window_s, fired_at]`` so the alert links to the actual
+    moment — this is the canonical pattern from VideoDB skills'
+    rtstream-reference.md (``rt.generate_stream(start, end)``).
+    """
+    stream_url: str | None = None
+    if rt is not None:
+        try:
+            start = max(0, int(hit.fired_at - window_s))
+            end = int(hit.fired_at)
+            stream_url = rt.generate_stream(start=start, end=end)
+        except Exception as e:
+            logger.warning(
+                "rt.generate_stream(%s, %s) failed for %s: %s",
+                int(hit.fired_at - window_s),
+                int(hit.fired_at),
+                hit.rule_name,
+                e,
+            )
+
     payload = {
         "event_id": f"corr-{hit.rule_name}-{int(hit.fired_at)}",
         "label": hit.synthesis_label,
@@ -95,7 +116,7 @@ def _post_correlation(base_url: str, hit) -> bool:
             )
         ),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(hit.fired_at)),
-        "stream_url": None,
+        "stream_url": stream_url,
     }
     url = f"{base_url}/webhook/{hit.tier}"
     try:
@@ -189,7 +210,7 @@ def main() -> int:
                                 f"     [{kind}] {sh.get('start')}-{sh.get('end')}: "
                                 f"{sh.get('text', '')[:80]}"
                             )
-                    if _post_correlation(base_url, hit):
+                    if _post_correlation(base_url, hit, rt=rt):
                         fires += 1
                     else:
                         post_failures += 1

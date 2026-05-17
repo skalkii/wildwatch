@@ -35,6 +35,7 @@ def wire_alerts(
     events_map: dict[str, str],
     base_url: str,
     alert_state: dict[str, dict],
+    ws_connection_id: str | None = None,
 ) -> WireResult:
     """Wire one alert per (index_kind, event) pair in ``INDEX_EVENT_MAP``.
 
@@ -69,7 +70,13 @@ def wire_alerts(
                 reused += 1
                 continue
 
-            alert_id = idx.create_alert(event_id, callback_url=cb)
+            # Dual-delivery: forward ws_connection_id when available so the
+            # alert fires through BOTH the webhook callback AND the WebSocket
+            # channel (skill's rtstream-reference.md, Alert Delivery section).
+            create_kwargs: dict[str, Any] = {"callback_url": cb}
+            if ws_connection_id:
+                create_kwargs["ws_connection_id"] = ws_connection_id
+            alert_id = idx.create_alert(event_id, **create_kwargs)
             alert_state[key] = {
                 "alert_id": alert_id,
                 "rtstream_id": rtstream_id,
@@ -77,6 +84,7 @@ def wire_alerts(
                 "label": label_by_id[ev_id_var],
                 "tier": tier,
                 "callback_url": cb,
+                "ws_connection_id": ws_connection_id,
             }
             if existing is None:
                 created += 1

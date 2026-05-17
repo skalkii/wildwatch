@@ -177,6 +177,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         radial-gradient(900px 500px at -10% 110%, rgba(14,165,233,.06), transparent 60%);
       background-attachment: fixed;
     }
+    /* Light theme: dim the dark-tuned ambient gradient + give cards depth */
+    html:not(.dark) body {
+      background-image:
+        radial-gradient(1200px 600px at 100% -10%, rgba(16,185,129,.04), transparent 60%),
+        radial-gradient(900px 500px at -10% 110%, rgba(14,165,233,.03), transparent 60%);
+    }
+    html:not(.dark) .card,
+    html:not(.dark) .modal-card { box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 8px 24px -10px rgba(15,23,42,.08); }
+    html:not(.dark) .card-soft { box-shadow: 0 1px 1px rgba(15,23,42,.03); }
     code, pre, .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
     pre { font-size: 11.5px; line-height: 1.55; }
 
@@ -199,7 +208,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
     .ev { border-left-width: 4px; background: var(--bg-elev); border: 1px solid var(--border); border-left-width: 4px; border-radius: 10px; padding: .6rem .8rem; transition: transform .15s, border-color .15s; }
     .ev:hover { border-color: var(--border-strong); }
-    .ev-1 { border-left-color: #10b981; }
+    .ev-1 { border-left-color: #38bdf8; }
     .ev-2 { border-left-color: #f59e0b; }
     .ev-3 { border-left-color: #ef4444; }
 
@@ -228,15 +237,26 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     .status-ready        { color: #10b981; background: color-mix(in oklab, #10b981 18%, transparent); }
     .status-error        { color: #ef4444; background: color-mix(in oklab, #ef4444 18%, transparent); }
     .status-disconnected { color: #94a3b8; background: color-mix(in oklab, #94a3b8 15%, transparent); }
+    /* Light-mode pills lose contrast on white-ish bg — bump mix percent */
+    html:not(.dark) .status-queued       { background: color-mix(in oklab, #94a3b8 32%, transparent); color: #475569; }
+    html:not(.dark) .status-connecting   { background: color-mix(in oklab, #38bdf8 28%, transparent); color: #0369a1; }
+    html:not(.dark) .status-ingesting    { background: color-mix(in oklab, #a78bfa 28%, transparent); color: #5b21b6; }
+    html:not(.dark) .status-indexing     { background: color-mix(in oklab, #f472b6 28%, transparent); color: #9d174d; }
+    html:not(.dark) .status-ready        { background: color-mix(in oklab, #10b981 30%, transparent); color: #065f46; }
+    html:not(.dark) .status-error        { background: color-mix(in oklab, #ef4444 28%, transparent); color: #991b1b; }
+    html:not(.dark) .status-disconnected { background: color-mix(in oklab, #94a3b8 32%, transparent); color: #475569; }
 
     /* KPI cards */
     .kpi { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.1rem; position: relative; overflow: hidden; }
     .kpi::after { content:''; position:absolute; inset:0; background: linear-gradient(180deg, transparent 50%, var(--grid)); pointer-events:none; }
     .kpi-label { font-size: 11px; font-weight: 600; letter-spacing: .08em; color: var(--text-faint); text-transform: uppercase; }
     .kpi-value { font-size: 30px; font-weight: 700; line-height: 1.1; margin-top: .35rem; letter-spacing: -.01em; }
-    .kpi-accent-1 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #10b981 25%, transparent); }
-    .kpi-accent-2 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #f59e0b 25%, transparent); }
-    .kpi-accent-3 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #ef4444 25%, transparent); }
+    .kpi-accent-1 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #38bdf8 30%, transparent); }
+    .kpi-accent-2 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #f59e0b 30%, transparent); }
+    .kpi-accent-3 { box-shadow: inset 0 0 0 1px color-mix(in oklab, #ef4444 30%, transparent); }
+    /* Dark-mode-only KPI bottom-fade — light mode renders it as a dirty smudge */
+    html.dark .kpi::after { display: block; }
+    html:not(.dark) .kpi::after { display: none; }
 
     /* Header */
     .site-header {
@@ -247,10 +267,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       border-bottom: 1px solid var(--border);
     }
     .site-nav {
-      position: sticky; top: 56px; z-index: 30;
       background: color-mix(in oklab, var(--bg) 92%, transparent);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
       border-bottom: 1px solid var(--border);
     }
     .brand-mark {
@@ -341,7 +358,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- ALERTS TAB -->
   <main id="tab-alerts" class="tab-pane p-6 grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
     <div class="lg:col-span-3">
-      <h2 class="text-lg font-bold tracking-tight">What's happening in the wild</h2>
+      <h2 class="text-2xl font-bold tracking-tight">What's happening in the wild</h2>
       <p class="text-xs faint mt-0.5">Every notable thing WildWatch sees or hears in the live stream lands here, ranked by how urgent it is.</p>
     </div>
 
@@ -352,8 +369,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="text-[11px] faint mt-1">All alerts since the dashboard started.</div>
       </div>
       <div class="kpi kpi-accent-1">
-        <div class="kpi-label" style="color:#10b981">🟢 Info · tier 1</div>
-        <div class="kpi-value" id="stat-t1" style="color:#10b981">0</div>
+        <div class="kpi-label" style="color:#38bdf8">🟦 Info · tier 1</div>
+        <div class="kpi-value" id="stat-t1" style="color:#38bdf8">0</div>
         <div class="text-[11px] faint mt-1">Routine sightings — animals at the waterhole, normal behavior.</div>
       </div>
       <div class="kpi kpi-accent-2">
@@ -388,19 +405,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <div id="rtstreams" class="text-xs space-y-1.5">loading…</div>
       </div>
       <div class="card p-4">
-        <h2 class="text-sm font-semibold tracking-tight">AI brain</h2>
-        <p class="text-[11px] faint mb-2.5 mt-0.5">The vision-and-audio model reading every frame.</p>
+        <h2 class="text-sm font-semibold tracking-tight">Indexes running</h2>
+        <p class="text-[11px] faint mb-2.5 mt-0.5">VideoDB sandbox running the vision + audio models.</p>
         <div id="sandboxes" class="text-xs space-y-1.5">loading…</div>
       </div>
-      <div class="card p-4">
-        <h2 class="text-sm font-semibold tracking-tight">Test the alert system</h2>
-        <p class="text-[11px] faint mb-2.5 mt-0.5">Fire a fake event at any tier to verify the pipeline + Telegram are working.</p>
+      <details class="card p-4">
+        <summary class="text-sm font-semibold tracking-tight cursor-pointer select-none flex items-center justify-between">
+          <span>Test the alert system</span>
+          <span class="faint text-[10px] uppercase tracking-[0.1em]">debug</span>
+        </summary>
+        <p class="text-[11px] faint mb-2.5 mt-2">Fire a fake event at any tier to verify the pipeline + Telegram are working.</p>
         <div class="flex gap-2">
-          <button onclick="fireTest(1)" class="btn flex-1" style="background:color-mix(in oklab,#10b981 16%,transparent); color:#10b981; border:1px solid color-mix(in oklab,#10b981 35%,transparent);">🟢 Info</button>
-          <button onclick="fireTest(2)" class="btn flex-1" style="background:color-mix(in oklab,#f59e0b 16%,transparent); color:#f59e0b; border:1px solid color-mix(in oklab,#f59e0b 35%,transparent);">🟡 Notable</button>
-          <button onclick="fireTest(3)" class="btn flex-1" style="background:color-mix(in oklab,#ef4444 16%,transparent); color:#ef4444; border:1px solid color-mix(in oklab,#ef4444 35%,transparent);">🔴 Urgent</button>
+          <button onclick="fireTest(1)" class="btn btn-ghost flex-1 text-[11.5px]">Info (test)</button>
+          <button onclick="fireTest(2)" class="btn btn-ghost flex-1 text-[11.5px]">Notable (test)</button>
+          <button onclick="fireTest(3)" class="btn btn-ghost flex-1 text-[11.5px]">Urgent (test)</button>
         </div>
-      </div>
+      </details>
     </aside>
   </main>
 
@@ -408,7 +428,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <main id="tab-sources" class="tab-pane p-6 hidden flex-1">
     <div class="flex justify-between items-start mb-4 gap-3 flex-wrap">
       <div>
-        <h2 class="text-lg font-bold tracking-tight">Video sources</h2>
+        <h2 class="text-2xl font-bold tracking-tight">Video sources</h2>
         <p class="text-xs faint mt-0.5 max-w-xl">Anything WildWatch is watching: an uploaded clip, a YouTube link, or a live camera. Each one gets fed through the AI brain for species, behavior, environment and audio analysis.</p>
       </div>
       <button id="add-source-btn" class="btn btn-primary flex items-center gap-1.5">
@@ -445,7 +465,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- INDEXED CONTENT TAB -->
   <main id="tab-content" class="tab-pane p-6 hidden flex-1">
     <div class="mb-5">
-      <h2 class="text-lg font-bold tracking-tight">Search what WildWatch has seen</h2>
+      <h2 class="text-2xl font-bold tracking-tight">Search what WildWatch has seen</h2>
       <p class="text-xs faint mt-0.5 max-w-2xl">Every frame and sound the AI brain has analysed is searchable in plain English. Ask for <span class="muted">"elephant drinking"</span>, <span class="muted">"gunshot"</span>, or <span class="muted">"juvenile near water"</span> — the index will return the matching moments.</p>
     </div>
 
@@ -489,7 +509,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- USAGE TAB -->
   <main id="tab-usage" class="tab-pane p-6 hidden flex-1">
     <div class="mb-5">
-      <h2 class="text-lg font-bold tracking-tight">Cost &amp; usage</h2>
+      <h2 class="text-2xl font-bold tracking-tight">Cost &amp; usage</h2>
       <p class="text-xs faint mt-0.5">How much WildWatch has spent running on VideoDB so far today.</p>
     </div>
 
@@ -553,7 +573,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </section>
 
     <!-- TECHNICAL DETAILS (collapsible) -->
-    <details class="card p-4">
+    <details class="card p-5">
       <summary class="cursor-pointer text-sm font-medium select-none flex items-center justify-between">
         <span>Technical details</span>
         <span class="faint text-[11px]">raw SDK output</span>
@@ -569,6 +589,13 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <p class="text-[11px] faint mt-3">Local estimate derived from <code class="mono">.state.json</code> start timestamps. Sandbox cost only counts the most-recent slot in state.</p>
+      <div class="mt-3 pt-3 border-t divider flex flex-wrap gap-3 text-[11px]">
+        <span class="faint">Dev endpoints:</span>
+        <a class="link mono" href="/health" target="_blank" rel="noopener">/health</a>
+        <a class="link mono" href="/api/stats" target="_blank" rel="noopener">/api/stats</a>
+        <a class="link" href="https://docs.videodb.io" target="_blank" rel="noopener">VideoDB docs</a>
+        <a class="link" href="https://github.com/skalkii/wildwatch" target="_blank" rel="noopener">GitHub</a>
+      </div>
     </details>
   </main>
 
@@ -605,20 +632,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <footer class="site-footer mt-auto">
     <div class="flex items-center gap-2">
-      <span class="brand-mark" style="width:22px;height:22px;border-radius:6px;" aria-hidden="true">
-        <svg width="13" height="13" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="32" cy="32" r="8" fill="white"/>
-        </svg>
-      </span>
-      <span><strong class="muted">WildWatch</strong> · built on <a class="link" href="https://videodb.io" target="_blank" rel="noopener">VideoDB</a> for the Eyes &amp; Ears hackathon</span>
+      <span><strong class="muted">WildWatch</strong> · built on <a class="link" href="https://videodb.io" target="_blank" rel="noopener">VideoDB</a></span>
     </div>
-    <div class="flex items-center gap-4">
-      <a href="/health" target="_blank" rel="noopener">health</a>
-      <a href="/api/stats" target="_blank" rel="noopener">/api/stats</a>
-      <a href="https://docs.videodb.io" target="_blank" rel="noopener">docs</a>
-      <a href="https://github.com/skalkii/wildwatch" target="_blank" rel="noopener">github</a>
-      <span class="faint">v0.1.0</span>
-    </div>
+    <div class="faint">v0.1.0</div>
   </footer>
 
 <script>
@@ -1095,7 +1111,11 @@ async function fetchUsage() {
     const rtItems = details.filter(x => x.kind === 'rtstream');
     const sbItems = details.filter(x => x.kind === 'sandbox');
 
-    $('usage-total').textContent = formatCurrency(est.total_usd || 0);
+    const total = Number(est.total_usd) || 0;
+    const totalEl = $('usage-total');
+    totalEl.textContent = formatCurrency(total);
+    // Amber implies "warning" — only paint amber when there's real spend.
+    totalEl.style.color = total > 0 ? '#f59e0b' : 'var(--text-faint)';
     $('usage-rt').textContent = formatCurrency(est.rtstreams_usd || 0);
     $('usage-sb').textContent = formatCurrency(est.sandboxes_usd || 0);
     $('usage-rt-count').textContent = rtItems.length

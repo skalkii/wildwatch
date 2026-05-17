@@ -98,8 +98,39 @@ def _ensure_events(conn, state: dict) -> dict[str, str]:
     return events_state
 
 
-def _bootstrap_stream(coll, stream_key: str, rtsp_url: str, prompt_ctx: dict) -> tuple:
-    """Connect rtstream + create 4 indexes (3 visual + 1 audio)."""
+def _read_ws_connection_id() -> str | None:
+    """Read ws_connection_id written by wildwatch/ws_listener.py.
+
+    Per VideoDB skills' rtstream-reference.md, alerts and indexes should
+    forward ``ws_connection_id`` so events also flow through the WebSocket
+    channel (dual delivery: callback + ws). The listener writes the id to
+    ``$VIDEODB_EVENTS_DIR/videodb_ws_id`` (default ``/tmp/videodb_ws_id``).
+    """
+    import os as _os
+
+    base = _os.environ.get("VIDEODB_EVENTS_DIR", "/tmp")
+    p = Path(base) / "videodb_ws_id"
+    if not p.exists():
+        return None
+    try:
+        return p.read_text().strip() or None
+    except Exception:
+        return None
+
+
+def _bootstrap_stream(
+    coll,
+    stream_key: str,
+    rtsp_url: str,
+    prompt_ctx: dict,
+    ws_connection_id: str | None = None,
+) -> tuple:
+    """Connect rtstream + create 4 indexes (3 visual + 1 audio).
+
+    When ``ws_connection_id`` is provided, every index call attaches it so
+    events flow through the WebSocket too — the dual-delivery pattern the
+    skill prescribes.
+    """
     print(f"\n[stream {stream_key}] connect_rtstream {rtsp_url}")
     rt = coll.connect_rtstream(
         url=rtsp_url,
@@ -109,6 +140,20 @@ def _bootstrap_stream(coll, stream_key: str, rtsp_url: str, prompt_ctx: dict) ->
     )
     print(f"  rtstream.id = {rt.id}  status={rt.status}")
 
+    # Optional speech-to-text transcript on the live stream. Skill ships this
+    # as a one-liner — biophony alone won't yield English transcripts but
+    # if the demo includes voiceover or any human speech in audio, this
+    # captures it without an extra index call.
+    if ws_connection_id:
+        try:
+            rt.start_transcript(ws_connection_id=ws_connection_id)
+            print(f"  start_transcript ws={ws_connection_id[:10]}…")
+        except Exception as e:
+            print(f"  WARN start_transcript failed: {type(e).__name__}: {e}")
+
+    def _ws_kwargs() -> dict:
+        return {"ws_connection_id": ws_connection_id} if ws_connection_id else {}
+
     indexes: dict[str, object] = {}
     for kind in ("species", "behavior", "environment"):
         prompt = format_prompt(kind, **prompt_ctx)
@@ -116,6 +161,7 @@ def _bootstrap_stream(coll, stream_key: str, rtsp_url: str, prompt_ctx: dict) ->
             prompt=prompt,
             batch_config=BATCH_CONFIG_VISUAL,
             name=f"{stream_key}_{kind}",
+            **_ws_kwargs(),
         )
         idx_id = getattr(idx, "rtstream_index_id", None) or getattr(idx, "id", "?")
         indexes[kind] = idx
@@ -126,6 +172,7 @@ def _bootstrap_stream(coll, stream_key: str, rtsp_url: str, prompt_ctx: dict) ->
         prompt=audio_prompt,
         batch_config=BATCH_CONFIG_AUDIO,
         name=f"{stream_key}_audio",
+        **_ws_kwargs(),
     )
     audio_idx_id = getattr(audio_idx, "rtstream_index_id", None) or getattr(audio_idx, "id", "?")
     indexes["audio"] = audio_idx
@@ -141,6 +188,7 @@ def _wire_alerts(
     base_url: str,
     state: dict,
     stream_key: str,
+    ws_connection_id: str | None = None,
 ) -> None:
     """Per INDEX_EVENT_MAP, create alert for each (kind, event) pair.
 
@@ -155,6 +203,7 @@ def _wire_alerts(
         events_map=events_map,
         base_url=base_url,
         alert_state=alert_state,
+        ws_connection_id=ws_connection_id,
     )
     print(
         f"  alerts: created={res.created} reused={res.reused} "
@@ -166,6 +215,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--observe", type=int, default=60, help="seconds to keep stream alive")
     ap.add_argument("--no-stop", action="store_true", help="leave rtstream running after observe")
+    ap.add_argument(
+        "--ws",
+        action="store_true",
+        help="forward ws_connection_id from wildwatch/ws_listener.py to indexes + alerts",
+    )
     args = ap.parse_args()
 
     load_dotenv()
@@ -177,6 +231,17 @@ def main() -> int:
 
     conn = videodb.connect()
     coll = conn.get_collection()
+
+    ws_id: str | None = None
+    if args.ws:
+        ws_id = _read_ws_connection_id()
+        if ws_id:
+            print(f"[ws] using ws_connection_id = {ws_id[:10]}…")
+        else:
+            print(
+                "[ws] no ws_connection_id found at "
+                "$VIDEODB_EVENTS_DIR/videodb_ws_id — start wildwatch/ws_listener.py first"
+            )
 
     # 1. Events — idempotent on label.
     print("[events] creating/reusing 18 events ...")
@@ -211,7 +276,9 @@ def main() -> int:
             except Exception as e:
                 print(f"[stream {stream_key}] cached rtstream gone ({e}); will provision new")
         if rt is None:
-            rt, indexes = _bootstrap_stream(coll, stream_key, FALLBACK_RTSP, FALLBACK_CONTEXT)
+            rt, indexes = _bootstrap_stream(
+                coll, stream_key, FALLBACK_RTSP, FALLBACK_CONTEXT, ws_connection_id=ws_id
+            )
         state.setdefault("rtstreams", {})[stream_key] = {
             "id": rt.id,
             "url": FALLBACK_RTSP,
@@ -224,7 +291,7 @@ def main() -> int:
         _save_state(state)
 
         # 3. Wire 18 alerts (one per INDEX_EVENT_MAP entry).
-        _wire_alerts(rt, indexes, events_map, base_url, state, stream_key)
+        _wire_alerts(rt, indexes, events_map, base_url, state, stream_key, ws_connection_id=ws_id)
         _save_state(state)
 
         if args.observe > 0:

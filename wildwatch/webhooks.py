@@ -822,31 +822,79 @@ def api_usage() -> dict:
 
 @app.post("/api/search")
 def api_search(req: SearchRequest) -> dict:
+    """Search across collection/video/rtstream scopes.
+
+    Skill conformance (video-db/skills · search-reference.md):
+      - Collection search only supports ``SearchType.semantic`` — pass it
+        explicitly; otherwise the SDK raises ``NotImplementedError``.
+      - Video/rtstream scene search needs ``index_type=IndexType.scene`` +
+        a ``score_threshold`` so noise gets filtered.
+      - The SDK raises a custom error on empty results (string contains
+        "No results found"); catch it and return ``shots: []`` instead of
+        a 500. That's what every skill example does.
+    """
     coll = _get_coll()
+    # Late import — videodb is heavy + we want the SDK constants if available.
+    try:
+        from videodb import IndexType, SearchType
+    except Exception:  # pragma: no cover — SDK shape may move
+        IndexType = SearchType = None  # type: ignore[assignment]
+
+    def _empty(scope: str, extra: dict | None = None) -> dict:
+        out = {"scope": scope, "shots": []}
+        if extra:
+            out.update(extra)
+        return out
+
     try:
         if req.scope == "collection":
-            result = coll.search(query=req.query)
+            kwargs: dict[str, Any] = {"query": req.query}
+            if SearchType is not None:
+                kwargs["search_type"] = SearchType.semantic
+            try:
+                result = coll.search(**kwargs)
+            except Exception as e:
+                if "No results found" in str(e):
+                    return _empty("collection")
+                raise
             shots = getattr(result, "shots", None) or []
             return {"scope": "collection", "shots": [_shot_to_dict(s) for s in shots]}
+
         if req.scope == "video":
             if not req.target_id:
                 raise HTTPException(status_code=400, detail="target_id required for video scope")
             v = coll.get_video(req.target_id)
-            result = v.search(query=req.query)
+            kwargs = {"query": req.query, "score_threshold": 0.3}
+            if IndexType is not None:
+                kwargs["index_type"] = IndexType.scene
+            try:
+                result = v.search(**kwargs)
+            except Exception as e:
+                if "No results found" in str(e):
+                    return _empty("video", {"video_id": req.target_id})
+                raise
             shots = getattr(result, "shots", None) or []
             return {
                 "scope": "video",
                 "video_id": req.target_id,
                 "shots": [_shot_to_dict(s) for s in shots],
             }
+
         if req.scope == "rtstream":
             if not req.target_id:
                 raise HTTPException(status_code=400, detail="target_id required for rtstream scope")
             rt = coll.get_rtstream(req.target_id)
-            kwargs: dict[str, Any] = {"query": req.query}
+            kwargs = {"query": req.query, "score_threshold": 0.3}
+            if IndexType is not None:
+                kwargs["index_type"] = IndexType.scene
             if req.index_id:
                 kwargs["index_id"] = req.index_id
-            result = rt.search(**kwargs)
+            try:
+                result = rt.search(**kwargs)
+            except Exception as e:
+                if "No results found" in str(e):
+                    return _empty("rtstream", {"rtstream_id": req.target_id})
+                raise
             shots = getattr(result, "shots", None) or []
             return {
                 "scope": "rtstream",

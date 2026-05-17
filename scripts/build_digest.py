@@ -30,6 +30,16 @@ def main() -> int:
     ap.add_argument("--since-hours", type=int, default=24)
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--clip-seconds", type=int, default=4)
+    ap.add_argument(
+        "--no-overlays",
+        action="store_true",
+        help="skip TextAsset tier-label overlays (default: on)",
+    )
+    ap.add_argument(
+        "--music",
+        action="store_true",
+        help="generate + overlay ambient documentary music (uses coll.generate_music)",
+    )
     args = ap.parse_args()
 
     load_dotenv()
@@ -49,10 +59,14 @@ def main() -> int:
         since_hours=args.since_hours,
         top_n=args.top,
         clip_seconds=args.clip_seconds,
+        add_text_overlays=not args.no_overlays,
+        add_music=args.music,
     )
 
     print(f"\nn_events seen: {result['n_events']}")
     print(f"n_clips used:  {result['n_clips']}")
+    if result.get("summary"):
+        print(f"\nsummary: {result['summary']}")
     if result["stream_url"]:
         print(f"\n  stream:  {result['stream_url']}")
         print(f"  player:  {result['player_url']}")

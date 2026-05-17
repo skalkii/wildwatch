@@ -61,28 +61,59 @@ def pick_corpus_video_id(tier: int, corpus_state: dict[str, dict]) -> str | None
     return None
 
 
+_TIER_OVERLAY = {
+    1: ("🟦 INFO", "#38bdf8"),
+    2: ("🟡 NOTABLE", "#f59e0b"),
+    3: ("🔴 URGENT", "#ef4444"),
+}
+
+
 def build_timeline(
     events: list[dict[str, Any]],
     corpus_state: dict[str, dict],
     conn: Any,
     clip_seconds: int = DEFAULT_CLIP_SECONDS,
+    *,
+    add_text_overlays: bool = True,
+    add_music: bool = False,
+    music_prompt: str = (
+        "documentary ambient, soft african savanna at dawn, "
+        "low strings, sparse percussion, calm but tense"
+    ),
 ) -> tuple[Any, int]:
     """Compose a Timeline from the picked events + corpus mapping.
 
-    Returns (Timeline, n_clips). Imports are local so this module is
-    importable in test envs that don't have full videodb installed.
+    Skill conformance (video-db/skills editor model):
+      - Multi-track Timeline (video + text-overlay + optional music).
+      - Each Clip gets a ``Transition(in_="fade", out="fade")`` so the
+        reel doesn't jump-cut every 4 seconds.
+      - TextAsset overlays render the tier label per clip so a non-tech
+        viewer can tell what the AI flagged at a glance.
+      - Optional ``coll.generate_music(prompt=...)`` background track —
+        single SDK call, zero extra wiring.
 
-    Raises ValueError if ``clip_seconds <= 0`` -- without per-clip duration
-    the track would accumulate zero-length entries and generate_stream would
-    fire on a malformed timeline.
+    Returns (Timeline, n_clips).
     """
     if clip_seconds <= 0:
         raise ValueError(f"clip_seconds must be > 0, got {clip_seconds}")
-    from videodb.editor import Clip, Timeline, Track, VideoAsset
+    from videodb.editor import (
+        AudioAsset,
+        Background,
+        Clip,
+        Font,
+        TextAsset,
+        Timeline,
+        Track,
+        Transition,
+        VideoAsset,
+    )
 
     timeline = Timeline(conn)
     timeline.resolution = "1280x720"
-    track = Track()
+
+    video_track = Track()
+    overlay_track = Track() if add_text_overlays else None
+
     cursor = 0
     n_clips = 0
     for ev in events:
@@ -91,13 +122,59 @@ def build_timeline(
         if not vid_id:
             logger.warning("digest: no corpus clip for tier=%s; skipping event", tier)
             continue
-        track.add_clip(
+
+        # Video clip with fade in/out — skill prescribes Transition on every clip
+        # to avoid jarring hard cuts. Duration 0.4s is short enough to fit a
+        # 4s clip without eating perceived runtime.
+        transition = Transition(in_="fade", out="fade", duration=0.4)
+        video_track.add_clip(
             cursor,
-            Clip(asset=VideoAsset(id=vid_id, start=0), duration=clip_seconds),
+            Clip(
+                asset=VideoAsset(id=vid_id, start=0),
+                duration=clip_seconds,
+                transition=transition,
+            ),
         )
+
+        # Text overlay: tier label + event label (truncated). Skill flags
+        # TextAsset Background as the readable way to render burn-in text.
+        if overlay_track is not None:
+            label_text, accent = _TIER_OVERLAY.get(tier, ("EVENT", "#94a3b8"))
+            ev_label = (ev.get("label") or "").replace("_", " ").upper()[:38]
+            overlay = TextAsset(
+                text=f"{label_text}\n{ev_label}" if ev_label else label_text,
+                font=Font(family="Clear Sans", size=42, color="#ffffff"),
+                background=Background(color=accent, opacity=0.85),
+            )
+            overlay_track.add_clip(
+                cursor,
+                Clip(asset=overlay, duration=clip_seconds, transition=transition),
+            )
+
         cursor += clip_seconds
         n_clips += 1
-    timeline.add_track(track)
+
+    timeline.add_track(video_track)
+    if overlay_track is not None:
+        timeline.add_track(overlay_track)
+
+    # Background music — best-effort, never fatal.
+    if add_music and n_clips > 0:
+        try:
+            total = cursor  # seconds
+            music = conn.get_collection().generate_music(prompt=music_prompt, duration=total)
+            music_id = getattr(music, "id", None)
+            if music_id:
+                music_track = Track()
+                music_track.add_clip(
+                    0,
+                    Clip(asset=AudioAsset(id=music_id, start=0, volume=0.25), duration=total),
+                )
+                timeline.add_track(music_track)
+                logger.info("digest: added generated music track id=%s (%ss)", music_id, total)
+        except Exception as e:
+            logger.warning("digest: generate_music failed (%s); reel will be silent", e)
+
     return timeline, n_clips
 
 
@@ -107,11 +184,14 @@ def build_digest(
     since_hours: int = 24,
     top_n: int = 10,
     clip_seconds: int = DEFAULT_CLIP_SECONDS,
+    *,
+    add_text_overlays: bool = True,
+    add_music: bool = False,
 ) -> dict[str, Any]:
     """End-to-end: read log -> pick top N -> Timeline -> playable URL.
 
-    Returns dict { "n_events": int, "n_clips": int, "stream_url": str | None,
-    "player_url": str | None }.
+    Returns dict { "n_events", "n_clips", "stream_url", "player_url",
+    "summary" }.
     """
     import time
 
@@ -125,22 +205,63 @@ def build_digest(
         logger.info("digest: event log empty; synthesising default montage")
         picked = [{"tier": 3}, {"tier": 2}, {"tier": 1}]
 
-    timeline, n_clips = build_timeline(picked, corpus, conn, clip_seconds=clip_seconds)
+    timeline, n_clips = build_timeline(
+        picked,
+        corpus,
+        conn,
+        clip_seconds=clip_seconds,
+        add_text_overlays=add_text_overlays,
+        add_music=add_music,
+    )
     if n_clips == 0:
         return {
             "n_events": len(events),
             "n_clips": 0,
             "stream_url": None,
             "player_url": None,
+            "summary": None,
         }
 
     stream_url = timeline.generate_stream()
-    from urllib.parse import quote
 
-    player_url = f"https://console.videodb.io/player?url={quote(stream_url, safe='')}"
+    # Prefer the SDK's own player_url helper over hand-built console URLs —
+    # skill explicitly flags this as the canonical playback link.
+    player_url: str | None = None
+    try:
+        pu = timeline.player_url
+        player_url = pu() if callable(pu) else pu
+    except Exception:
+        player_url = None
+    if not player_url:
+        from urllib.parse import quote
+
+        player_url = f"https://console.videodb.io/player?url={quote(stream_url, safe='')}"
+
+    # Best-effort natural-language summary card for the reel intro. Uses
+    # `coll.generate_text` (skill's go-to for LLM-as-tool); failure is silent.
+    summary: str | None = None
+    try:
+        n_t1 = sum(1 for e in events if int(e.get("tier", 0)) == 1)
+        n_t2 = sum(1 for e in events if int(e.get("tier", 0)) == 2)
+        n_t3 = sum(1 for e in events if int(e.get("tier", 0)) == 3)
+        prompt = (
+            "Summarise this wildlife monitoring digest in one short paragraph "
+            "(<=40 words) for a non-technical conservation audience. "
+            f"Last {since_hours}h: {n_t1} routine sightings, {n_t2} notable "
+            f"events, {n_t3} urgent events. Highlight labels: "
+            + ", ".join((ev.get("label") or "") for ev in picked[:5])
+            + "."
+        )
+        coll = conn.get_collection()
+        if hasattr(coll, "generate_text"):
+            summary = coll.generate_text(prompt=prompt, model_name="basic")
+    except Exception as e:
+        logger.info("digest: generate_text skipped (%s)", e)
+
     return {
         "n_events": len(events),
         "n_clips": n_clips,
         "stream_url": stream_url,
         "player_url": player_url,
+        "summary": summary,
     }
