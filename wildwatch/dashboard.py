@@ -1486,19 +1486,37 @@ function _renderLibrary() {
 }
 
 async function fetchVideos() {
-  // Library merges two surfaces: archive videos (coll.get_videos) AND
-  // running rtstreams (coll.list_rtstreams via /api/remote). Stopped
-  // rtstreams are filtered out here — they clutter the list for non-
-  // tech viewers without providing usable content (VideoDB has no
-  // delete_rtstream, so they hang around forever).
+  // Library merges three surfaces:
+  //   - archive videos (coll.get_videos)
+  //   - running rtstreams (coll.list_rtstreams via /api/remote)
+  //   - source rows from /api/sources — used to cross-check that an
+  //     rtstream is currently active in the operator's view.
+  //
+  // VideoDB's `list_rtstreams` returns the entire history of streams
+  // ever connected; stale/disconnected ones still appear with stale
+  // status (sometimes 'connected' even though no frames are flowing).
+  // Filter:
+  //   1. rtstream.status must be in _RTSTREAM_RUNNING_STATUSES
+  //   2. there must be a corresponding source row whose status === 'ready'
+  // Either alone is unreliable, both together = "the operator added
+  // this and it's still ingesting RIGHT NOW".
   try {
-    const [vr, rr] = await Promise.all([
+    const [vr, rr, sr] = await Promise.all([
       fetch('/api/videos').then(r => r.json()).catch(() => ({ videos: [] })),
       fetch('/api/remote').then(r => r.json()).catch(() => ({ rtstreams: [] })),
+      fetch('/api/sources').then(r => r.json()).catch(() => ({ sources: [] })),
     ]);
     const videos = (vr.videos || []).map(v => ({ ...v, _kind: 'video' }));
+    const activeRtIds = new Set(
+      (sr.sources || [])
+        .filter(s => s.status === 'ready' && s.rtstream_id)
+        .map(s => s.rtstream_id)
+    );
     const rtstreams = (rr.rtstreams || [])
-      .filter(rt => _RTSTREAM_RUNNING_STATUSES.has(String(rt.status || '').toLowerCase()))
+      .filter(rt =>
+        _RTSTREAM_RUNNING_STATUSES.has(String(rt.status || '').toLowerCase())
+        && activeRtIds.has(rt.id)
+      )
       .map(rt => ({
         id: rt.id,
         name: rt.name || rt.id,

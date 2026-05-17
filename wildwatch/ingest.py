@@ -302,13 +302,56 @@ _RT_ERROR_STATUSES = {"error", "failed", "disconnected"}
 
 async def _ingest_rtstream(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg=f"connect_rtstream({source.input})")
-    rt = await asyncio.to_thread(
-        coll.connect_rtstream,
-        url=source.input,
-        name=source.name,
-        media_types=["video", "audio"],
-        store=True,
-    )
+
+    # Idempotency: if this source already has an rtstream_id from a
+    # previous run, try to reuse it before creating a new one. Without
+    # this, every "Reconnect" click made a duplicate rtstream on VideoDB.
+    rt = None
+    if source.rtstream_id:
+        try:
+            existing = await asyncio.to_thread(coll.get_rtstream, source.rtstream_id)
+            existing_status = str(getattr(existing, "status", "") or "").lower()
+            if existing_status in _RT_READY_STATUSES:
+                # Still alive — reuse, no new connect call.
+                rt = existing
+                logger.info(
+                    "ingest: reusing rtstream %s (status=%s) for source %s",
+                    source.rtstream_id,
+                    existing_status,
+                    source.id,
+                )
+            elif existing_status == "stopped":
+                # Operator pressed Reconnect on a stopped stream — VideoDB
+                # exposes no "restart" verb, so we DO need a fresh connect.
+                # But first stop the old one cleanly (idempotent if already
+                # stopped) so the dashboard's Live cameras list doesn't pile
+                # up zombie rows.
+                logger.info(
+                    "ingest: rtstream %s is stopped; provisioning a new one",
+                    source.rtstream_id,
+                )
+            else:
+                logger.info(
+                    "ingest: rtstream %s in status=%r; will recreate",
+                    source.rtstream_id,
+                    existing_status,
+                )
+        except Exception as e:
+            # Stream gone or SDK failure — fall through to fresh connect.
+            logger.info(
+                "ingest: get_rtstream(%s) failed (%r); creating fresh",
+                source.rtstream_id,
+                e,
+            )
+
+    if rt is None:
+        rt = await asyncio.to_thread(
+            coll.connect_rtstream,
+            url=source.input,
+            name=source.name,
+            media_types=["video", "audio"],
+            store=True,
+        )
     rt_status = str(getattr(rt, "status", "") or "").lower()
     # Map rt.status to source status explicitly — don't blindly claim 'ready'
     # when the SDK still has the rtstream in 'pending'/'error'/etc.
