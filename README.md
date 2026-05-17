@@ -92,6 +92,8 @@ WildWatch exercises **all 10 VideoDB primitives** across the See / Understand / 
 
 **Sandbox-aware:** every index/generation call passes `sandbox_id` to a single shared Medium `SandboxTier` (gemma-4-31B-it for visual, Qwen3.5-9B for audio). One sandbox lifecycle, idle-timeout 600s, status-gated before submitting jobs.
 
+**Built with the official [VideoDB Skills plugin](https://github.com/video-db/skills).** Installed in this repo's Claude Code session via `/plugin install videodb@videodb-skills`. The skill surfaces server-side perception primitives (See / Understand / Act) directly to the coding agent, keeping SDK shape and best-practice prompts in lockstep with `docs.videodb.io`. WildWatch is a real-world build of that pattern: continuous wildlife streams → indexed perception → tiered alerts → auto-edited reels.
+
 ---
 
 ## Quickstart

@@ -16,15 +16,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path as PPath
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 import aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Path, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Path, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Load .env at import time so uvicorn-launched processes see TELEGRAM_*
@@ -81,6 +85,76 @@ _usage_cache: dict = {"at": 0.0, "data": {}}
 _USAGE_TTL_S = 60.0
 
 app = FastAPI(title="WildWatch webhook receiver")
+
+# Bounded executor for SDK calls that lack native timeouts (VideoDB SDK is
+# blocking and offers no per-call deadline). Wrapping in a thread pool with
+# `future.result(timeout=N)` lets us reject hung calls so the Usage tab
+# can't freeze the dashboard mid-demo.
+_SDK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sdk")
+
+
+def _with_timeout(fn, *args, timeout_s: float = 5.0, **kwargs):
+    """Run a blocking SDK call with a hard deadline; raises TimeoutError."""
+    fut = _SDK_EXECUTOR.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=timeout_s)
+    except FutureTimeoutError as e:
+        # Best-effort cancel; if the underlying call is in C-land it may still run.
+        fut.cancel()
+        raise TimeoutError(f"SDK call timed out after {timeout_s}s") from e
+
+
+# ── CSRF / cross-origin guard for mutating endpoints ────────────────────
+#
+# FastAPI is bound to 0.0.0.0 in the docker compose / quickstart path so any
+# browser on the LAN can reach it. Without an Origin check, a malicious page
+# anywhere on that LAN can fire POST /api/sources or DELETE /api/sources/{id}
+# against http://<host-lan-ip>:8000 by the user's browser. Mitigate by
+# rejecting mutating requests whose Origin/Referer doesn't match a known-good
+# host. GET/HEAD/OPTIONS are skipped — they don't change state.
+
+_ALLOWED_ORIGIN_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+}
+# Operators can extend with WILDWATCH_ALLOWED_ORIGINS=hostA,hostB
+for _extra in (os.getenv("WILDWATCH_ALLOWED_ORIGINS") or "").split(","):
+    _extra = _extra.strip()
+    if _extra:
+        _ALLOWED_ORIGIN_HOSTS.add(_extra)
+
+# Paths that legitimately receive cross-origin POSTs and must NOT be guarded:
+# the VideoDB webhook callback comes from VideoDB's own infra.
+_CSRF_EXEMPT_PATH_PREFIXES = ("/webhook/",)
+
+
+@app.middleware("http")
+async def _csrf_origin_guard(request: Request, call_next):
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return await call_next(request)
+    path = request.url.path
+    if any(path.startswith(p) for p in _CSRF_EXEMPT_PATH_PREFIXES):
+        return await call_next(request)
+
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        # Same-origin XHR/fetch will send an Origin header in modern browsers.
+        # CLI tools (curl) won't — allow when there's no browser context.
+        ua = (request.headers.get("user-agent") or "").lower()
+        if any(t in ua for t in ("mozilla", "chrome", "safari", "firefox", "edg/")):
+            return JSONResponse(status_code=403, content={"detail": "missing Origin"})
+        return await call_next(request)
+    try:
+        host = (urlparse(origin).hostname or "").lower()
+    except Exception:
+        return JSONResponse(status_code=403, content={"detail": "bad Origin"})
+    if host not in _ALLOWED_ORIGIN_HOSTS:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"Origin {host!r} not allowed"},
+        )
+    return await call_next(request)
 
 
 class AlertPayload(BaseModel):
@@ -174,13 +248,10 @@ def api_remote() -> dict:
     if (now - _remote_cache["at"]) < _REMOTE_TTL_S:
         return _remote_cache["data"]
     try:
-        import videodb
-
-        conn = videodb.connect()
-        coll = conn.get_collection()
+        coll = _get_coll()
         rtstreams = [
             {"id": rt.id, "name": getattr(rt, "name", "?"), "status": getattr(rt, "status", "?")}
-            for rt in coll.list_rtstreams()
+            for rt in (_with_timeout(coll.list_rtstreams, timeout_s=5.0) or [])
         ]
         sandboxes = [
             {
@@ -189,7 +260,7 @@ def api_remote() -> dict:
                 "status": getattr(sb, "status", "?"),
                 "is_active": bool(getattr(sb, "is_active", False)),
             }
-            for sb in conn.list_sandboxes()
+            for sb in (_with_timeout(_get_conn().list_sandboxes, timeout_s=5.0) or [])
         ]
         data = {"rtstreams": rtstreams, "sandboxes": sandboxes}
         _remote_cache.update({"at": now, "data": data})
@@ -244,12 +315,25 @@ class SourceCreate(BaseModel):
     name: str
 
 
-def _get_coll() -> Any:
-    """Lazy-load VideoDB collection per request to avoid global SDK init."""
-    import videodb
+# Process-cached VideoDB connection. `videodb.connect()` does an auth round
+# trip on every call — recreating it per request blocks the thread on auth
+# latency and turns the dashboard into a slow disaster.
+_conn_cache: dict[str, Any] = {"conn": None, "coll": None}
 
-    conn = videodb.connect()
-    return conn.get_collection()
+
+def _get_conn() -> Any:
+    if _conn_cache["conn"] is None:
+        import videodb
+
+        _conn_cache["conn"] = videodb.connect()
+    return _conn_cache["conn"]
+
+
+def _get_coll() -> Any:
+    """Lazy-load VideoDB collection, cached for the life of the process."""
+    if _conn_cache["coll"] is None:
+        _conn_cache["coll"] = _get_conn().get_collection()
+    return _conn_cache["coll"]
 
 
 @app.get("/api/sources")
@@ -557,10 +641,51 @@ def _estimate_credit_burn_usd() -> dict:
     sb_total = 0.0
     details: list[dict] = []
 
+    # Live VideoDB-side status — only meter rtstreams actually running.
+    # IMPORTANT: if the SDK call fails (network blip, auth glitch), we DO NOT
+    # silently zero the estimate — that masks real burn. We flag the result
+    # as `live_status_unknown` and fall back to the legacy upper-bound for
+    # every entry that has a started_at, so operators still see a number.
+    live_status_by_id: dict[str, str] = {}
+    live_status_available = False
+    sdk_warning: str | None = None
+    try:
+        coll = _get_coll()
+        rts = _with_timeout(coll.list_rtstreams, timeout_s=5.0) or []
+        for rt in rts:
+            rt_id = getattr(rt, "id", None) or (rt.get("id") if isinstance(rt, dict) else None)
+            status = getattr(rt, "status", None) or (
+                rt.get("status") if isinstance(rt, dict) else None
+            )
+            if rt_id:
+                live_status_by_id[str(rt_id)] = str(status or "").lower()
+        live_status_available = True
+    except Exception as e:
+        logger.warning("_estimate_credit_burn_usd: list_rtstreams failed: %r", e)
+        sdk_warning = (
+            f"Could not verify live status against VideoDB ({type(e).__name__}). "
+            "Showing upper-bound estimate from local state — value may include stopped streams."
+        )
+
+    # Statuses VideoDB exposes that we treat as "billing is happening right now".
+    _RT_LIVE_STATUSES = {"connected", "running", "ingesting", "indexing", "ready"}
+
     for key, rt_state in state.get("rtstreams", {}).items():
         started_iso = rt_state.get("started_at") or rt_state.get("created_at")
         if not started_iso:
             continue
+        rt_id = rt_state.get("rtstream_id") or rt_state.get("id")
+        live_status = live_status_by_id.get(str(rt_id), "")
+
+        if live_status_available:
+            # SDK responded: trust it. Skip non-running or unknown-id entries.
+            if not rt_id or live_status not in _RT_LIVE_STATUSES:
+                continue
+            displayed_status = live_status
+        else:
+            # SDK unreachable: fall back to legacy upper-bound — better to
+            # show maybe-too-high than maybe-zero.
+            displayed_status = "unknown_sdk_unreachable"
         try:
             from datetime import datetime as _dt
 
@@ -577,8 +702,6 @@ def _estimate_credit_burn_usd() -> dict:
             )
             continue
         hours = max(0.0, (now - started_ts) / 3600.0)
-        # Note: we don't know whether stream is still running locally, so this
-        # is upper-bound from start_ts to now.
         rate = 5.0  # relaxed cost rate
         burn = hours * rate
         rt_total += burn
@@ -586,6 +709,8 @@ def _estimate_credit_burn_usd() -> dict:
             {
                 "kind": "rtstream",
                 "key": key,
+                "rtstream_id": rt_id,
+                "status": displayed_status,
                 "hours": round(hours, 2),
                 "rate_usd_per_h": rate,
                 "burn_usd": round(burn, 2),
@@ -593,37 +718,71 @@ def _estimate_credit_burn_usd() -> dict:
         )
 
     sb = state.get("sandbox")
-    if sb and sb.get("created_at"):
+    if sb and sb.get("created_at") and sb.get("id"):
+        # Verify sandbox is actually live on VideoDB. If the probe FAILS,
+        # default to "assume active" — masking real burn is worse than
+        # showing an unverified row, and the dashboard surfaces the
+        # `status` so operators see it.
+        sb_active = True
+        sb_status = "unverified"
         try:
-            from datetime import datetime as _dt
-
-            started_ts = _dt.fromisoformat(sb["created_at"].replace("Z", "+00:00")).timestamp()
-            hours = max(0.0, (now - started_ts) / 3600.0)
-            rate = 3.5 if str(sb.get("tier", "")).endswith("medium") else 1.0
-            burn = hours * rate
-            sb_total += burn
-            details.append(
-                {
-                    "kind": "sandbox",
-                    "id": sb.get("id"),
-                    "tier": sb.get("tier"),
-                    "hours": round(hours, 2),
-                    "rate_usd_per_h": rate,
-                    "burn_usd": round(burn, 2),
-                }
-            )
+            conn = _get_conn()
+            if hasattr(conn, "get_sandbox"):
+                sb_obj = _with_timeout(conn.get_sandbox, sb["id"], timeout_s=5.0)
+                if sb_obj is not None:
+                    status = str(
+                        getattr(sb_obj, "status", None)
+                        or (sb_obj.get("status") if isinstance(sb_obj, dict) else None)
+                        or ""
+                    ).lower()
+                    sb_status = status or "unknown"
+                    sb_active = status in ("active", "running", "ready")
+                else:
+                    # SDK returned None — sandbox is gone (idle-timeout)
+                    sb_active = False
+                    sb_status = "expired"
         except Exception as e:
-            logger.warning(
-                "_estimate_credit_burn_usd: sandbox burn calc failed: %r (sb=%r)",
-                e,
-                sb,
-            )
+            logger.warning("_estimate_credit_burn_usd: sandbox status probe failed: %r", e)
+            if sdk_warning is None:
+                sdk_warning = (
+                    f"Could not verify sandbox status ({type(e).__name__}). "
+                    "Showing upper-bound estimate — sandbox may have already shut down."
+                )
+
+        if sb_active:
+            try:
+                from datetime import datetime as _dt
+
+                started_ts = _dt.fromisoformat(sb["created_at"].replace("Z", "+00:00")).timestamp()
+                hours = max(0.0, (now - started_ts) / 3600.0)
+                rate = 3.5 if str(sb.get("tier", "")).endswith("medium") else 1.0
+                burn = hours * rate
+                sb_total += burn
+                details.append(
+                    {
+                        "kind": "sandbox",
+                        "id": sb.get("id"),
+                        "tier": sb.get("tier"),
+                        "status": sb_status,
+                        "hours": round(hours, 2),
+                        "rate_usd_per_h": rate,
+                        "burn_usd": round(burn, 2),
+                    }
+                )
+            except Exception as e:
+                logger.warning(
+                    "_estimate_credit_burn_usd: sandbox burn calc failed: %r (sb=%r)",
+                    e,
+                    sb,
+                )
 
     return {
         "total_usd": round(rt_total + sb_total, 2),
         "rtstreams_usd": round(rt_total, 2),
         "sandboxes_usd": round(sb_total, 2),
         "details": details,
+        "live_status_available": live_status_available,
+        "warning": sdk_warning,
         "note": (
             "Upper-bound estimate from .state.json start timestamps to now. "
             "Real usage shown by conn.check_usage() above. "
@@ -641,9 +800,7 @@ def api_usage() -> dict:
 
     out: dict[str, Any] = {"estimate": _estimate_credit_burn_usd()}
     try:
-        import videodb
-
-        conn = videodb.connect()
+        conn = _get_conn()
     except Exception as e:
         # Connect itself failed — cache the failure so repeated polls don't
         # all re-attempt the broken connect.
@@ -652,11 +809,11 @@ def api_usage() -> dict:
         _usage_cache.update({"at": now, "data": out})
         return out
     try:
-        out["usage"] = conn.check_usage()
+        out["usage"] = _with_timeout(conn.check_usage, timeout_s=5.0)
     except Exception as e:
         out["usage_error"] = str(e)
     try:
-        out["invoices"] = (conn.get_invoices() or [])[:10]
+        out["invoices"] = (_with_timeout(conn.get_invoices, timeout_s=5.0) or [])[:10]
     except Exception as e:
         out["invoices_error"] = str(e)
     _usage_cache.update({"at": now, "data": out})
