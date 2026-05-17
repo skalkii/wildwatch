@@ -31,17 +31,19 @@ def test_build_message_includes_tier_emoji() -> None:
     assert "shot heard" in msg
 
 
-def test_build_message_wraps_hls_in_player_with_url_encoding() -> None:
+def test_build_message_sends_raw_hls_url_only() -> None:
     msg = build_message(
         tier=1,
         label="juvenile_present",
         explanation="calf at water edge",
         stream_url="https://rt.stream.videodb.io/m/foo.m3u8",
     )
-    # URL-encoded so the nested ?url= doesn't break Telegram's parser or
-    # the console player's query parsing.
-    assert "console.videodb.io/player?url=" in msg
-    assert "https%3A%2F%2Frt.stream.videodb.io" in msg
+    # User feedback: the console.videodb.io wrapper adds an empty preview
+    # box on mobile Telegram + provides no value over the raw HLS link.
+    # Only ONE link goes through now: the raw m3u8 (iOS Safari plays
+    # natively; Android opens it in VLC tap-and-play).
+    assert "console.videodb.io/player?url=" not in msg
+    assert "https://rt.stream.videodb.io/m/foo.m3u8" in msg
     assert "▶" in msg
 
 

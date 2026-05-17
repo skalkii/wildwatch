@@ -17,7 +17,6 @@ import logging
 import os
 import re
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -225,14 +224,12 @@ def build_message(
             # SDK-generated player URL — single link.
             parts.append(f"▶ {stream_url}")
         else:
-            # Send TWO links: console.videodb.io/player (Chrome/desktop JS HLS
-            # player) AND the raw m3u8 (iOS Safari plays HLS natively, VLC /
-            # any external player opens it from the tap-and-play action).
-            # Operators using mobile Android Telegram occasionally report the
-            # console player not loading; the raw m3u8 gives them a fallback.
-            encoded = quote(stream_url, safe="")
-            parts.append(f"▶ Play: {PLAYER_PREFIX}{encoded}")
-            parts.append(f"🎞 Raw HLS (iOS/VLC): {stream_url}")
+            # Single link only — raw HLS m3u8. Works in iOS Safari natively
+            # and opens in VLC on any platform via tap-and-play. User
+            # feedback: the console.videodb.io wrapper added an ugly empty
+            # preview box on mobile + still required the same VLC fallback
+            # for Android, so it gave no value over the raw link.
+            parts.append(f"▶ {stream_url}")
     return "\n".join(parts)
 
 
@@ -254,17 +251,21 @@ def _genai_friendly_explanation(
     the parser-rendered fallback instead.
     """
     try:
-        # Local import — never block module load on the SDK.
         prompt = (
-            "You are a wildlife-monitoring assistant. Rewrite the following "
-            "system-generated alert as ONE short, plain-English sentence for "
-            "a park ranger reading it on their phone. Lead with WHAT was "
-            "detected and WHERE in the clip (use 'around <start>s'). Drop "
-            "internal jargon like 'post-upload analysis', 'Query:', bracket "
-            "tags, scene state codes. No emoji. No markdown. Max 200 chars.\n\n"
-            f"Severity tier: {tier} (1=info, 2=notable, 3=urgent)\n"
-            f"Event label: {label}\n"
-            f"Raw alert text: {raw_explanation[:1500]}"
+            "Rewrite the alert below as ONE short plain-English sentence "
+            "that a park ranger reading their phone in the field can grasp "
+            "in two seconds. Speak about what the camera saw, NOT about the "
+            "alert system. Drop ALL of these: 'alert context', 'specifies "
+            "triggering', 'conditions are met', 'flags contain', bracket "
+            "tags like [SCENE]/[ANIMAL]/[NOTES], scene state codes "
+            "(small_group, single_animal, etc.), query strings like "
+            "'Query: ...', post-upload analysis jargon, 'detected' twice. "
+            "Use everyday words ('a vehicle is visible', 'two zebras are "
+            "drinking', 'a lion is resting near the waterhole'). No emoji, "
+            "no markdown, no quotes around technical terms. Max 180 chars.\n\n"
+            f"Alert label: {label}\n"
+            f"Severity (1=info, 2=notable, 3=urgent): {tier}\n"
+            f"Raw text the system generated:\n{raw_explanation[:1500]}"
         )
         out = coll.generate_text(prompt=prompt, model_name="basic")
         if isinstance(out, dict):
@@ -331,12 +332,19 @@ async def send_alert(
             "Configure it in .env or pass chat_id explicitly."
         )
 
-    # Optional GenAI rewrite of the explanation. Only worth the round-
-    # trip when the raw text contains bracket-tagged AI dump — manual /
-    # rtstream-fired alerts already have clean explanations and bypass.
+    # GenAI rewrite of the explanation. Fires on ANY non-trivial
+    # explanation regardless of whether it's bracket-tagged Path-B
+    # output or VideoDB event-engine prose. Both read robotically out
+    # of the box (the event engine echoes the alert's prompt verbatim:
+    # "The alert context specifies triggering when 'flags contain
+    # human_made_object_visible AND the time is night'..."). The
+    # rewriter converts both into a one-line ranger-friendly sentence.
+    #
+    # Skipped only when explanation is short (<40 chars — already
+    # human-readable) or empty.
     final_explanation = explanation
-    has_brackets = bool(explanation) and "[" in (explanation or "")
-    if use_genai and has_brackets and _COLL_GETTER is not None:
+    rich_enough = bool(explanation) and len(explanation or "") >= 40
+    if use_genai and rich_enough and _COLL_GETTER is not None:
         try:
             import asyncio as _asyncio
 
