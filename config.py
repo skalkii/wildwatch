@@ -13,7 +13,7 @@ STREAMS: dict[str, dict[str, object]] = {
         # bore.pub:13005 — current docker bridge session. Remote port
         # changes on every `docker compose down/up`; update here OR
         # override via WILDWATCH_RTSP_NAMIBIA env at bootstrap time.
-        "rtsp_url": "rtsp://bore.pub:13005/namibia",
+        "rtsp_url": "rtsp://bore.pub:32589/namibia",
         "youtube_url": "https://www.youtube.com/watch?v=AeMUdOPFcXI",
         "use_bridge": True,
         "location_context": "Namib Desert waterhole, Gondwana Namibia Park",
@@ -29,7 +29,7 @@ STREAMS: dict[str, dict[str, object]] = {
     },
     "wild_africa_live": {
         "name": "Hwange Waterhole (Wilderness Linkwasha)",
-        "rtsp_url": "rtsp://bore.pub:13005/hwange",
+        "rtsp_url": "rtsp://bore.pub:32589/hwange",
         # Old vr4o_AsrU1k went offline 2026-05-16; swapped to Africam's Hwange
         # Linkwasha 24/7 cam which is reliably live and matches the waterhole prompt
         # orientation. Zimbabwe reserve, still inside the rotating-reserves context.

@@ -57,7 +57,11 @@ echo "  output: rtsp://localhost:8554/${STREAM_SLUG}"
 echo "Press Ctrl+C to stop."
 echo
 
-streamlink "$YOUTUBE_URL" best -O \
+# RTSP requires AAC with global headers — YouTube HLS streams ship
+# raw AAC frames that fail "with no global headers is currently not
+# supported". Re-encode audio (cheap); keep video as a stream copy.
+streamlink --stream-segment-timeout 30 "$YOUTUBE_URL" best -O \
   | ffmpeg -hide_banner -loglevel warning -re -i pipe:0 \
-           -c copy -f rtsp -rtsp_transport tcp \
+           -c:v copy -c:a aac -b:a 96k -ar 44100 \
+           -f rtsp -rtsp_transport tcp \
            "rtsp://localhost:8554/${STREAM_SLUG}"

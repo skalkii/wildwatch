@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import videodb  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from config import FALLBACK_RTSP  # noqa: E402
+from config import FALLBACK_RTSP, STREAMS  # noqa: E402
 from wildwatch.events import EVENT_DEFINITIONS  # noqa: E402
 from wildwatch.prompts import format_prompt  # noqa: E402
 from wildwatch.wiring import wire_alerts  # noqa: E402
@@ -314,10 +314,66 @@ def main() -> int:
         _wire_alerts(rt, indexes, events_map, base_url, state, stream_key, ws_connection_id=ws_id)
         _save_state(state)
 
+        # 4. Wire every additional stream in config.STREAMS that has an
+        # rtsp_url set. These keep running after the script exits (they
+        # are NOT stopped in the finally below — that only affects the
+        # fallback_intruder rt). Operator-managed lifecycle.
+        extra_rts: list = []
+        for sk, scfg in STREAMS.items():
+            rtsp = scfg.get("rtsp_url")
+            if not rtsp:
+                continue
+            ctx = {
+                "location_context": str(scfg.get("location_context", sk)),
+                "species_list": str(scfg.get("species_list", "")),
+                "expected_sounds": str(scfg.get("expected_sounds", "")),
+            }
+            print(f"\n[stream {sk}] wiring {rtsp}")
+            cached = state.get("rtstreams", {}).get(sk, {}).get("id")
+            srt = None
+            sindexes: dict[str, object] = {}
+            if cached:
+                try:
+                    e = coll.get_rtstream(cached)
+                    if getattr(e, "status", None) != "stopped":
+                        print(f"  reusing cached rtstream {cached}")
+                        rebuilt: dict[str, object] = {}
+                        for kind, idx_id in state["rtstreams"][sk].get("indexes", {}).items():
+                            rebuilt[kind] = e.get_scene_index(idx_id)
+                        srt = e
+                        sindexes = rebuilt
+                except Exception as exc:
+                    print(f"  cached rtstream gone ({exc}); provisioning new")
+            if srt is None:
+                try:
+                    srt, sindexes = _bootstrap_stream(coll, sk, rtsp, ctx, ws_connection_id=ws_id)
+                except Exception as exc:
+                    print(f"  _bootstrap_stream failed for {sk}: {exc}")
+                    continue
+            state.setdefault("rtstreams", {})[sk] = {
+                "id": srt.id,
+                "url": rtsp,
+                "indexes": {
+                    kind: getattr(idx, "rtstream_index_id", None) or getattr(idx, "id", "?")
+                    for kind, idx in sindexes.items()
+                },
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+            _save_state(state)
+            try:
+                _wire_alerts(srt, sindexes, events_map, base_url, state, sk, ws_connection_id=ws_id)
+                _save_state(state)
+                extra_rts.append((sk, srt))
+            except Exception as exc:
+                print(f"  wire_alerts failed for {sk}: {exc}")
+
         if args.observe > 0:
             print(f"\nobserving {args.observe}s for any alerts to fire ...")
             time.sleep(args.observe)
     finally:
+        # Only stop fallback_intruder. Operator-added streams stay
+        # running so live alerts continue past script exit; user disconnects
+        # them via the dashboard's Sources tab.
         if rt is not None and not args.no_stop:
             try:
                 rt.stop()

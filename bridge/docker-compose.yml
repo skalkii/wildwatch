@@ -17,7 +17,14 @@ services:
   mediamtx:
     image: bluenviron/mediamtx:latest
     container_name: wildwatch-mediamtx
-    network_mode: host
+    # Port mapping (NOT network_mode: host) so the macOS host can
+    # actually reach localhost:8554 — Docker Desktop's host networking
+    # only works inside its Linux VM and doesn't expose container
+    # ports to the macOS host.
+    ports:
+      - "8554:8554"   # RTSP
+      - "1935:1935"   # RTMP
+      - "8889:8889"   # WebRTC HTTP (optional)
     environment:
       - MTX_PROTOCOLS=tcp
     restart: unless-stopped
@@ -25,11 +32,12 @@ services:
   bore:
     image: ekzhang/bore:latest
     container_name: wildwatch-bore
-    network_mode: host
-    # `bore local 8554 --to bore.pub` forwards localhost:8554 to a
-    # public bore.pub:<remote_port>. Remote port changes per restart;
-    # grep `docker compose logs bore | grep "listening at"` for it.
-    command: ["local", "8554", "--to", "bore.pub"]
+    # `bore local 8554 --to bore.pub` forwards mediamtx:8554 to a
+    # public bore.pub:<remote_port>. Use the docker network (not
+    # host) so this container resolves `mediamtx` by service name.
+    # Remote port changes per restart; read it from:
+    #   docker compose -f bridge/docker-compose.yml logs bore | grep "listening at"
+    command: ["local", "--local-host", "mediamtx", "8554", "--to", "bore.pub"]
     restart: unless-stopped
     depends_on:
       - mediamtx
