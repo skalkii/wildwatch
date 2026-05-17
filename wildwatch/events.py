@@ -21,12 +21,39 @@ from typing import Literal, TypedDict
 # at definition time rather than a KeyError mid-bootstrap.
 IndexKind = Literal["species", "behavior", "environment", "audio"]
 
+# Closed set of the 18 id_var values used by EVENT_DEFINITIONS and
+# INDEX_EVENT_MAP. Typing id_var as this Literal turns a definition-time
+# typo (e.g. "gunshot_" with a trailing underscore) into a static error
+# rather than a runtime KeyError mid-bootstrap. Adding a new event
+# requires adding its id_var here AND in EVENT_DEFINITIONS — two-line
+# friction that prevents desync.
+EventIdVar = Literal[
+    "rare_species",
+    "mixed_aggregation",
+    "juvenile_present",
+    "large_aggregation",
+    "predator_activity",
+    "parental_care",
+    "welfare_concern",
+    "notable_social",
+    "mortality_event",
+    "human_intrusion_visual",
+    "camera_health",
+    "water_critical",
+    "gunshot",
+    "chainsaw",
+    "human_intrusion_audio",
+    "alarm_call",
+    "predator_vocal",
+    "acoustic_silence",
+]
+
 
 class EventDefinition(TypedDict):
     """One row in EVENT_DEFINITIONS — typed so a typo in any literal becomes
     a static error rather than a runtime KeyError at bootstrap time."""
 
-    id_var: str
+    id_var: EventIdVar
     label: str
     tier: Literal[1, 2, 3]
     prompt: str
@@ -189,7 +216,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
 
 # Wire-up matrix: which events attach to which index kind.
 # Bootstrap walks this map and calls index.create_alert() per (stream, kind, event_id).
-INDEX_EVENT_MAP: dict[IndexKind, list[str]] = {
+INDEX_EVENT_MAP: dict[IndexKind, list[EventIdVar]] = {
     "species": ["rare_species", "mixed_aggregation", "juvenile_present", "large_aggregation"],
     "behavior": ["predator_activity", "parental_care", "welfare_concern", "notable_social"],
     "environment": ["mortality_event", "human_intrusion_visual", "camera_health", "water_critical"],
