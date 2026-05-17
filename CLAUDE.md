@@ -134,6 +134,8 @@ wildwatch/
 │   ├── prompts.py            # Prompt loader + per-stream context formatter
 │   ├── sandbox.py            # Shared sandbox lifecycle
 │   ├── sdk_pool.py           # Process-wide VideoDB conn cache (RLock-guarded)
+│   ├── rate_limit.py         # Per-IP upload token bucket (extracted from webhooks)
+│   ├── billing.py            # Credit-burn estimator for the Usage tab (DI'd)
 │   ├── event_log.py          # Streaming append-only JSONL alert log
 │   ├── state_io.py           # Atomic .state.json writes (O_NOFOLLOW + fsync)
 │   ├── telegram.py           # Bot API: send_alert + send_digest + QuickChart chart URLs

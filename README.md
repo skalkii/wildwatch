@@ -248,7 +248,7 @@ See [`docs/GENAI_ROADMAP.md`](docs/GENAI_ROADMAP.md) for the full discussion. Su
 ## Security defences (applied automatically)
 
 - **CSRF / Origin guard** — every mutating `/api/*` request needs an `Origin`/`Referer` matching `localhost` / `127.0.0.1` / `0.0.0.0` (or a host in `WILDWATCH_ALLOWED_ORIGINS`). `/webhook/*` is exempt. CLI clients can set `WILDWATCH_ALLOW_NO_ORIGIN=1`.
-- **SSRF guard on URL ingest** — `SourceCreate.input` runs through a per-kind scheme allowlist (rtsp→rtsp://, youtube→youtube.com/youtu.be only, etc.) + regex-blocks private + link-local hosts (127., 10., 192.168., 172.16-31., 169.254., ::1, fe80::, fc00::/fd00::). `file:` / `gopher:` / `javascript:` rejected outright.
+- **SSRF guard on URL ingest** — `SourceCreate.input` runs through a per-kind scheme allowlist (rtsp→rtsp://, youtube→youtube.com/youtu.be only, etc.). `_host_is_private(host)` layers stdlib `ipaddress` parsing over a regex so loopback / private / link-local / unspecified IPs are blocked in **both** textual (`127.0.0.1`) AND IPv4-mapped IPv6 (`::ffff:127.0.0.1`) notation. `file:` / `gopher:` / `javascript:` rejected outright.
 - **Optional webhook auth** — set `WILDWATCH_WEBHOOK_SECRET=…` to require `X-WildWatch-Secret` on `/webhook/{tier}` (verified via `hmac.compare_digest`). Unset → loud startup WARNING that the endpoint accepts anyone (back-compat for localhost-only demo). Path-B sweep + correlation runner read the same env var and forward the header.
 - **Payload length caps** — `AlertPayload` + `SourceCreate` fields capped (label 256, explanation 8000, etc.) so a single attacker call can't flood the event log + SSE feed.
 - **Upload rate limit** — `POST /api/sources/upload` is token-bucketed per client IP (capacity 3, refill 1/min). Set `WILDWATCH_TRUSTED_PROXY=1` behind nginx / Cloudflare / ALB so the bucket reads `X-Forwarded-For`.
@@ -295,6 +295,8 @@ wildwatch/
 │   ├── telegram.py      #   Bot API: send_alert (per-event) + send_digest (daily album)
 │   │                    #     QuickChart.io chart PNGs via sendMediaGroup
 │   ├── sdk_pool.py      #   Process-wide VideoDB conn cache (_get_conn / _get_coll)
+│   ├── rate_limit.py    #   Per-IP upload token bucket (extracted from webhooks)
+│   ├── billing.py       #   Credit-burn estimator (DI'd, callable from CLI)
 │   └── static/
 │       └── dashboard.html  #   Single-page UI: HTML+CSS+JS (loaded via importlib.resources)
 │   ├── post_upload_analysis.py  # Path-B sweep (Telegram on uploaded clips)
