@@ -160,17 +160,62 @@ def pick_top_events(
     return sorted(events, key=_key)[:top_n]
 
 
-def pick_corpus_video_id(tier: int, corpus_state: dict[str, dict]) -> str | None:
-    """Return the video_id of the best corpus clip for ``tier``, or None."""
+def pick_corpus_video_id(
+    tier: int,
+    corpus_state: dict[str, dict],
+    skip: set[str] | None = None,
+) -> str | None:
+    """Return the video_id of the best corpus clip for ``tier``, or None.
+
+    ``skip`` excludes video_ids that have already been determined to be
+    unusable (e.g. an upload with no video stream — VideoDB raises
+    ``Invalid request: Video info not available for video_id`` when the
+    Timeline tries to render it). The fallback loop walks every other
+    slug + every other corpus entry before giving up.
+    """
+    skip = skip or set()
     for slug in TIER_SLUG_PREFERENCE.get(tier, []):
         entry = corpus_state.get(slug)
-        if entry and entry.get("video_id"):
+        if entry and entry.get("video_id") and entry["video_id"] not in skip:
             return entry["video_id"]
-    # Fallback: any corpus video
+    # Fallback: any corpus video not on the skip list.
     for entry in corpus_state.values():
-        if entry.get("video_id"):
-            return entry["video_id"]
+        vid = entry.get("video_id")
+        if vid and vid not in skip:
+            return vid
     return None
+
+
+def _video_has_info(conn: Any, vid_id: str, cache: dict[str, bool]) -> bool:
+    """True if VideoDB can render this video into a Timeline.
+
+    Touches ``video.length`` — the attribute that triggers the
+    server-side video_info lookup. Audio-only uploads, corrupt files,
+    and deleted videos all surface here as the same
+    ``Invalid request: Video info not available`` error.
+    """
+    if vid_id in cache:
+        return cache[vid_id]
+    try:
+        v = conn.get_collection().get_video(vid_id)
+        _ = v.length
+        cache[vid_id] = True
+        return True
+    except Exception as e:
+        msg = str(e)
+        if "Video info not available" in msg or "video_info" in msg.lower():
+            logger.warning(
+                "digest: skipping corpus video %s — no video_info on VideoDB",
+                vid_id,
+            )
+        else:
+            logger.warning(
+                "digest: probe failed for %s (%s); skipping",
+                vid_id,
+                type(e).__name__,
+            )
+        cache[vid_id] = False
+        return False
 
 
 _TIER_OVERLAY = {
@@ -222,11 +267,30 @@ def build_timeline(
 
     cursor = 0
     n_clips = 0
+    video_info_cache: dict[str, bool] = {}
+    skip_ids: set[str] = set()
     for ev in events:
         tier = int(ev.get("tier", 1))
-        vid_id = pick_corpus_video_id(tier, corpus_state)
+        # Walk every preferred corpus slug + fallback list, skipping any
+        # video_id whose video_info isn't available on VideoDB. Without
+        # this, one bad upload (audio-only / corrupt / deleted) crashes
+        # the entire reel at timeline.generate_stream().
+        vid_id: str | None = None
+        while True:
+            cand = pick_corpus_video_id(tier, corpus_state, skip=skip_ids)
+            if cand is None:
+                break
+            if _video_has_info(conn, cand, video_info_cache):
+                vid_id = cand
+                break
+            skip_ids.add(cand)
         if not vid_id:
-            logger.warning("digest: no corpus clip for tier=%s; skipping event", tier)
+            logger.warning(
+                "digest: no usable corpus clip for tier=%s (exhausted %d candidates); "
+                "skipping event",
+                tier,
+                len(skip_ids),
+            )
             continue
 
         # Video clip with fade in/out — skill prescribes Transition on every clip
