@@ -82,7 +82,9 @@ flowchart TD
     H2 --> I1
     H3 --> I1
     H4 --> I2[status=connecting]
-    I1 --> J[status=ready<br/>video_id stored]
+    I1 --> AI1[status=indexing<br/>_kick_off_scene_index<br/>fire-and-forget]
+    AI1 --> AI2[video.index_scenes<br/>prompt=species]
+    AI2 --> J[status=ready<br/>video_id stored]
     I2 --> J2[status=ready<br/>rtstream_id stored]
     J --> K[dashboard broadcast<br/>SSE source_progress]
     J2 --> K
@@ -105,6 +107,7 @@ flowchart TD
     - `ingest_hls`: HEAD-checks the manifest, then `coll.upload(url=...)`.
     - `ingest_rtstream`: `coll.connect_rtstream(url=..., media_types=["video","audio"], store=True)` and waits for `status="connected"`.
 13–14. **Progress states** — each handler updates the source's `status` field (`queued → connecting → ingesting → indexing → ready`) and broadcasts a `source_progress` SSE event after every change.
+14b. **Auto scene-index (uploads + URLs only)** — `ingest.py:_kick_off_scene_index(video, source_id)` fires `video.index_scenes(prompt=species, name=wildwatch-auto-<src8>)` straight after `coll.upload` succeeds. Idempotent (skips if `video.list_scene_index()` is non-empty) and best-effort (failure is logged + the source still flips to `ready`). The actual scene generation runs on VideoDB's side and shows up as `processing` → `done` when the dashboard polls `/api/videos/{id}/scenes/{index_id}`. Operators can also force a fresh index via the Re-index button (calls `POST /api/videos/{id}/reindex`) or via `python scripts/index_corpus.py` for the corpus.
 15–16. **Ready** — the source now has a `video_id` (for uploads/URLs) or `rtstream_id` (for live streams) and is searchable.
 17. **Card flips to ready** — the dashboard re-fetches `/api/sources` on `source_progress` AND on `source_deleted`, so both happy-path and rejection-path UI updates are instant.
 
@@ -112,7 +115,7 @@ flowchart TD
 
 ## Flow 3 — Search "elephant drinking"
 
-The operator types a phrase into the Indexed Content tab. Behind the scenes, VideoDB's per-scene index does the heavy lifting.
+The operator types a phrase into the Indexed Content tab. Behind the scenes, VideoDB's per-scene index does the heavy lifting — but the collection-scope path is **not** what you'd naively expect.
 
 ```mermaid
 flowchart TD
@@ -120,18 +123,27 @@ flowchart TD
     B --> C[POST /api/search]
     C --> D[webhooks.py:api_search]
     D --> E{scope?}
-    E -->|collection| F1[coll.search<br/>SearchType.semantic]
-    E -->|video| F2[v.search<br/>IndexType.scene<br/>score_threshold=0.3]
-    E -->|rtstream| F3[rt.search<br/>IndexType.scene<br/>score_threshold=0.3]
-    F1 --> G{No results?}
-    F2 --> G
+    E -->|video| F2[v.search<br/>index_type=scene<br/>search_type=semantic<br/>score_threshold=0.3]
+    E -->|rtstream| F3[rt.search<br/>index_type=scene<br/>score_threshold=0.3]
+    E -->|collection| FAN[Fan-out per video]
+    FAN --> FAN1[coll.get_videos]
+    FAN1 --> FAN2[For each video v]
+    FAN2 --> FAN3[v.list_scene_index]
+    FAN3 --> FAN4{any index<br/>status=done?}
+    FAN4 -->|no| FAN5[Skip — un-indexed video]
+    FAN4 -->|yes| FAN6[v.search<br/>index_type=scene]
+    FAN6 --> MERGE[Gather shots]
+    FAN5 --> MERGE
+    MERGE --> SORT[Sort by score desc<br/>cap at 50]
+    F2 --> G{No results?}
     F3 --> G
+    SORT --> G
     G -->|empty| H[Return shots: empty list]
-    G -->|hits| I[Map shots → JSON<br/>_shot_to_dict]
+    G -->|hits| I[Map shots → JSON<br/>_shot_to_dict<br/>+ video_id, video_name]
     I --> J[Response: shots with<br/>start, end, score, text]
     H --> J
-    J --> K[Dashboard renders<br/>scene cards]
-    K --> L[Each card:<br/>start–end, score, snippet]
+    J --> K[Dashboard renders<br/>scene cards via _renderSceneCard]
+    K --> L[Each card:<br/>state pill, animals,<br/>click to play clip]
 ```
 
 ### Node-by-node
@@ -140,12 +152,13 @@ flowchart TD
 2. **Scope picker** — three options, all rewritten in plain English on the dashboard ("Search everywhere" / "A specific uploaded video" / "A specific live stream").
 3. **POST request** — JSON body: `{query, scope, target_id?, index_id?}`.
 4. **Receiver** — `webhooks.py:api_search`.
-5. **Scope dispatch** — the right SDK method per scope. **Critical detail**: collection search only supports `SearchType.semantic` (the SDK raises `NotImplementedError` without it), and scene-level search needs `IndexType.scene` + `score_threshold` per the VideoDB skill's reference docs.
-6–8. **VideoDB returns matches** — a list of "shots" (timestamped excerpts).
-9. **Empty-result handling** — VideoDB raises an exception (not an empty list) when nothing matches. We catch the `"No results found"` string specifically and return `shots: []` so the dashboard renders a clean "no results" state.
-10. **Normalize shots** — `_shot_to_dict` extracts `start`, `end`, `score`, `text`, `scene_index_name`.
-11. **Response** — JSON to the front end.
-12–13. **Dashboard rendering** — each shot becomes a card showing `start–end · score · index name` and the matching text snippet.
+5. **Scope dispatch — video / rtstream** — call `v.search` / `rt.search` with `index_type=IndexType.scene`, `search_type=SearchType.semantic`, and `score_threshold=0.3` per the VideoDB skill's reference docs.
+6. **Scope dispatch — collection (CRITICAL)** — `coll.search` only supports `SearchType.semantic` over the **spoken-word** index (the SDK explicitly raises `NotImplementedError` for keyword/scene at collection level). Wildlife clips have no transcripts → `coll.search` always returns zero. The skill's prescription is: *"For keyword or scene search, use `video.search()` on individual videos instead."* So collection-scope search **fans out**: enumerate `coll.get_videos()`, filter to videos whose `v.list_scene_index()` has at least one entry in `{ready, done, complete, completed, indexed}`, and call `v.search(index_type=scene, search_type=semantic, score_threshold=0.3)` on each — concurrently via `asyncio.gather`.
+7. **Merge + rank** — gather all per-video shots into one list, sort by score descending, cap to `result_threshold` (default 50). Each shot is backfilled with `video_id` + `video_name` so the dashboard can show "which video did this match" and route a click-to-play to the right segment.
+8. **Empty-result handling** — VideoDB raises a custom exception when nothing matches (string contains `"No results found"`). The fan-out catches this per-video and treats it as `[]` so one un-matching video doesn't blow up the whole sweep.
+9. **Normalize shots** — `_shot_to_dict` extracts `start`, `end`, `score`, `text`, `scene_index_name`, `scene_index_id`.
+10. **Response** — `{scope, shots, videos_searched?}` JSON to the front end.
+11. **Dashboard rendering** — `dashboard.py:search-go` reuses `_renderSceneCard(synthetic, idx, video_id)` so each search hit reads the same as a scene in the Indexed Content tab — bracket-tagged AI text turns into pills (light mode, scene state, animal count) + per-animal rows + notes, and the card is clickable into the modal HLS player (Flow 9).
 
 ---
 
@@ -361,6 +374,51 @@ flowchart TD
 11. **Save state** — `wildwatch/state_io.py:atomic_write_json` writes `.state.json` durably.
 12. **Observe loop** — if `--observe > 0`, sleeps that many seconds while alerts may fire.
 13. **Teardown** — `rt.stop()` and `rt.refresh()` unless `--no-stop` is set.
+
+---
+
+## Flow 9 — Click a scene card → modal video player
+
+Every scene card (both in the Indexed Content tab and in search results) is clickable. Tap it and the matching segment of the video plays inline in a modal — no new tabs, no raw m3u8 manifests, no rabbit-holing into VideoDB's player URL scheme.
+
+```mermaid
+flowchart TD
+    A[User clicks scene card<br/>data-action=play-scene-clip] --> B[Central click dispatcher<br/>dashboard.py]
+    B --> C[playSceneClip&#40;videoId, start, end&#41;]
+    C --> D[showToast 'Generating clip URL…']
+    D --> E[GET /api/videos/&#123;id&#125;/clip<br/>?start=...&end=...]
+    E --> F[webhooks.py:api_video_clip]
+    F --> G{end-start<br/>≤ 600s?}
+    G -->|no| H1[400 segment too long]
+    G -->|yes| H2[coll.get_video]
+    H2 --> H3[video.generate_stream<br/>timeline=&#91;&#40;start,end&#41;&#93;]
+    H3 --> I[m3u8 manifest URL]
+    I --> J[Response: stream_url]
+    J --> K[_openClipPlayer&#40;url, title&#41;]
+    K --> L{Safari?}
+    L -->|yes| M1[video.src = url<br/>native HLS]
+    L -->|no| M2[Hls.isSupported&#40;&#41;?]
+    M2 -->|yes| M3[new Hls&#40;&#41;<br/>loadSource + attachMedia]
+    M2 -->|no| M4[showToast 'HLS not supported']
+    M1 --> N[Modal opens<br/>video controls autoplay]
+    M3 --> N
+    N --> O[Esc / backdrop / X<br/>cleanup hls + dom]
+```
+
+### Node-by-node
+
+1. **Click target** — every scene card is rendered with `data-action="play-scene-clip"`, `data-video-id`, `data-start`, `data-end` attributes via `_renderSceneCard(sc, idx, videoId)` in `dashboard.py`.
+2. **Central dispatcher** — a single delegated click listener (`document.addEventListener('click', ...)`) walks `e.target.closest('[data-action]')` and switches on `t.dataset.action`. `play-scene-clip` calls `playSceneClip(videoId, start, end)`.
+3. **`playSceneClip(videoId, start, end)`** — shows an in-flight toast (`showToast(msg, {variant:'info', duration:0})`), then fetches the clip URL.
+4. **`GET /api/videos/{id}/clip`** — query params `start` and `end`. Rejects `end <= start` (400) and segments longer than 600s (400 — scenes are seconds, not hours).
+5. **`webhooks.py:api_video_clip`** — looks up the video via `_async_sdk(coll.get_video, ...)` and calls `_async_sdk(video.generate_stream, timeline=[(start, end)])`. The SDK returns a fresh HLS manifest scoped to that interval.
+6. **Response** — `{video_id, start, end, stream_url}` JSON.
+7. **`_openClipPlayer(url, title)`** — builds a modal DOM: backdrop overlay + card with `<video controls autoplay playsinline>` + close button + manifest fallback link.
+8. **HLS branch — Safari** — `<video>` natively plays `application/vnd.apple.mpegurl`, so set `video.src = url` directly.
+9. **HLS branch — every other browser** — load `hls.js@1.5.13` (CDN'd alongside Tailwind), construct `new Hls({ maxBufferLength: 30 })`, `loadSource(url)`, `attachMedia(video)`. Fatal player errors surface through `showToast`.
+10. **Cleanup** — Esc, X button, or clicking the backdrop calls `cleanup()`: destroys the hls.js instance, pauses + nullifies `<video>` src, removes the DOM nodes, detaches the keydown listener. No leaked players, no leaked media decoders.
+
+> **Why a modal player and not `window.open(m3u8)`?** Raw m3u8 manifests don't render in plain browser tabs (no built-in HLS in Chrome/Firefox; Safari downloads it). Embedding hls.js inside the dashboard gives the operator inline playback with controls and looks like a real ops tool instead of a "here's a download" flow.
 
 ---
 

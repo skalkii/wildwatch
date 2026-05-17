@@ -156,7 +156,7 @@ The judges built VideoDB around three layers: **See, Understand, Act**. Most sub
 | Act | `conn.create_event(event_prompt=..., label=...)` | Defined ONCE, reused across both streams (this is the design intent). |
 | Act | `index.create_alert(event_id, callback_url=...)` | Webhooks → FastAPI → Telegram with clip URL. |
 | Act | `conn.connect_websocket()` | Live dashboard channel for the demo. |
-| Act | `rtstream.generate_stream(start, end)` | Generate playable clip URLs to attach to alerts. |
+| Act | `rtstream.generate_stream(start, end)` / `video.generate_stream(timeline=[(start,end)])` | Playable clip URLs — attached to alerts AND served via `GET /api/videos/{id}/clip` for dashboard scene-card click-to-play (hls.js modal). |
 | Act | Programmable editing | Auto-generate daily highlight reel from flagged shots. |
 
 **If your code only uses 4–5 of these, you're at "shallow" depth. WildWatch uses all 10.**

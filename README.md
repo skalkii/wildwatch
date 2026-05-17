@@ -167,8 +167,8 @@ Open `http://localhost:8000/`. Four tabs:
 | Tab | What it does |
 |---|---|
 | **Alerts** | Live SSE feed of every event the webhook receives. Per-tier counters. Manual 🟢🟡🔴 fire buttons. RTStream + Sandbox state panels. |
-| **Sources** | Add any source: file upload (≤500 MB), URL (YouTube / HLS), or RTSP/RTMP. Each card shows live status (`queued` → `connecting` → `ingesting` → `ready`). Per-card Reconnect / Disconnect / Delete. |
-| **Indexed Content** | Browse every uploaded video, its scene indexes, and recent scene records. Cross-scope search (collection / video / rtstream) with score-ranked results. |
+| **Sources** | Add any source: file upload (≤500 MB), URL (YouTube / HLS), or RTSP/RTMP. Each card shows live status (`queued` → `connecting` → `ingesting` → `indexing` → `ready`). Uploads auto-trigger a scene index so the clip is searchable without a CLI step. Per-card Reconnect / Disconnect / Delete. |
+| **Indexed Content** | Browse every uploaded video, its scene indexes, and recent scene records. Bracket-tagged AI output renders as friendly cards (light-mode pill, scene-state pill, per-animal rows). Every scene card is clickable → opens an inline HLS player on the matching segment. Re-index button for backfilling old uploads. Cross-scope search (collection / video / rtstream) with score-ranked results that fan out across per-video scene indexes (collection-scope search hits scene indexes, not just transcripts). |
 | **Usage** | Local upper-bound credit-burn estimate (hours × rate) + raw `conn.check_usage()` SDK output + recent invoices. |
 
 ### Add a source from the UI

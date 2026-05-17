@@ -128,18 +128,32 @@ def test_rtstream_indexes_normalises_objects(client: TestClient, mock_coll: Magi
     assert r.json()["indexes"][0]["name"] == "audio"
 
 
-def test_search_collection_returns_normalised_shots(
+def test_search_collection_fans_out_per_video_scene_index(
     client: TestClient, mock_coll: MagicMock
 ) -> None:
-    result = MagicMock()
-    result.shots = [_shot_mock("oryx at water")]
-    mock_coll.search = MagicMock(return_value=result)
+    # api_search collection scope now fans out to v.search per video
+    # because coll.search only hits the spoken-word index and wildlife
+    # clips have no transcripts. Each video with a `ready` scene index
+    # gets queried and results are merged + sorted by score.
+    v1 = _video_mock("a")
+    v1.list_scene_index = MagicMock(return_value=[{"status": "ready"}])
+    r1 = MagicMock()
+    r1.shots = [_shot_mock("oryx at water")]
+    v1.search = MagicMock(return_value=r1)
+
+    v2 = _video_mock("b")
+    v2.list_scene_index = MagicMock(return_value=[])  # no index → skipped
+    v2.search = MagicMock(side_effect=AssertionError("should not search"))
+
+    mock_coll.get_videos = MagicMock(return_value=[v1, v2])
 
     r = client.post("/api/search", json={"query": "oryx", "scope": "collection"})
     assert r.status_code == 200
     body = r.json()
     assert body["scope"] == "collection"
+    assert body["videos_searched"] == 2
     assert body["shots"][0]["text"] == "oryx at water"
+    assert body["shots"][0]["video_id"] == "a"
 
 
 def test_search_video_requires_target_id(client: TestClient, mock_coll: MagicMock) -> None:

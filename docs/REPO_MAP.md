@@ -58,6 +58,7 @@ wildwatch/
 │   ├── run_correlation.py     # Run the cross-modal reasoning loop
 │   ├── build_corpus.py        # Pull sample clips into VideoDB for offline iteration
 │   ├── upload_corpus.py       # Helper to push corpus clips
+│   ├── index_corpus.py        # Bulk scene-index every corpus video + smoke-test search
 │   ├── iterate_prompt.py      # Test a single prompt against one clip (no rtstream cost)
 │   ├── start_live_test.py     # Run a live waterhole stream end-to-end
 │   ├── event_smoke.py         # Smoke test: events get created
@@ -106,16 +107,16 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Why it exists | VideoDB needs a public URL to POST alerts to. The same server also powers the dashboard so we don't run two processes. |
 | Key technology | FastAPI (Python web framework), `aiofiles` (async file uploads), `videodb` Python SDK. |
 | Who runs it | `uvicorn wildwatch.webhooks:app --port 8000` — what `docker-compose up` and the quickstart `Path B` both invoke. |
-| Notable bits | `_get_conn()` / `_get_coll()` cache the VideoDB connection (process-wide, RLock-guarded). `_async_sdk()` wraps every blocking SDK call in a 4-worker thread pool + per-call `asyncio.wait_for` deadline. Pool tracks `_sdk_in_flight`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. CancelledError (client disconnect) defers the slot release via `cf_fut.add_done_callback` so the counter doesn't leak. Origin/CSRF middleware blocks cross-origin mutating requests. Upload route adds magic-byte sniff + per-IP rate-limit + 413/415 `source_deleted` broadcast. |
+| Notable bits | `_get_conn()` / `_get_coll()` cache the VideoDB connection (process-wide, RLock-guarded). `_async_sdk()` wraps every blocking SDK call in a 4-worker thread pool + per-call `asyncio.wait_for` deadline. Pool tracks `_sdk_in_flight`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. CancelledError (client disconnect) defers the slot release via `cf_fut.add_done_callback` so the counter doesn't leak. Origin/CSRF middleware blocks cross-origin mutating requests. Upload route adds magic-byte sniff + per-IP rate-limit + 413/415 `source_deleted` broadcast. `/` dashboard route serves with `Cache-Control: no-store` so a hard-refresh always picks up fresh JS. **Scene endpoints:** `GET /api/videos/{id}/scenes/{index_id}` lists indexes first and short-circuits when status ≠ `done`, dodging the SDK hang on a still-processing index. `POST /api/videos/{id}/reindex` triggers a fresh `index_scenes` without deleting prior indexes. `GET /api/videos/{id}/clip?start=&end=` returns a playable HLS manifest via `video.generate_stream(timeline=[(start,end)])` for the dashboard's scene-card click-to-play. **Search fan-out:** `POST /api/search` with `scope=collection` no longer calls `coll.search` (which only hits the spoken-word index and returns 0 for transcript-less wildlife clips). Instead it enumerates `coll.get_videos()`, filters to videos with a `done` scene index, and fans out concurrent per-video `v.search(index_type=scene, score_threshold=0.3)` calls — merging + ranking by score. |
 
 ### 3.2 `dashboard.py` — the live single-page UI
 
 | What it is | The entire HTML, CSS, and JavaScript for the operator dashboard, served as one big string from a single endpoint. |
 | --- | --- |
 | Why it exists | Real-time operators (rangers, ecologists, judges) need a window into what the AI is seeing right now. A single-page app means no build step, no separate front-end repo. |
-| Key technology | Tailwind CSS via CDN, vanilla JavaScript, Server-Sent Events (SSE) for live push. Inline SVG favicon. Dark/light theme with CSS variables. |
+| Key technology | Tailwind CSS via CDN, **hls.js** for in-modal HLS playback, vanilla JavaScript, Server-Sent Events (SSE) for live push. Inline SVG favicon. Dark/light theme with CSS variables. |
 | Who reads it | Anyone who opens `http://localhost:8000/`. |
-| Notable bits | Four tabs (Alerts, Sources, Indexed Content, Usage). Tab state persists in `localStorage` + URL hash. Every label is rewritten in plain English for non-tech viewers. The Usage tab does the live `cost_metric × usage` math so you can see exactly where credits went. |
+| Notable bits | Four tabs (Alerts, Sources, Indexed Content, Usage). Tab state persists in `localStorage` + URL hash. Every label is rewritten in plain English for non-tech viewers. The Usage tab does the live `cost_metric × usage` math so you can see exactly where credits went. **Scene card renderer:** `_parseSceneText` turns the bracket-tagged AI output (`[SCENE] light_mode=daylight; total=1; state=single_animal [ANIMAL] species=oryx; …`) into friendly cards with light-mode pills, scene-state pills, per-animal rows (`oryx ×1 · adult · walking…`), and a notes line — used both inside the Indexed Content tab and inside the search results so search hits read the same way. Every scene card is clickable → opens a modal HLS player via `_openClipPlayer(url)` that uses Safari-native HLS or falls back to hls.js. **Toast system:** `showToast(msg, {variant})` (info/success/warn/error) and `confirmToast(msg, {title})` replace `window.alert`/`window.confirm` — used by re-index, clip-fetch, and any future async UX. |
 
 ### 3.3 `sources.py` — the source registry
 
@@ -133,7 +134,7 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Why it exists | YouTube needs `yt-dlp` to grab a downloadable URL. RTSP can be handed to `coll.connect_rtstream()` directly. Local files use `coll.upload(file_path=)`. Each path has different failure modes that the dashboard needs to surface. |
 | Key technology | `yt-dlp` (YouTube), `httpx` (URL probe), `videodb` SDK. |
 | Who runs it | A background task spawned by the `/api/sources` endpoint when you add a source. |
-| Notable bits | Every progress transition is broadcast to the dashboard via Server-Sent Events so the card animates in real time. |
+| Notable bits | Every progress transition is broadcast to the dashboard via Server-Sent Events so the card animates in real time. **Auto scene-index on upload:** after `coll.upload` succeeds, `_kick_off_scene_index(video, source_id)` fires `video.index_scenes(prompt=species)` so the clip becomes searchable without the operator running a CLI script. The call is idempotent (skips if any scene index already exists) and best-effort (a failure is logged but never propagates — the upload is still useful). Source status pulses through `connecting → ingesting → indexing → ready` so the dashboard explains what's happening. |
 
 ### 3.5 `events.py` — the 18 alert definitions
 
@@ -253,6 +254,7 @@ These are the executable entry points. You run them, they do one thing, they exi
 
 - **`build_corpus.py`** — Walks `samples/triggers/manifest.json` and uploads every clip to VideoDB so the digest builder has a pool to draw from.
 - **`upload_corpus.py`** — One-off uploader for arbitrary clips.
+- **`index_corpus.py`** — Bulk re-indexer for every video in `state["corpus"]`. Lists each video's existing scene indexes, creates a fresh one with the species prompt if none exists, polls until `done`, then runs a `v.search(query="any animal", index_type=scene)` smoke test so you can verify the index actually answers queries. Idempotent — re-running skips already-indexed videos. Useful for backfilling videos uploaded before auto-indexing existed, or when an auto-index kickoff failed silently. Per-slug filter via `--slug <name>`.
 - **`iterate_prompt.py`** — The cheapest dev loop: runs a single prompt against a recorded clip (no rtstream cost). Used during prompt iteration.
 
 ### Smoke tests (verify one thing at a time)

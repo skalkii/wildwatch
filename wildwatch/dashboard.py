@@ -227,6 +227,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     })();
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -792,6 +793,92 @@ function safeUrl(u) {
   return ''; // anything else (javascript:, data:, vbscript:, file:) → drop
 }
 
+// ──── Toast notifications (vanilla react-toastify-style) ─────────────────
+// Reusable, dismissable, auto-fading cards stacked in the bottom-right.
+// Replaces window.alert / window.confirm — those break tab focus and look
+// like a phishing dialog. Variants: info | success | warn | error.
+
+const _TOAST_VARIANT = {
+  info:    { color: '#38bdf8', icon: 'i'  },
+  success: { color: '#10b981', icon: '&check;'  },
+  warn:    { color: '#f59e0b', icon: '!'  },
+  error:   { color: '#ef4444', icon: '&times;'  },
+};
+
+function _ensureToastStack() {
+  let stack = document.getElementById('toast-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
+    stack.style.cssText = 'position:fixed; right:1rem; bottom:1rem; display:flex; flex-direction:column; gap:0.5rem; z-index:9999; max-width:22rem;';
+    document.body.appendChild(stack);
+  }
+  return stack;
+}
+
+function showToast(message, opts = {}) {
+  const variant = _TOAST_VARIANT[opts.variant] || _TOAST_VARIANT.info;
+  const stack = _ensureToastStack();
+  const card = document.createElement('div');
+  card.className = 'card-soft';
+  card.style.cssText = `padding:0.6rem 0.8rem; border-left:3px solid ${variant.color}; box-shadow:0 8px 24px rgba(0,0,0,0.18); transform:translateY(6px); opacity:0; transition:transform 180ms ease, opacity 180ms ease;`;
+  card.innerHTML = `<div class="flex items-start gap-2">
+    <span class="pill mono" style="color:${variant.color}; background:color-mix(in oklab,${variant.color} 14%,transparent); border-color:color-mix(in oklab,${variant.color} 30%,transparent); flex-shrink:0;">${variant.icon}</span>
+    <div class="text-[12.5px] flex-1">${escapeHtml(message)}</div>
+    <button class="text-[11px] faint" style="background:none; border:none; cursor:pointer; padding:0 0.25rem; line-height:1;" aria-label="dismiss">&times;</button>
+  </div>`;
+  stack.appendChild(card);
+  requestAnimationFrame(() => { card.style.transform = 'translateY(0)'; card.style.opacity = '1'; });
+  const dismiss = () => {
+    card.style.transform = 'translateY(6px)';
+    card.style.opacity = '0';
+    setTimeout(() => card.remove(), 200);
+  };
+  card.querySelector('button').addEventListener('click', dismiss);
+  const ttl = opts.duration ?? 4000;
+  if (ttl > 0) setTimeout(dismiss, ttl);
+  return { dismiss, card };
+}
+
+// Replacement for window.confirm — returns a Promise<boolean>. Renders a
+// styled card in the centre with Confirm / Cancel buttons. Keyboard:
+// Enter confirms, Esc cancels.
+function confirmToast(message, opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:10000;';
+    const card = document.createElement('div');
+    card.className = 'card-soft';
+    card.style.cssText = 'padding:1rem 1.25rem; max-width:26rem; box-shadow:0 16px 48px rgba(0,0,0,0.4);';
+    const title = opts.title || 'Are you sure?';
+    const confirmLabel = opts.confirmLabel || 'Confirm';
+    const cancelLabel = opts.cancelLabel || 'Cancel';
+    const danger = opts.danger ? '#ef4444' : 'var(--accent)';
+    card.innerHTML = `<div class="text-sm font-semibold mb-1">${escapeHtml(title)}</div>
+      <div class="text-[12.5px] muted mb-3" style="white-space:pre-line;">${escapeHtml(message)}</div>
+      <div class="flex justify-end gap-2">
+        <button data-act="cancel" class="btn" style="padding:0.4rem 0.85rem; font-size:12px;">${escapeHtml(cancelLabel)}</button>
+        <button data-act="ok" class="btn btn-primary" style="padding:0.4rem 0.85rem; font-size:12px; background:${danger}; border-color:${danger};">${escapeHtml(confirmLabel)}</button>
+      </div>`;
+    overlay.appendChild(card);
+    const close = (result) => {
+      document.removeEventListener('keydown', keyHandler);
+      overlay.remove();
+      resolve(result);
+    };
+    const keyHandler = (e) => {
+      if (e.key === 'Escape') close(false);
+      if (e.key === 'Enter')  close(true);
+    };
+    document.addEventListener('keydown', keyHandler);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    card.querySelector('[data-act=cancel]').addEventListener('click', () => close(false));
+    card.querySelector('[data-act=ok]').addEventListener('click', () => close(true));
+    document.body.appendChild(overlay);
+    card.querySelector('[data-act=ok]').focus();
+  });
+}
+
 function renderEvent(ev) {
   const tier = ev.tier || 0;
   const streamUrl = safeUrl(ev.stream_url);
@@ -1170,20 +1257,237 @@ async function showVideoDetail(videoId) {
 }
 
 async function reindexVideo(videoId) {
-  if (!confirm('Trigger a fresh scene index for this video?\\n\\nVideoDB will re-read every frame. This costs credits and takes a few minutes.')) return;
-  const el = $('content-detail');
-  el.innerHTML = `<span class="faint">requesting fresh scene index for ${escapeHtml(videoId)} …</span>`;
+  const ok = await confirmToast(
+    'VideoDB will re-read every frame on this video. This costs credits and takes a few minutes.',
+    { title: 'Re-run scene indexing?', confirmLabel: 'Re-index', cancelLabel: 'Cancel' }
+  );
+  if (!ok) return;
+  const progress = showToast(`Requesting fresh scene index for ${videoId.slice(0, 12)}…`, { variant: 'info', duration: 0 });
   try {
     const r = await fetch(`/api/videos/${videoId}/reindex`, { method: 'POST' });
     const d = await r.json();
+    progress.dismiss();
     if (!r.ok) {
-      el.innerHTML = `<div class="card-soft p-4" style="color:#ef4444">re-index failed: ${escapeHtml(d.detail || JSON.stringify(d))}</div>`;
+      showToast(`Re-index failed: ${d.detail || JSON.stringify(d)}`, { variant: 'error', duration: 6000 });
       return;
     }
+    showToast(d.message || 'Fresh scene index requested. Indexing runs in the background.', { variant: 'success', duration: 5000 });
     // Reload the detail panel so the new processing index appears.
     showVideoDetail(videoId);
   } catch (e) {
-    el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`;
+    progress.dismiss();
+    showToast(`Network error: ${e}`, { variant: 'error', duration: 6000 });
+  }
+}
+
+// ──── Scene parsing + rendering ─────────────────────────────────────────
+// The species prompt produces bracket-tagged output:
+//   [SCENE] light_mode=daylight; total=12; state=large_aggregation
+//   [ANIMAL] species=oryx; count=12; age_sex=unknown; position=...
+//   [NOTES] free-text observation
+// Render it as friendly tagged cards rather than the raw raw text.
+
+function _parseSceneText(raw) {
+  // Returns {scene:{light_mode,total,state}, animals:[{species,count,age_sex,position}], notes:string}.
+  const out = {scene: null, animals: [], notes: null};
+  if (!raw) return out;
+  // Split on each [TAG] marker. Tags can appear on the same line or new
+  // lines; either way each bracketed group starts a fresh segment.
+  const tokens = raw.split(/(\\[[A-Z_]+\\])/).map(s => s.trim()).filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    const m = tokens[i].match(/^\\[([A-Z_]+)\\]$/);
+    if (!m) continue;
+    const tag = m[1];
+    const body = (tokens[i+1] || '').replace(/^\\s*[:;,]\\s*/, '').trim();
+    if (tag === 'SCENE')   out.scene = _parseKVList(body);
+    if (tag === 'ANIMAL')  out.animals.push(_parseKVList(body));
+    if (tag === 'NOTES')   out.notes = (out.notes ? out.notes + ' ' : '') + body;
+  }
+  return out;
+}
+
+function _parseKVList(s) {
+  // "key=value; key=value" → {key: value}. Tolerates the trailing
+  // semicolons VideoDB sometimes emits and stripped values.
+  const out = {};
+  s.split(/[;\\n]/).forEach(part => {
+    const ix = part.indexOf('=');
+    if (ix < 0) return;
+    const k = part.slice(0, ix).trim();
+    const v = part.slice(ix + 1).trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+function _fmtSec(v) {
+  // 10.01 → "10.0s", 100.1 → "1m 40s", 197.397 → "3m 17s".
+  const n = Number(v);
+  if (!isFinite(n)) return String(v ?? '');
+  if (n < 60) return `${n.toFixed(1)}s`;
+  const m = Math.floor(n / 60);
+  const s = Math.round(n % 60);
+  return `${m}m ${s}s`;
+}
+
+const _SCENE_STATE_PILL = {
+  empty:               ['Empty',           '#94a3b8'],
+  single_animal:       ['Single animal',   '#38bdf8'],
+  small_group:         ['Small group',     '#10b981'],
+  large_aggregation:   ['Large aggregation','#f59e0b'],
+  mixed_species:       ['Mixed species',   '#a78bfa'],
+};
+
+const _LIGHT_MODE_PILL = {
+  daylight:        ['☀️ Day',     '#f59e0b'],
+  golden_hour:     ['🌅 Golden',  '#f59e0b'],
+  dawn:            ['🌄 Dawn',    '#fb923c'],
+  dusk:            ['🌆 Dusk',    '#fb923c'],
+  ir_night:        ['🌙 IR night', '#60a5fa'],
+  low_light:       ['🌑 Low light','#64748b'],
+  low_light_color: ['🌑 Low light','#64748b'],
+};
+
+function _statePill(state) {
+  const key = String(state || '').toLowerCase();
+  const [label, color] = _SCENE_STATE_PILL[key] || [state || '—', '#94a3b8'];
+  return `<span class="pill" style="color:${color}; background:color-mix(in oklab,${color} 14%,transparent); border-color:color-mix(in oklab,${color} 30%,transparent);">${escapeHtml(label)}</span>`;
+}
+
+function _lightPill(mode) {
+  const key = String(mode || '').toLowerCase();
+  const [label, color] = _LIGHT_MODE_PILL[key] || [mode || '—', '#94a3b8'];
+  return `<span class="pill" style="color:${color}; background:color-mix(in oklab,${color} 14%,transparent); border-color:color-mix(in oklab,${color} 30%,transparent);">${escapeHtml(label)}</span>`;
+}
+
+function _renderAnimalRow(a) {
+  const species = a.species ? a.species.replace(/_/g, ' ') : 'unknown';
+  const count = a.count || '?';
+  const ageSex = a.age_sex && a.age_sex !== 'unknown' ? a.age_sex : null;
+  const pos = a.position || '';
+  const isUncertain = /^possibly|unidentified/i.test(species);
+  const speciesColor = isUncertain ? 'var(--text-faint)' : 'var(--text)';
+  return `<div class="flex items-baseline gap-2 text-[12.5px]">
+    <span class="font-medium" style="color:${speciesColor}">${escapeHtml(species)}</span>
+    <span class="faint">&times;${escapeHtml(String(count))}</span>
+    ${ageSex ? `<span class="faint">· ${escapeHtml(ageSex)}</span>` : ''}
+    ${pos ? `<span class="faint truncate" title="${escapeHtml(pos)}">· ${escapeHtml(pos)}</span>` : ''}
+  </div>`;
+}
+
+function _renderSceneCard(sc, idx, videoId) {
+  const start = sc.start ?? 0;
+  const end = sc.end ?? 0;
+  const text = (sc.description || sc.text || '').toString();
+  const parsed = _parseSceneText(text);
+  const scene = parsed.scene || {};
+  const state = scene.state || (parsed.animals.length === 0 ? 'empty' : '—');
+  const total = scene.total || (parsed.animals.length || 0);
+  const lightMode = scene.light_mode;
+  const animals = parsed.animals;
+  const isEmpty = state === 'empty' || animals.length === 0;
+  // Empty scenes get a muted card; populated scenes get an accent border
+  // tinted by state colour so the eye picks out aggregations / mixed.
+  const [, stateColor] = _SCENE_STATE_PILL[state] || ['—', 'var(--accent)'];
+  // If the parser didn't recover anything structured AND text is present,
+  // show the cleaned raw text as a fallback so the operator can still read
+  // the AI output instead of seeing a bare card.
+  const parsedNothing = !parsed.scene && animals.length === 0 && !parsed.notes;
+  const fallback = parsedNothing && text
+    ? `<div class="text-[12.5px] mt-2">${escapeHtml(text.slice(0, 600))}</div>`
+    : '';
+  const clickable = videoId && Number.isFinite(Number(start)) && Number.isFinite(Number(end)) && Number(end) > Number(start);
+  const clickAttrs = clickable
+    ? ` role="button" tabindex="0" data-action="play-scene-clip" data-video-id="${escapeHtml(videoId)}" data-start="${start}" data-end="${end}" style="cursor:pointer; border-left:3px solid ${isEmpty ? 'var(--border)' : stateColor}" title="Click to play this scene"`
+    : ` style="border-left:3px solid ${isEmpty ? 'var(--border)' : stateColor}"`;
+  const playHint = clickable
+    ? '<span class="pill" style="color:var(--accent); background:color-mix(in oklab,var(--accent) 14%,transparent); border-color:color-mix(in oklab,var(--accent) 30%,transparent);">&#9658; Play</span>'
+    : '';
+
+  return `<div class="card-soft p-3 mb-2 scene-card hover:translate-y-[-1px] transition"${clickAttrs}>
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+      <div class="flex items-center gap-2">
+        <span class="text-[11px] faint mono">#${idx}</span>
+        <span class="text-sm font-semibold">Scene</span>
+        <span class="text-[11px] faint mono">${_fmtSec(start)} &ndash; ${_fmtSec(end)}</span>
+      </div>
+      <div class="flex items-center gap-1.5 flex-wrap">
+        ${lightMode ? _lightPill(lightMode) : ''}
+        ${_statePill(state)}
+        ${total && total !== '0' ? `<span class="pill" style="color:var(--text); background:var(--bg-soft); border-color:var(--border);">${escapeHtml(String(total))} animals</span>` : ''}
+        ${playHint}
+      </div>
+    </div>
+    ${animals.length > 0 ? `<div class="mt-2 space-y-1">${animals.map(_renderAnimalRow).join('')}</div>` : ''}
+    ${isEmpty && animals.length === 0 && !fallback ? '<div class="text-[12px] faint mt-1">No animals visible in this segment.</div>' : ''}
+    ${fallback}
+    ${parsed.notes ? `<div class="text-[11.5px] muted mt-2 border-t divider pt-1.5"><span class="faint">Notes:</span> ${escapeHtml(parsed.notes)}</div>` : ''}
+  </div>`;
+}
+
+function _openClipPlayer(streamUrl, title) {
+  // Modal HLS player. m3u8 manifests don't play in plain <video> tags on
+  // most desktop browsers — Safari handles HLS natively, every other
+  // browser needs hls.js to demux the manifest. Load both paths.
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.78); display:flex; align-items:center; justify-content:center; z-index:10000; padding:1rem;';
+  const card = document.createElement('div');
+  card.className = 'card-soft';
+  card.style.cssText = 'padding:0.75rem; max-width:min(960px, 95vw); width:100%;';
+  card.innerHTML = `<div class="flex items-center justify-between mb-2">
+    <div class="text-sm font-semibold">${escapeHtml(title || 'Scene clip')}</div>
+    <button data-act="close" class="text-[12px] faint" style="background:none; border:none; cursor:pointer;" aria-label="close">&times; close</button>
+  </div>
+  <video controls autoplay playsinline style="width:100%; max-height:70vh; background:#000; border-radius:6px;"></video>
+  <div class="text-[11px] faint mt-2 mono break-all"><a class="link" href="${escapeHtml(streamUrl)}" target="_blank" rel="noopener">Open manifest in new tab &nearr;</a></div>`;
+  overlay.appendChild(card);
+  document.body.appendChild(card.parentElement === overlay ? overlay : overlay);
+  const video = card.querySelector('video');
+  let hls = null;
+  const cleanup = () => {
+    if (hls) try { hls.destroy(); } catch (e) {}
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    overlay.remove();
+    document.removeEventListener('keydown', keyHandler);
+  };
+  const keyHandler = (e) => { if (e.key === 'Escape') cleanup(); };
+  document.addEventListener('keydown', keyHandler);
+  card.querySelector('[data-act=close]').addEventListener('click', cleanup);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+
+  if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari native HLS.
+    video.src = streamUrl;
+  } else if (window.Hls && window.Hls.isSupported()) {
+    hls = new window.Hls({ maxBufferLength: 30 });
+    hls.loadSource(streamUrl);
+    hls.attachMedia(video);
+    hls.on(window.Hls.Events.ERROR, (_, data) => {
+      if (data.fatal) {
+        showToast(`Player error: ${data.type}/${data.details}`, { variant: 'error', duration: 5000 });
+      }
+    });
+  } else {
+    showToast('HLS not supported in this browser. Use the manifest link.', { variant: 'warn', duration: 6000 });
+  }
+}
+
+async function playSceneClip(videoId, start, end) {
+  const progress = showToast('Generating clip URL…', { variant: 'info', duration: 0 });
+  try {
+    const r = await fetch(`/api/videos/${videoId}/clip?start=${start}&end=${end}`);
+    const d = await r.json();
+    progress.dismiss();
+    if (!r.ok || !d.stream_url) {
+      showToast(`Clip failed: ${d.detail || 'no stream URL'}`, { variant: 'error', duration: 5000 });
+      return;
+    }
+    _openClipPlayer(d.stream_url, `${videoId.slice(0, 12)}… · ${start}s &ndash; ${end}s`);
+  } catch (e) {
+    progress.dismiss();
+    showToast(`Error: ${e}`, { variant: 'error', duration: 5000 });
   }
 }
 
@@ -1220,19 +1524,9 @@ async function showVideoScenes(videoId, indexId) {
       pane.innerHTML = header + `<div class="card-soft p-3 text-sm faint">No scenes returned. The video may be too short for the configured batch size.</div>`;
       return;
     }
-    pane.innerHTML = header + scenes.map((sc, i) => {
-      const start = sc.start ?? '';
-      const end = sc.end ?? '';
-      const text = (sc.description || sc.text || '').toString();
-      const idx = i + 1;
-      return `<div class="card-soft p-2.5 mb-1.5" style="border-left:3px solid var(--accent)">
-        <div class="flex items-center justify-between gap-2 text-[11px] faint">
-          <span>Scene ${idx}</span>
-          <span class="mono">${escapeHtml(String(start))}s &ndash; ${escapeHtml(String(end))}s</span>
-        </div>
-        <div class="text-sm mt-1" style="color:var(--text)">${escapeHtml(text.slice(0, 320))}${text.length > 320 ? '…' : ''}</div>
-      </div>`;
-    }).join('');
+    pane.innerHTML = header + scenes.map((sc, i) =>
+      _renderSceneCard(sc, i + 1, videoId)
+    ).join('');
   } catch (e) { pane.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
@@ -1257,11 +1551,23 @@ $('search-go').addEventListener('click', async () => {
     if (!r.ok) { $('search-results').innerHTML = `<span style="color:#ef4444">${escapeHtml(d.detail || 'error')}</span>`; return; }
     const shots = d.shots || [];
     if (shots.length === 0) { $('search-results').innerHTML = '<span class="faint">no results</span>'; return; }
-    $('search-results').innerHTML = `<div class="text-[11px] faint mb-1">${shots.length} shot(s) in <span class="muted">${escapeHtml(d.scope)}</span> scope</div>` +
-      shots.map(sh => `<div class="card-soft p-2.5">
-        <div class="text-[11px] faint mono">${escapeHtml(String(sh.start ?? ''))}&ndash;${escapeHtml(String(sh.end ?? ''))} &middot; score=${sh.score?.toFixed?.(2) ?? '?'} &middot; idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id || '')}</div>
-        <div class="text-sm mt-1">${escapeHtml((sh.text || '').slice(0, 300))}</div>
-      </div>`).join('');
+    const headerBits = [`${shots.length} shot(s) in <span class="muted">${escapeHtml(d.scope)}</span> scope`];
+    if (d.videos_searched != null) headerBits.push(`across ${d.videos_searched} video(s)`);
+    $('search-results').innerHTML = `<div class="text-[11px] faint mb-1">${headerBits.join(' &middot; ')}</div>` +
+      shots.map((sh, i) => {
+        // Reuse the scene parser/renderer so bracket-tagged text turns
+        // into the same human-readable card used in the Indexed Content tab.
+        const vid = sh.video_id;
+        const synthetic = {
+          start: sh.start,
+          end: sh.end,
+          description: sh.text || '',
+        };
+        const card = _renderSceneCard(synthetic, i + 1, vid);
+        const src = sh.video_name || sh.video_id || sh.rtstream_id || '';
+        const meta = `<div class="text-[11px] faint mt-1">score=${sh.score?.toFixed?.(2) ?? '?'}${src ? ` &middot; ${escapeHtml(src)}` : ''}${sh.scene_index_name || sh.scene_index_id ? ` &middot; idx ${escapeHtml(sh.scene_index_name || sh.scene_index_id)}` : ''}</div>`;
+        return `<div class="mb-2">${card}${meta}</div>`;
+      }).join('');
   } catch (e) { $('search-results').innerHTML = `<span style="color:#ef4444">${escapeHtml(String(e))}</span>`; }
 });
 
@@ -1629,6 +1935,13 @@ document.addEventListener('click', (e) => {
     case 'show-scenes':     showVideoScenes(id, idx); break;
     case 'reindex-video':   reindexVideo(id); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
+    case 'play-scene-clip': {
+      const v = t.dataset.videoId;
+      const s = parseFloat(t.dataset.start);
+      const e2 = parseFloat(t.dataset.end);
+      if (v && isFinite(s) && isFinite(e2)) playSceneClip(v, s, e2);
+      break;
+    }
   }
 });
 

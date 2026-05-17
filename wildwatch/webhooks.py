@@ -627,8 +627,17 @@ async def receive_alert(
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard_index() -> str:
-    return dashboard.get_dashboard_html()
+def dashboard_index() -> HTMLResponse:
+    # Disable browser caching of the SPA shell — every save during the
+    # hackathon needs to reach the user on hard-refresh without the
+    # stale-cache foot-gun.
+    return HTMLResponse(
+        content=dashboard.get_dashboard_html(),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.get("/api/stats")
@@ -1240,6 +1249,35 @@ async def api_video_reindex(video_id: str) -> dict:
     }
 
 
+@app.get("/api/videos/{video_id}/clip")
+async def api_video_clip(video_id: str, start: float, end: float) -> dict:
+    """Return a playable stream URL for a [start, end] segment of a video.
+
+    Used by the dashboard's scene cards — clicking a scene calls this
+    and opens the returned URL in a new tab. The SDK call
+    ``video.generate_stream(timeline=[(start, end)])`` returns a fresh
+    m3u8 manifest scoped to that range.
+    """
+    if end <= start:
+        raise HTTPException(status_code=400, detail="end must be > start")
+    if end - start > 600:  # 10 min cap — scenes are seconds, not hours
+        raise HTTPException(status_code=400, detail="segment too long")
+    try:
+        coll = await _async_sdk(_get_coll, timeout_s=10.0)
+        video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
+    try:
+        url = await _async_sdk(
+            video.generate_stream,
+            timeout_s=15.0,
+            timeline=[(float(start), float(end))],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"generate_stream failed: {e}") from e
+    return {"video_id": video_id, "start": start, "end": end, "stream_url": url}
+
+
 @app.get("/api/rtstreams/{rt_id}/indexes")
 async def api_rtstream_indexes(rt_id: str) -> dict:
     try:
@@ -1551,8 +1589,12 @@ async def api_search(req: SearchRequest) -> dict:
     """Search across collection/video/rtstream scopes.
 
     Skill conformance (video-db/skills · search-reference.md):
-      - Collection search only supports ``SearchType.semantic`` — pass it
-        explicitly; otherwise the SDK raises ``NotImplementedError``.
+      - ``coll.search`` only hits the spoken-word index — wildlife clips
+        have no transcripts so a naive ``coll.search`` returns nothing.
+        Per the skill: "For keyword or scene search, use video.search()
+        on individual videos instead." So collection-scope search
+        FANS OUT across every video with a ready scene index and runs
+        ``video.search(index_type=scene)`` on each, then merges by score.
       - Video/rtstream scene search needs ``index_type=IndexType.scene`` +
         a ``score_threshold`` so noise gets filtered.
       - The SDK raises a custom error on empty results (string contains
@@ -1572,19 +1614,57 @@ async def api_search(req: SearchRequest) -> dict:
             out.update(extra)
         return out
 
+    _READY = {"ready", "indexed", "complete", "completed", "done"}
+
+    async def _video_scene_search(v: Any, query: str) -> list[dict]:
+        """Search one video's scene index. Returns shots or empty list."""
+        try:
+            idxs = await _async_sdk(v.list_scene_index, timeout_s=8.0) or []
+        except Exception as e:
+            logger.debug("collection-search: list_scene_index failed for %s: %r", v.id, e)
+            return []
+        ready = [i for i in idxs if str(i.get("status", "")).lower() in _READY]
+        if not ready:
+            return []
+        kwargs: dict[str, Any] = {"query": query, "score_threshold": 0.3}
+        if IndexType is not None:
+            kwargs["index_type"] = IndexType.scene
+        if SearchType is not None:
+            kwargs["search_type"] = SearchType.semantic
+        try:
+            result = await _async_sdk(v.search, timeout_s=10.0, **kwargs)
+        except Exception as e:
+            if "No results found" in str(e):
+                return []
+            logger.debug("collection-search: v.search failed for %s: %r", v.id, e)
+            return []
+        raw = getattr(result, "shots", None) or []
+        out = []
+        for s in raw:
+            d = _shot_to_dict(s)
+            # The SDK shot omits video_id; backfill so the dashboard can
+            # link each hit to its source video.
+            d.setdefault("video_id", v.id)
+            if d.get("video_id") is None:
+                d["video_id"] = v.id
+            d["video_name"] = getattr(v, "name", None)
+            out.append(d)
+        return out
+
     try:
         if req.scope == "collection":
-            kwargs: dict[str, Any] = {"query": req.query}
-            if SearchType is not None:
-                kwargs["search_type"] = SearchType.semantic
-            try:
-                result = await _async_sdk(coll.search, timeout_s=10.0, **kwargs)
-            except Exception as e:
-                if "No results found" in str(e):
-                    return _empty("collection")
-                raise
-            shots = getattr(result, "shots", None) or []
-            return {"scope": "collection", "shots": [_shot_to_dict(s) for s in shots]}
+            videos = await _async_sdk(coll.get_videos, timeout_s=15.0) or []
+            # Fan out — concurrent per-video scene search.
+            tasks = [_video_scene_search(v, req.query) for v in videos]
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            shots: list[dict] = [s for chunk in results for s in chunk]
+            shots.sort(key=lambda s: s.get("score") or 0.0, reverse=True)
+            cap = req.result_threshold or 50
+            return {
+                "scope": "collection",
+                "shots": shots[:cap],
+                "videos_searched": len(videos),
+            }
 
         if req.scope == "video":
             if not req.target_id:
