@@ -48,7 +48,11 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 from wildwatch import dashboard, event_log, ingest, sources  # noqa: E402
-from wildwatch.telegram import configure_coll_getter, send_alert  # noqa: E402
+from wildwatch.telegram import (  # noqa: E402
+    configure_coll_getter,
+    genai_friendly_explanation,
+    send_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -583,15 +587,57 @@ async def receive_alert(
     tier: Annotated[int, Path(ge=1, le=3, description="Alert tier 1=info, 2=notable, 3=urgent")],
     payload: AlertPayload,
 ) -> dict:
-    # Log the alert BEFORE attempting Telegram delivery so the digest
-    # builder still sees the event even if Telegram is down.
+    # GenAI rewrite ONCE at the front, then use the friendly text for
+    # every downstream consumer (event_log, dashboard SSE, Telegram).
+    # Previously the rewrite only ran inside send_alert, so the dashboard
+    # showed raw bracket-tagged / event-engine prose and Telegram got
+    # the clean version — those need to match. Skipped for short text
+    # (<40 chars) since it's already readable.
+    # Preserve None when explanation is missing — don't coerce to "" or
+    # the downstream test contract breaks ("expected explanation=None").
+    final_expl: str | None = payload.explanation
+    if payload.explanation and len(payload.explanation) >= 40:
+        try:
+            coll = await _async_sdk(_get_coll, timeout_s=5.0)
+            rewritten = await asyncio.wait_for(
+                asyncio.to_thread(
+                    genai_friendly_explanation,
+                    coll,
+                    tier,
+                    payload.label,
+                    payload.explanation,
+                ),
+                timeout=12.0,
+            )
+            if rewritten:
+                final_expl = rewritten
+                logger.info(
+                    "receive_alert: genai rewrite applied for %s",
+                    payload.event_id,
+                )
+            else:
+                logger.warning(
+                    "receive_alert: genai rewrite returned None for %s — "
+                    "using raw text. Check VideoDB generate_text response shape.",
+                    payload.event_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "receive_alert: genai rewrite failed for %s: %r — using raw text",
+                payload.event_id,
+                e,
+            )
+
+    # Persist the rewritten text so the dashboard, digest builder, and
+    # any future analytics see the human-readable form. Keep the raw
+    # text as a sibling field for debugging.
     record: dashboard.AlertEvent = {
         "received_at": time.time(),
         "tier": tier,
         "label": payload.label,
         "event_id": payload.event_id,
         "confidence": payload.confidence,
-        "explanation": payload.explanation,
+        "explanation": final_expl,
         "timestamp": payload.timestamp,
         "start_time": payload.start_time,
         "end_time": payload.end_time,
@@ -602,23 +648,22 @@ async def receive_alert(
     except Exception:
         logger.exception("event_log.append failed; alert will still attempt delivery")
 
-    # Push to the in-memory dashboard broadcaster (SSE subscribers + stats).
     try:
         dashboard.broadcast(record)
     except Exception:
         logger.exception("dashboard.broadcast failed (non-fatal)")
 
     try:
+        # use_genai=False — the rewrite already happened above, no
+        # second round-trip needed.
         await send_alert(
             tier=tier,
             label=payload.label,
-            explanation=payload.explanation,
+            explanation=final_expl,
             stream_url=payload.stream_url,
+            use_genai=False,
         )
     except Exception as e:
-        # Log with full traceback so the operator can see WHY a VideoDB
-        # callback didn't reach the phone. Re-raise as 500 so VideoDB's
-        # retry logic engages (it backs off + retries on 5xx).
         logger.exception(
             "send_alert failed for tier=%s label=%s event_id=%s",
             tier,

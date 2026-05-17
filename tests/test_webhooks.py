@@ -31,6 +31,10 @@ def client() -> TestClient:
 def mock_send(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     m = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(wh_mod, "send_alert", m)
+    # Bypass the GenAI rewrite so tests assert against the raw
+    # explanation text. Real path runs `coll.generate_text` which
+    # would make tests flaky + slow + need a live VideoDB connection.
+    monkeypatch.setattr(wh_mod, "genai_friendly_explanation", lambda *a, **k: None)
     return m
 
 

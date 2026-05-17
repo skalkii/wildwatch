@@ -233,7 +233,7 @@ def build_message(
     return "\n".join(parts)
 
 
-def _genai_friendly_explanation(
+def genai_friendly_explanation(
     coll: Any,
     tier: int,
     label: str,
@@ -268,8 +268,11 @@ def _genai_friendly_explanation(
             f"Raw text the system generated:\n{raw_explanation[:1500]}"
         )
         out = coll.generate_text(prompt=prompt, model_name="basic")
+        # VideoDB's generate_text returns `{"output": "..."}` for
+        # response_type="text" (the default). Older / future versions
+        # may use `text` / `response`. Look at every known shape.
         if isinstance(out, dict):
-            out = out.get("text") or out.get("response") or ""
+            out = out.get("output") or out.get("text") or out.get("response") or ""
         out = (out or "").strip()
         if not out:
             return None
@@ -351,7 +354,7 @@ async def send_alert(
             coll = await _asyncio.wait_for(_asyncio.to_thread(_COLL_GETTER), timeout=5.0)
             rewritten = await _asyncio.wait_for(
                 _asyncio.to_thread(
-                    _genai_friendly_explanation, coll, tier, label, explanation or ""
+                    genai_friendly_explanation, coll, tier, label, explanation or ""
                 ),
                 timeout=8.0,
             )
