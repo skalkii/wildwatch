@@ -140,15 +140,37 @@ Services spun:
 ### Path B — Local dev (faster iteration)
 
 ```bash
+# 1. Set up Python env + fill .env (TELEGRAM_*, VIDEO_DB_API_KEY)
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env  # fill creds
+cp .env.example .env
 
-uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 &  # dashboard
-mediamtx bridge/mediamtx.yml &                                  # RTSP relay (brew install mediamtx)
-bore local 8554 --to bore.pub &                                 # public RTSP tunnel
-cloudflared tunnel --url http://localhost:8000 &                # public webhook URL
+# 2. Public webhook URL for VideoDB callbacks. Copy the printed
+#    *.trycloudflare.com URL into .env as WEBHOOK_BASE_URL.
+cloudflared tunnel --url http://localhost:8000
+
+# 3. RTSP bridge (only needed for live wildlife streams). One
+#    docker compose brings up mediamtx (port 8554) + bore (public
+#    bore.pub tunnel — read the remote port from bore container logs).
+docker compose -f bridge/docker-compose.yml up -d
+docker compose -f bridge/docker-compose.yml logs bore | grep "listening at"
+
+# 4. Per live stream, pump YouTube → RTSP via streamlink+ffmpeg
+#    (brew install streamlink ffmpeg). Repeat for each source.
+./bridge/start_bridge.sh "https://www.youtube.com/watch?v=..." namibia
+
+# 5. Dashboard + API
+uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 --reload
+
+# 6. (Optional) Wire live AI events: bootstrap iterates every
+#    config.STREAMS entry with rtsp_url + adds the VideoDB sample
+#    intruder cam. Idempotent on rerun.
+python scripts/bootstrap.py --observe 300 --no-stop
 ```
+
+Then add the bore RTSP URL (`rtsp://bore.pub:<port>/<slug>`) as a new
+RTSP source from the dashboard's +Add modal — that's where the
+operator-facing flow starts.
 
 > **Security & limits notes** — applied automatically; see `.env.example` for the env vars:
 >
@@ -168,8 +190,8 @@ Open `http://localhost:8000/`. Four tabs:
 |---|---|
 | **Alerts** | Live SSE feed of every event the webhook receives. Per-tier counters. Manual 🟢🟡🔴 fire buttons. RTStream + Sandbox state panels. |
 | **Sources** | Add any source: file upload (≤500 MB), URL (YouTube archive / HLS), or RTSP/RTMP. Each card shows live status (`queued` → `connecting` → `ingesting` → `indexing` → `ready`). Uploads auto-trigger BOTH a visual scene index (species) AND an audio index, then a background sweep searches each index for gunshot / chainsaw / rare-species / alarm-call patterns and fires Telegram alerts on hits — no cloudflared tunnel needed. **Live YouTube URLs:** VideoDB only accepts `rtsp://` / `rtmp://` for live streams. Run `docker compose -f bridge/docker-compose.yml up -d` (mediamtx + bore) + `./bridge/start_bridge.sh "<url>" <slug>`, then add the printed `rtsp://bore.pub:<port>/<slug>` as a new RTSP source. Per-kind actions: live streams get **Reconnect / Disconnect / Delete**; uploaded files and URL sources get **Re-index / Delete**. |
-| **Indexed Content** | Browse every uploaded video, its scene + audio indexes, and recent scene records. The Library panel has a sticky toolbar (filter by name/id, sort by name/length/id, kind filter) with the list scrolling inside the card. Per-row delete button removes the video from VideoDB. Each index card carries a "Visual / Audio / Environment / Behavior" pill so the operator knows which AI lens produced it. Bracket-tagged AI output renders as friendly cards — visual scenes show light-mode + scene-state + animal rows, audio segments show category (🦁 Biophony / 💨 Geophony / ⚠️ Anthropogenic) + signal pills (alarm call, predator vocal, abnormal silence) + per-sound rows with border-colour escalating for anthropogenic events. Every scene card is clickable → opens an inline HLS player on the matching segment. **Three re-index buttons:** "Re-index video" (visual only), "Re-index audio" (purges stuck audio indexes + rebuilds — only works if the clip has a transcript, since VideoDB's `index_audio` is transcript-based), and "Both". Cross-scope search (collection / video / rtstream) with score-ranked results that fan out across per-video scene indexes. |
-| **Usage** | Local upper-bound credit-burn estimate (hours × rate) + raw `conn.check_usage()` SDK output + recent invoices. |
+| **Indexed Content** | Browse every uploaded video and active rtstream, their scene + audio indexes, and recent scene records. **Library shows only currently-ingesting rtstreams** (rtstream.status must be running AND the source row must be `ready`). Sticky toolbar (filter by name/id, sort by name/length/id, kind filter); list scrolls inside the card. Per-row delete button (videos only). Each index card carries a "Visual / Audio / Environment / Behavior" pill. **Audio-blocked clips** (silent / SFX-only) get an amber "no speech — skipped" pill + Remove button instead of a misleading "processing" — VideoDB's `index_audio` is transcript-based and hangs forever without speech (see `docs/GENAI_ROADMAP.md` Phase 7). Bracket-tagged AI output renders as friendly scene cards (visual + audio variants); every card is clickable → inline HLS player. Three re-index buttons: video / audio / both. Search input has a ✕ clear button. Cross-scope search fans out across per-video scene indexes. |
+| **Usage** | Three stacked cards in this order: **(1) What we're paying for right now (local estimate)** — hours × hourly rate per running resource; **(2) Recent activity (VideoDB invoices)** — top 10 line-items billed; **(3) Real VideoDB billing this period** — live `conn.check_usage()` output with credit balance + per-resource breakdown. Technical-details collapsible at the bottom for raw SDK output. |
 
 ### Add a source from the UI
 
