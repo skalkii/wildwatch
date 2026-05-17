@@ -186,6 +186,150 @@ def pick_corpus_video_id(
     return None
 
 
+def compute_analytics(events: list[dict]) -> dict:
+    """Aggregate event-log records into chart-ready analytics.
+
+    Returns one dict the dashboard renders as a panel of KPIs + charts.
+    All shapes are list-of-pairs (label, count) so the JS can feed
+    them straight into Chart.js without re-shaping. Pure function —
+    no SDK / no IO.
+
+    Surfaces (per UX brainstorm):
+      - tier_counts: 3-up KPI row (info/notable/urgent).
+      - total: hero number.
+      - top_labels: ranked horizontal bar — what fired most.
+      - hourly: 24-slot bar — daily rhythm of activity.
+      - species: top 8 species donut (parsed from labels + explanations).
+      - light_modes: day vs night vs IR pie (parsed from explanations).
+      - categories: visual / audio / threat counts.
+    """
+    import re
+    from collections import Counter
+
+    tier_counts = {1: 0, 2: 0, 3: 0}
+    label_counter: Counter[str] = Counter()
+    species_counter: Counter[str] = Counter()
+    hourly = [0] * 24
+    light_modes: Counter[str] = Counter()
+    categories = {"visual": 0, "audio": 0, "threat": 0, "behaviour": 0, "environment": 0}
+
+    # Vocab keys for category bucketing — keep aligned with the event
+    # labels defined in wildwatch/events.py.
+    _AUDIO_LABELS = {
+        "POACHING_ALERT_GUNSHOT",
+        "ILLEGAL_LOGGING_ALERT",
+        "human_intrusion_audio",
+        "alarm_call_detected",
+        "predator_vocalization",
+        "acoustic_anomaly_silence",
+    }
+    _THREAT_LABELS = {
+        "POACHING_ALERT_GUNSHOT",
+        "ILLEGAL_LOGGING_ALERT",
+        "potential_human_intrusion_visual",
+        "human_intrusion_audio",
+        "mortality_event",
+    }
+    _BEHAV_LABELS = {
+        "predator_activity",
+        "parental_care",
+        "welfare_concern",
+        "notable_social_behavior",
+    }
+    _ENV_LABELS = {
+        "mortality_event",
+        "potential_human_intrusion_visual",
+        "camera_health_issue",
+        "water_critical",
+    }
+    # Species token harvest: scan free-text fields for ``species=X``
+    # markers (the species index's bracket-tag output format) AND a
+    # small whitelist of common-name mentions in rewritten prose.
+    _COMMON_SPECIES = {
+        "lion",
+        "leopard",
+        "elephant",
+        "rhino",
+        "buffalo",
+        "zebra",
+        "giraffe",
+        "wildebeest",
+        "impala",
+        "kudu",
+        "oryx",
+        "springbok",
+        "gemsbok",
+        "warthog",
+        "hippo",
+        "crocodile",
+        "hyena",
+        "jackal",
+        "baboon",
+        "vulture",
+        "eagle",
+        "hornbill",
+        "antelope",
+        "wild dog",
+        "cheetah",
+        "pangolin",
+    }
+    _LIGHT_RX = re.compile(
+        r"light_mode\s*=\s*(daylight|ir_night|low_light|dusk|dawn|low_light_color|golden_hour)",
+        re.I,
+    )
+    _SPECIES_TAG_RX = re.compile(r"species\s*=\s*([a-zA-Z_][\w \-]+)", re.I)
+
+    for ev in events:
+        tier = int(ev.get("tier") or 0)
+        if tier in tier_counts:
+            tier_counts[tier] += 1
+        label = ev.get("label") or ""
+        if label:
+            label_counter[label] += 1
+        if label in _AUDIO_LABELS:
+            categories["audio"] += 1
+        if label in _THREAT_LABELS:
+            categories["threat"] += 1
+        if label in _BEHAV_LABELS:
+            categories["behaviour"] += 1
+        if label in _ENV_LABELS:
+            categories["environment"] += 1
+        if label and label not in _AUDIO_LABELS and label not in _ENV_LABELS:
+            categories["visual"] += 1
+        # Hour bucket from received_at (local time good enough for demo).
+        try:
+            ts = float(ev.get("received_at") or 0)
+            if ts > 0:
+                import datetime as _dt
+
+                hourly[_dt.datetime.fromtimestamp(ts).hour] += 1
+        except (TypeError, ValueError):
+            pass
+        # Species + light_mode harvest from raw + rewritten explanation.
+        haystack = " ".join(
+            str(ev.get(k) or "") for k in ("explanation", "raw_explanation", "label")
+        ).lower()
+        for m in _SPECIES_TAG_RX.findall(haystack):
+            sp = m.strip().lower()
+            if sp and sp != "unknown" and not sp.startswith("unidentified"):
+                species_counter[sp] += 1
+        for sp in _COMMON_SPECIES:
+            if sp in haystack:
+                species_counter[sp] += 1
+        m = _LIGHT_RX.search(haystack)
+        if m:
+            light_modes[m.group(1).lower()] += 1
+    return {
+        "total": sum(tier_counts.values()),
+        "tier_counts": tier_counts,
+        "top_labels": label_counter.most_common(8),
+        "species": species_counter.most_common(8),
+        "hourly": hourly,
+        "light_modes": list(light_modes.most_common()),
+        "categories": categories,
+    }
+
+
 def _maybe_seconds(v: Any) -> float | None:
     """Coerce an event payload's start/end_time to seconds-since-video-start.
 
@@ -382,7 +526,11 @@ def build_timeline(
         video_track.add_clip(
             cursor,
             Clip(
-                asset=VideoAsset(id=vid_id, start=clip_start),
+                # volume=0 mutes the underlying clip audio so the
+                # voiceover track is the only thing the viewer hears.
+                # videodb.editor.VideoAsset (not the deprecated
+                # videodb.asset.VideoAsset) accepts ``volume`` directly.
+                asset=VideoAsset(id=vid_id, start=clip_start, volume=0),
                 duration=clip_dur,
                 transition=transition,
             ),
@@ -421,11 +569,9 @@ def build_timeline(
                 music_track.add_clip(
                     0,
                     Clip(
-                        asset=AudioAsset(
-                            id=music_id,
-                            start=0,
-                            disable_other_tracks=False,
-                        ),
+                        # Background music at low volume so the
+                        # voiceover sits clearly on top.
+                        asset=AudioAsset(id=music_id, start=0, volume=0.25),
                         duration=total,
                     ),
                 )
@@ -480,6 +626,7 @@ def build_digest(
         add_text_overlays=add_text_overlays,
         add_music=add_music,
     )
+    analytics = compute_analytics(events)
     if n_clips == 0:
         return {
             "n_events": len(events),
@@ -487,6 +634,7 @@ def build_digest(
             "stream_url": None,
             "player_url": None,
             "summary": None,
+            "analytics": analytics,
         }
 
     # ──── 1. Natural-language summary FIRST (drives voiceover script too).
@@ -561,11 +709,9 @@ def build_digest(
                 vo_track.add_clip(
                     0,
                     Clip(
-                        asset=AudioAsset(
-                            id=audio_id,
-                            start=0,
-                            disable_other_tracks=True,
-                        ),
+                        # volume=1.5 boosts the narration above the
+                        # mixer baseline. Range per SDK is 0..5.
+                        asset=AudioAsset(id=audio_id, start=0, volume=1.5),
                         duration=vo_duration,
                     ),
                 )
@@ -611,4 +757,5 @@ def build_digest(
         "stream_url": stream_url,
         "player_url": player_url,
         "summary": summary,
+        "analytics": analytics,
     }

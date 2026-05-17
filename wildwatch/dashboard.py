@@ -202,6 +202,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -1153,17 +1154,20 @@ async function buildDigest() {
     }
     const d = await r.json();
     statusEl.classList.add('hidden');
+    // Show in-app modal with reel player + analytics charts.
+    _openDigestModal(d);
+    // Tiny inline confirmation card behind the modal so the operator
+    // sees a record after they close.
     const parts = [];
-    parts.push(`<div class="muted">${d.n_clips || 0} clips from ${d.n_events || 0} events.</div>`);
-    if (d.summary) {
-      parts.push(`<div style="line-height:1.5;">${escapeHtml(d.summary)}</div>`);
-    }
+    parts.push(`<div class="muted text-[11px]">${d.n_clips || 0} clips from ${d.n_events || 0} events.</div>`);
     if (d.player_url) {
-      parts.push(`<a href="${escapeHtml(d.player_url)}" target="_blank" rel="noopener" class="btn btn-primary text-[11.5px] !py-1 !px-2.5 inline-block mt-1">▶ Play reel</a>`);
-    } else {
+      parts.push(`<button type="button" class="btn btn-primary text-[11.5px] !py-1 !px-2.5 inline-block mt-1" data-act="reopen-digest">▶ Reopen reel</button>`);
+    } else if (!d.summary) {
       parts.push('<div class="faint">No reel — event log empty and no corpus clips available.</div>');
     }
     resultEl.innerHTML = parts.join('');
+    const reopen = resultEl.querySelector('[data-act=reopen-digest]');
+    if (reopen) reopen.addEventListener('click', () => _openDigestModal(d));
     resultEl.classList.remove('hidden');
   } catch (e) {
     statusEl.textContent = `Failed: ${e.message || e}`;
@@ -2116,6 +2120,189 @@ function _openClipPlayer(streamUrl, title) {
     });
   } else {
     showToast('HLS not supported in this browser. Use the manifest link.', { variant: 'warn', duration: 6000 });
+  }
+}
+
+// ──── Daily-summary modal ────
+// Large in-app popup: hero stats, narration, in-modal HLS player,
+// and 4 visually-distinct charts (hourly bar, species donut, top-
+// labels horizontal bar, category donut). Claude-ish dark scheme,
+// monospace numbers, accent-orange for highlights.
+const _CLAUDE = {
+  bg:      '#1c1816',   // warm near-black background
+  surface: '#2a2421',   // raised card
+  border:  '#3a322d',
+  text:    '#f5efe8',
+  muted:   '#a39a8f',
+  accent:  '#cc785c',   // signature Claude amber
+  t1:      '#38bdf8',   // info — matches existing tier palette
+  t2:      '#f59e0b',   // notable
+  t3:      '#ef4444',   // urgent
+};
+const _DIGEST_CHARTS = [];
+
+function _destroyDigestCharts() {
+  while (_DIGEST_CHARTS.length) {
+    const c = _DIGEST_CHARTS.pop();
+    try { c.destroy(); } catch (e) {}
+  }
+}
+
+function _kpi(label, value, color) {
+  return `<div style="background:${_CLAUDE.surface}; border:1px solid ${_CLAUDE.border}; border-radius:10px; padding:14px 16px;">
+    <div style="font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:${_CLAUDE.muted};">${escapeHtml(label)}</div>
+    <div class="mono" style="font-size:28px; font-weight:600; color:${color || _CLAUDE.text}; margin-top:4px; line-height:1;">${escapeHtml(String(value))}</div>
+  </div>`;
+}
+
+function _chartPanel(title, canvasId, hint) {
+  return `<div style="background:${_CLAUDE.surface}; border:1px solid ${_CLAUDE.border}; border-radius:12px; padding:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px;">
+      <div style="font-size:13px; font-weight:600; color:${_CLAUDE.text};">${escapeHtml(title)}</div>
+      ${hint ? `<div style="font-size:10.5px; color:${_CLAUDE.muted};">${escapeHtml(hint)}</div>` : ''}
+    </div>
+    <div style="height:200px;"><canvas id="${canvasId}"></canvas></div>
+  </div>`;
+}
+
+function _openDigestModal(d) {
+  _destroyDigestCharts();
+  const a = d.analytics || { tier_counts: { 1: 0, 2: 0, 3: 0 }, total: 0, top_labels: [], species: [], hourly: Array(24).fill(0), categories: {} };
+  const tc = a.tier_counts || { 1: 0, 2: 0, 3: 0 };
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `position:fixed; inset:0; background:rgba(10,8,6,0.85); backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center; z-index:10000; padding:1.5rem;`;
+  const card = document.createElement('div');
+  card.style.cssText = `background:${_CLAUDE.bg}; color:${_CLAUDE.text}; border:1px solid ${_CLAUDE.border}; border-radius:16px; max-width:min(1180px, 96vw); width:100%; max-height:94vh; overflow-y:auto; padding:0; box-shadow:0 30px 80px rgba(0,0,0,0.5);`;
+  const reelBlock = d.stream_url
+    ? `<div style="position:relative; background:#000; border-radius:12px; overflow:hidden;">
+         <video id="digest-reel-video" controls autoplay playsinline style="width:100%; max-height:60vh; background:#000; display:block;"></video>
+       </div>`
+    : `<div style="background:${_CLAUDE.surface}; border:1px dashed ${_CLAUDE.border}; border-radius:12px; padding:32px; text-align:center; color:${_CLAUDE.muted};">No reel — event log empty or no usable corpus clips. Trigger some alerts (upload a sample video) and try again.</div>`;
+  card.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 22px; border-bottom:1px solid ${_CLAUDE.border};">
+      <div>
+        <div style="font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:${_CLAUDE.accent};">WildWatch · Daily summary</div>
+        <div style="font-size:20px; font-weight:600; margin-top:2px;">Last 24 hours · ${a.total || 0} events captured</div>
+      </div>
+      <button data-act="close" aria-label="close" style="background:transparent; border:1px solid ${_CLAUDE.border}; color:${_CLAUDE.muted}; border-radius:8px; padding:6px 10px; cursor:pointer; font-size:12px;">esc · close</button>
+    </div>
+    <div style="padding:20px 22px 26px 22px;">
+      <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:18px;">
+        ${_kpi('Total events', a.total || 0, _CLAUDE.text)}
+        ${_kpi('Info · tier 1', tc[1] || 0, _CLAUDE.t1)}
+        ${_kpi('Notable · tier 2', tc[2] || 0, _CLAUDE.t2)}
+        ${_kpi('Urgent · tier 3', tc[3] || 0, _CLAUDE.t3)}
+      </div>
+      ${d.summary ? `<div style="background:${_CLAUDE.surface}; border-left:3px solid ${_CLAUDE.accent}; border-radius:8px; padding:14px 18px; margin-bottom:18px; font-size:14px; line-height:1.65; color:${_CLAUDE.text};">${escapeHtml(d.summary)}</div>` : ''}
+      <div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:18px;">
+        <div>${reelBlock}</div>
+        <div>${_chartPanel('Hourly activity', 'digest-chart-hourly', '24h, local time')}</div>
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;">
+        ${_chartPanel('Top species seen', 'digest-chart-species', 'parsed from explanations')}
+        ${_chartPanel('Event mix by type', 'digest-chart-cats', 'overlapping categories')}
+        ${_chartPanel('What fired most', 'digest-chart-labels', 'top labels by count')}
+      </div>
+    </div>`;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  // HLS player wiring (reuse the same pattern as _openClipPlayer).
+  let hls = null;
+  const video = card.querySelector('#digest-reel-video');
+  if (video && d.stream_url) {
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = d.stream_url;
+    } else if (window.Hls && window.Hls.isSupported()) {
+      hls = new window.Hls({ maxBufferLength: 30 });
+      hls.loadSource(d.stream_url);
+      hls.attachMedia(video);
+    }
+  }
+  const cleanup = () => {
+    if (hls) try { hls.destroy(); } catch (e) {}
+    if (video) { try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) {} }
+    _destroyDigestCharts();
+    overlay.remove();
+    document.removeEventListener('keydown', keyH);
+  };
+  const keyH = (e) => { if (e.key === 'Escape') cleanup(); };
+  document.addEventListener('keydown', keyH);
+  card.querySelector('[data-act=close]').addEventListener('click', cleanup);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+
+  // Charts. window.Chart is loaded via CDN; bail gracefully if missing.
+  if (!window.Chart) return;
+  const baseOpts = {
+    responsive: true, maintainAspectRatio: false,
+    plugins: {
+      legend: { labels: { color: _CLAUDE.muted, font: { size: 11 } } },
+      tooltip: { backgroundColor: _CLAUDE.surface, borderColor: _CLAUDE.border, borderWidth: 1 },
+    },
+    scales: {
+      x: { ticks: { color: _CLAUDE.muted, font: { size: 10 } }, grid: { color: _CLAUDE.border } },
+      y: { ticks: { color: _CLAUDE.muted, font: { size: 10 } }, grid: { color: _CLAUDE.border }, beginAtZero: true },
+    },
+  };
+  // 1. Hourly bar.
+  const hourCanvas = card.querySelector('#digest-chart-hourly');
+  if (hourCanvas) {
+    _DIGEST_CHARTS.push(new window.Chart(hourCanvas, {
+      type: 'bar',
+      data: {
+        labels: Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2,'0')}h`),
+        datasets: [{ data: a.hourly || [], backgroundColor: _CLAUDE.accent, borderRadius: 3 }],
+      },
+      options: { ...baseOpts, plugins: { ...baseOpts.plugins, legend: { display: false } } },
+    }));
+  }
+  // 2. Species donut (top 8).
+  const speciesCanvas = card.querySelector('#digest-chart-species');
+  const sp = (a.species || []).slice(0, 8);
+  if (speciesCanvas && sp.length) {
+    const palette = ['#cc785c', '#d49671', '#dcb286', '#e3cd9c', '#a39a8f', '#7a9e9f', '#5b818d', '#46647a'];
+    _DIGEST_CHARTS.push(new window.Chart(speciesCanvas, {
+      type: 'doughnut',
+      data: {
+        labels: sp.map(([k]) => k),
+        datasets: [{ data: sp.map(([, v]) => v), backgroundColor: palette.slice(0, sp.length), borderColor: _CLAUDE.surface, borderWidth: 2 }],
+      },
+      options: { ...baseOpts, scales: undefined, cutout: '58%' },
+    }));
+  } else if (speciesCanvas) {
+    speciesCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No species mentions parsed yet — alerts need explanation text.</div>`;
+  }
+  // 3. Categories.
+  const catCanvas = card.querySelector('#digest-chart-cats');
+  const cats = a.categories || {};
+  const catLabels = ['visual', 'audio', 'behaviour', 'environment', 'threat'].filter(k => (cats[k] || 0) > 0);
+  if (catCanvas && catLabels.length) {
+    const palette = { visual: '#38bdf8', audio: '#a78bfa', behaviour: '#22c55e', environment: '#f59e0b', threat: '#ef4444' };
+    _DIGEST_CHARTS.push(new window.Chart(catCanvas, {
+      type: 'doughnut',
+      data: {
+        labels: catLabels,
+        datasets: [{ data: catLabels.map(k => cats[k]), backgroundColor: catLabels.map(k => palette[k]), borderColor: _CLAUDE.surface, borderWidth: 2 }],
+      },
+      options: { ...baseOpts, scales: undefined, cutout: '58%' },
+    }));
+  } else if (catCanvas) {
+    catCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No event categories yet.</div>`;
+  }
+  // 4. Top labels horizontal bar.
+  const labelCanvas = card.querySelector('#digest-chart-labels');
+  const lbls = (a.top_labels || []).slice(0, 8);
+  if (labelCanvas && lbls.length) {
+    _DIGEST_CHARTS.push(new window.Chart(labelCanvas, {
+      type: 'bar',
+      data: {
+        labels: lbls.map(([k]) => _friendlyLabel(k)),
+        datasets: [{ data: lbls.map(([, v]) => v), backgroundColor: _CLAUDE.accent, borderRadius: 3 }],
+      },
+      options: { ...baseOpts, indexAxis: 'y', plugins: { ...baseOpts.plugins, legend: { display: false } } },
+    }));
+  } else if (labelCanvas) {
+    labelCanvas.parentElement.innerHTML = `<div style="color:${_CLAUDE.muted}; font-size:12px; padding:24px; text-align:center;">No labels yet.</div>`;
   }
 }
 
