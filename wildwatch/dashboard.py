@@ -1437,7 +1437,7 @@ async function showVideoDetail(videoId) {
           // bottom of the panel). data-pane id pairs to data-idx via the
           // delegated handler.
           const paneId = `scenes-pane-${idxId}`;
-          return `<div class="card-soft p-3">
+          return `<div class="card-soft p-3" id="index-card-${escapeHtml(idxId)}">
             <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -1448,7 +1448,8 @@ async function showVideoDetail(videoId) {
               </div>
               ${_indexStatusPill(i.status)}
             </div>
-            <div class="flex justify-end mt-2">
+            <div class="flex items-center justify-end gap-1.5 mt-2 flex-wrap">
+              <button data-action="toggle-scenes-pane" data-pane="${paneId}" class="btn btn-ghost text-[11.5px]" title="Show / hide the scene list for this index. Useful when one index has lots of scenes and you want to scroll past it to inspect another.">&#x25BE; Collapse</button>
               <button data-action="show-scenes" data-id="${escapeHtml(videoId)}" data-idx="${escapeHtml(idxId)}" class="${btnClass}">${btnLabel}</button>
             </div>
             <div id="${paneId}" class="mt-3"></div>
@@ -2229,6 +2230,14 @@ document.addEventListener('click', (e) => {
     case 'delete':          deleteSource(id);        break;
     case 'show-video':      showVideoDetail(id);     break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
+    case 'toggle-scenes-pane': {
+      const pane = document.getElementById(t.dataset.pane);
+      if (pane) {
+        const hidden = pane.classList.toggle('hidden');
+        t.innerHTML = hidden ? '&#x25B8; Expand' : '&#x25BE; Collapse';
+      }
+      break;
+    }
     case 'reindex-video':   reindexVideo(id, t.dataset.kind); break;
     case 'delete-video':    deleteVideo(id, t.dataset.name); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;

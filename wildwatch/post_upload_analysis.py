@@ -235,23 +235,19 @@ def purge_stuck_audio_indexes(video: Any, source_id: str) -> int:
     return removed
 
 
-def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> None:
+def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> str:
     """Fire-and-forget audio index on a freshly-uploaded video.
 
-    Five things happen, in order:
-      1. List existing audio-named indexes on the video.
-      2. If `force=True`, purge any audio indexes regardless of status
-         (used by the explicit "Re-index Audio" CTA).
-      3. If a ready audio index already exists AND `force` is False,
-         no-op (idempotent).
-      4. Purge stuck `processing` audio indexes — VideoDB will never
-         finish them if there's no transcript, and they clutter the UI.
-      5. Verify the clip has a transcript. VideoDB's `index_audio` is
-         transcript-based (`extraction_type=SceneExtractionType.transcript`,
-         confirmed in the SDK source) — for a silent clip it would hang
-         in `processing` forever. Skip audio kickoff on silent clips
-         and let the post-analysis sweep fall back to the visual index.
-      6. Otherwise, call `video.index_audio` with the audio prompt.
+    Returns a status string so callers can surface what happened:
+      - ``"created"`` — a fresh audio index was kicked off; processing
+        runs on VideoDB's side.
+      - ``"existing_ready"`` — an audio index already existed in a
+        ready/done state; no-op.
+      - ``"no_transcript_skipped"`` — the clip is silent / SFX-only;
+        VideoDB's index_audio (transcript-based) cannot classify
+        wordless audio events. Sweep falls back to visual index.
+      - ``"failed"`` — the SDK call raised; check uvicorn logs.
+      - ``"prompt_failed"`` — failed to load/format the audio prompt.
 
     Synchronous worker — call from a thread via `asyncio.to_thread`.
     """
@@ -261,7 +257,7 @@ def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> 
         prompt = format_prompt("audio", **_DEFAULT_PROMPT_CONTEXT)
     except Exception as e:
         logger.warning("post-analysis: audio prompt format failed for %s: %r", source_id, e)
-        return
+        return "prompt_failed"
 
     audio_idxs = _audio_indexes(video)
 
@@ -292,13 +288,10 @@ def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> 
                     "post-analysis: source=%s already has a ready audio index; skipping",
                     source_id,
                 )
-                return
+                return "existing_ready"
         # Otherwise, purge stuck ones before deciding.
         purge_stuck_audio_indexes(video, source_id)
 
-    # Gate on transcript — VideoDB's index_audio is transcript-based, so
-    # a silent / SFX-only clip will leave the index stuck in `processing`
-    # forever waiting for transcript segments that never come.
     if not _has_transcript(video, source_id):
         logger.info(
             "post-analysis: source=%s has no transcript (silent / SFX-only clip); "
@@ -307,14 +300,15 @@ def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> 
             "be searched for events.",
             source_id,
         )
-        return
+        return "no_transcript_skipped"
 
     try:
         idx_id = video.index_audio(prompt=prompt, name=f"wildwatch-audio-{source_id[:8]}")
     except Exception as e:
         logger.warning("post-analysis: index_audio kickoff failed for %s: %r", source_id, e)
-        return
+        return "failed"
     logger.info("post-analysis: kicked off audio index for source=%s idx=%s", source_id, idx_id)
+    return "created"
 
 
 async def _wait_for_index(video: Any, index_name_substr: str, max_wait_s: int) -> dict | None:

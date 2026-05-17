@@ -1259,6 +1259,7 @@ async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
 
     source_id = f"reindex-{video_id[:8]}-{int(time.time())}"
 
+    audio_status: str | None = None
     if kind in ("audio", "both"):
         # `force=True` purges every audio-named index first (including
         # stuck `processing` ones) so a silent clip's dead index doesn't
@@ -1266,7 +1267,7 @@ async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
         # rebuild — no transcript → no audio index.
         force_audio = kind == "audio"
         try:
-            await _async_sdk(
+            audio_status = await _async_sdk(
                 kick_off_audio_index,
                 video,
                 source_id,
@@ -1275,10 +1276,25 @@ async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
             )
         except Exception as e:
             logger.warning("reindex: audio index kickoff failed for video=%s: %r", video_id, e)
+            audio_status = "failed"
 
     task = asyncio.create_task(run_post_upload_analysis(video, source_id))
     _reindex_sweep_tasks.add(task)
     task.add_done_callback(_reindex_sweep_tasks.discard)
+
+    # Audio status → human-readable explanation for the dashboard toast.
+    audio_explain = {
+        "created": "audio index kicked off (processing on VideoDB).",
+        "existing_ready": "audio index already ready; reusing.",
+        "no_transcript_skipped": (
+            "audio skipped — clip has no transcript. VideoDB's index_audio is "
+            "transcript-based and cannot classify wordless audio. Falling back "
+            "to visual scene index for audio-event queries (gunshot, vehicle, "
+            "predator, etc.)."
+        ),
+        "failed": "audio kickoff FAILED — see uvicorn logs for the SDK error.",
+        "prompt_failed": "audio prompt format failed — check prompts/audio.txt.",
+    }.get(audio_status or "", None)
 
     msg = {
         "video": (
@@ -1304,7 +1320,9 @@ async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
         "kind": kind,
         "scene_index_id": str(new_visual_id) if new_visual_id else None,
         "status": "processing",
-        "message": msg,
+        "audio_status": audio_status,
+        "audio_explain": audio_explain,
+        "message": msg if not audio_explain else f"{msg} {audio_explain}",
     }
 
 
