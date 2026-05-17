@@ -24,6 +24,30 @@ PLAYER_PREFIX = "https://console.videodb.io/player?url="
 SEND_MESSAGE_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def _escape_old_markdown(s: str) -> str:
+    """Escape Telegram old-Markdown special chars in user-content strings.
+
+    The four chars `_ * ` [` have special meaning in old Markdown mode:
+      - `_italic_` / `*bold*` / `` `code` `` — wraps formatting
+      - `[text](url)` — link syntax; an unclosed `[` triggers
+        "can't parse entities: Can't find end of the entity ..."
+
+    Our Path-B explanation strings carry bracket-tagged AI output
+    (``[SCENE] ...``, ``[ANIMAL] ...``) directly from the species
+    prompt. Without escaping, Telegram 400-rejects the message and
+    the webhook handler then returns 500 — the phone never buzzes
+    even though the SDK call "succeeded".
+    """
+    if not s:
+        return ""
+    out: list[str] = []
+    for ch in s:
+        if ch in ("_", "*", "`", "["):
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
 def build_message(
     tier: int,
     label: str,
@@ -35,12 +59,16 @@ def build_message(
     Note: Markdown link syntax `[label](url)` breaks Telegram's parser when
     the URL itself contains `?` + `=` (our console-player wrapper). Send raw
     URLs inline instead; Telegram auto-detects + makes them tappable.
+
+    The ``explanation`` field is escaped via ``_escape_old_markdown``
+    because Path-B alerts pass bracket-tagged AI output verbatim, which
+    Telegram's parser interprets as unclosed link syntax and rejects.
     """
     emoji = TIER_EMOJI.get(tier, "⚪")
     tier_name = TIER_LABEL.get(tier, "?")
     parts = [f"{emoji} *[{tier_name}]* `{label}`"]
     if explanation:
-        parts.append(explanation)
+        parts.append(_escape_old_markdown(explanation))
     if stream_url:
         # console.videodb.io/player has a JS HLS player that works in any
         # browser (Chrome on Android/desktop has no native HLS). URL-encode
