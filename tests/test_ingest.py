@@ -104,17 +104,24 @@ async def test_dispatch_youtube_routes_to_upload_for_archive(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_youtube_live_sets_error_when_no_bridge(
+async def test_dispatch_youtube_live_parks_in_needs_bridge(
     state_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Live YouTube URLs no longer error — they park in `needs_bridge`
+    status with a copy-paste command for the dashboard helper card.
+    `coll.upload` MUST NOT be called for a live URL — uploading a YouTube
+    live URL into VideoDB's archive endpoint silently bills credits for
+    a stream we can't read."""
     monkeypatch.setattr(ingest, "_is_youtube_live", lambda url: True)
     s = add_source(kind="youtube", input="https://www.youtube.com/watch?v=live", name="ytl")
     coll = MagicMock()
 
     out = await ingest.dispatch(s.id, coll=coll)
 
-    assert out.status == "error"
-    assert out.error and "bridge" in out.error.lower()
+    assert out.status == "needs_bridge"
+    assert out.bridge_command and "start_bridge.sh" in out.bridge_command
+    assert out.bridge_rtsp and out.bridge_rtsp.startswith("rtsp://localhost:8554/")
+    coll.upload.assert_not_called()
 
 
 @pytest.mark.asyncio

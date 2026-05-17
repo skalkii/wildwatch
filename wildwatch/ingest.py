@@ -58,6 +58,8 @@ def _emit(source_id: str, status: str, stage_msg: str | None = None, **extra: An
                 "video_id": src.video_id,
                 "rtstream_id": src.rtstream_id,
                 "error": src.error,
+                "bridge_command": src.bridge_command,
+                "bridge_rtsp": src.bridge_rtsp,
             }
         )
     except Exception:
@@ -341,11 +343,29 @@ async def _ingest_youtube(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg="probing youtube live status")
     is_live = await asyncio.to_thread(_is_youtube_live, source.input)
     if is_live is True:
-        raise RuntimeError(
-            "YouTube live URL detected — needs streamlink+ffmpeg+mediamtx bridge "
-            "(not handled by dispatch). Use scripts/start_live_test.py or paste the "
-            "bridge-public RTSP URL instead."
+        # Live YouTube can't be handed to VideoDB directly — it only accepts
+        # rtsp:// / rtmp:// for live streams. Don't error out; park the
+        # source in `needs_bridge` status. The dashboard's renderSource
+        # picks this up and shows a copy-paste helper card with the exact
+        # command + an input to paste the bridge RTSP URL back.
+        #
+        # Use a short slug derived from the source id so concurrent bridges
+        # on the same host don't collide on /stream-name.
+        slug = source.id[:8]
+        bridge_cmd = f'./bridge/start_bridge.sh "{source.input}" {slug}'
+        bridge_rtsp = f"rtsp://localhost:8554/{slug}"
+        _emit(
+            source.id,
+            "needs_bridge",
+            stage_msg=(
+                "Live YouTube needs an RTSP bridge — VideoDB only accepts "
+                "rtsp:// for live streams. Run the bridge command in a new "
+                "terminal, then paste the resulting RTSP URL back."
+            ),
+            bridge_command=bridge_cmd,
+            bridge_rtsp=bridge_rtsp,
         )
+        return
     if is_live is None:
         # Probe failed — fall through to archive-mode upload but surface a
         # warning so the operator can see the source booted on incomplete

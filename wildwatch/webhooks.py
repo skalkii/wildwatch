@@ -1061,6 +1061,62 @@ async def api_reconnect_source(source_id: str) -> dict:
     return (await asyncio.to_thread(sources.get_source, source_id)).__dict__
 
 
+class BridgeFinalize(BaseModel):
+    """Payload for promoting a `needs_bridge` source to an RTSP source."""
+
+    rtsp_url: str
+
+
+@app.post("/api/sources/{source_id}/use-bridge")
+async def api_source_use_bridge(source_id: str, payload: BridgeFinalize) -> dict:
+    """Promote a `needs_bridge` YouTube source to a real RTSP source.
+
+    Flow:
+      1. Operator added a YouTube live URL via the dashboard.
+      2. `_ingest_youtube` detected `is_live=True`, parked the source in
+         `needs_bridge` status with a `bridge_command` + suggested
+         `bridge_rtsp`.
+      3. Operator ran the printed command in another terminal —
+         mediamtx is now serving the stream locally.
+      4. Operator pastes the resulting RTSP URL into the helper card.
+      5. THIS endpoint flips the source's `kind` to `rtsp`, replaces
+         `input` with the pasted URL, clears bridge_command/bridge_rtsp,
+         and re-dispatches ingest. From here on the source behaves
+         exactly like any rtsp:// source — no special-case downstream.
+    """
+    src = await asyncio.to_thread(sources.get_source, source_id)
+    if src is None:
+        raise HTTPException(status_code=404, detail=f"source {source_id} not found")
+    if src.status != "needs_bridge":
+        raise HTTPException(
+            status_code=400,
+            detail=f"source is in status={src.status!r}, not 'needs_bridge'",
+        )
+    new_url = (payload.rtsp_url or "").strip()
+    if not (new_url.startswith("rtsp://") or new_url.startswith("rtmp://")):
+        raise HTTPException(
+            status_code=400,
+            detail="rtsp_url must start with rtsp:// or rtmp://",
+        )
+    await asyncio.to_thread(
+        sources.update_source,
+        source_id,
+        kind="rtsp" if new_url.startswith("rtsp://") else "rtmp",
+        input=new_url,
+        status="queued",
+        stage_msg="bridge configured; reconnecting via rtsp",
+        error=None,
+        bridge_command=None,
+        bridge_rtsp=None,
+    )
+    coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    _spawn_bg(
+        ingest.dispatch(source_id, coll=coll),
+        label=f"ingest.dispatch.use_bridge({source_id})",
+    )
+    return (await asyncio.to_thread(sources.get_source, source_id)).__dict__
+
+
 # ──── Indexed Content explorer routes ────────────────────────────────────
 
 
