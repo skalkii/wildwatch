@@ -466,6 +466,228 @@ def _spark_24(hourly: list[int]) -> str:
     return "".join(levels[min(8, round(v / peak * 8))] for v in hourly[:24])
 
 
+# ──── QuickChart.io chart-image URLs ────
+# Free public service that renders Chart.js JSON configs as PNGs.
+# We send the URLs to Telegram via sendMediaGroup; Telegram fetches
+# them server-side and renders as a 2x2 photo album. No deps, no
+# image generation locally, no auth. Quota is generous for hackathon
+# use; if QuickChart is unreachable the caller falls back to the
+# text-only digest.
+_QUICKCHART = "https://quickchart.io/chart"
+
+_PALETTE_WARM = [
+    "#cc785c",
+    "#d49671",
+    "#dcb286",
+    "#e3cd9c",
+    "#a39a8f",
+    "#7a9e9f",
+    "#5b818d",
+    "#46647a",
+]
+_PALETTE_CATS = {
+    "visual": "#38bdf8",
+    "audio": "#a78bfa",
+    "behaviour": "#22c55e",
+    "environment": "#f59e0b",
+    "threat": "#ef4444",
+}
+_CHART_BG = "#131e1c"  # matches dashboard dark surface
+_CHART_TEXT = "#e6edeb"
+_CHART_GRID = "#1f2a27"
+_CHART_ACCENT = "#34d399"  # dashboard's dark-mode accent green
+
+
+def _quickchart_url(config: dict, w: int = 720, h: int = 420) -> str:
+    """Return a QuickChart GET URL that renders ``config`` as a PNG.
+
+    JSON is passed inline so we don't depend on QuickChart's
+    short-URL endpoint. The URL stays under ~3KB for the configs we
+    build below, well within HTTP GET limits.
+    """
+    import json as _json
+    from urllib.parse import quote
+
+    c = quote(_json.dumps(config, separators=(",", ":")))
+    bg = quote(_CHART_BG)
+    return f"{_QUICKCHART}?w={w}&h={h}&bkg={bg}&c={c}&v=4"
+
+
+def _chart_axes() -> dict:
+    return {
+        "x": {
+            "ticks": {"color": _CHART_TEXT, "font": {"size": 11}},
+            "grid": {"color": _CHART_GRID, "display": True},
+        },
+        "y": {
+            "ticks": {"color": _CHART_TEXT, "font": {"size": 11}},
+            "grid": {"color": _CHART_GRID},
+            "beginAtZero": True,
+        },
+    }
+
+
+def _digest_chart_urls(analytics: dict) -> list[tuple[str, str]]:
+    """Build (caption, QuickChart-URL) pairs for the digest album.
+
+    Returns up to four images — one per chart kind. Skips a chart
+    entirely if its data is empty so the album doesn't carry placeholder
+    "no data" tiles.
+    """
+    a = analytics or {}
+    hourly = a.get("hourly") or []
+    species = a.get("species") or []
+    labels = a.get("top_labels") or []
+    cats = a.get("categories") or {}
+
+    pairs: list[tuple[str, str]] = []
+
+    # 1. Hourly activity bar.
+    if any(hourly):
+        cfg = {
+            "type": "bar",
+            "data": {
+                "labels": [f"{i:02d}" for i in range(24)],
+                "datasets": [
+                    {
+                        "label": "Events",
+                        "data": hourly,
+                        "backgroundColor": _CHART_ACCENT,
+                        "borderRadius": 3,
+                    }
+                ],
+            },
+            "options": {
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Hourly activity · last 24h",
+                        "color": _CHART_TEXT,
+                        "font": {"size": 16, "weight": "bold"},
+                    },
+                    "legend": {"display": False},
+                },
+                "scales": _chart_axes(),
+            },
+        }
+        pairs.append(("🕒 Hourly activity", _quickchart_url(cfg, w=720, h=380)))
+
+    # 2. Top species donut.
+    sp = species[:8]
+    if sp:
+        cfg = {
+            "type": "doughnut",
+            "data": {
+                "labels": [str(k) for k, _ in sp],
+                "datasets": [
+                    {
+                        "data": [int(v) for _, v in sp],
+                        "backgroundColor": _PALETTE_WARM[: len(sp)],
+                        "borderColor": _CHART_BG,
+                        "borderWidth": 2,
+                    }
+                ],
+            },
+            "options": {
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Top species seen",
+                        "color": _CHART_TEXT,
+                        "font": {"size": 16, "weight": "bold"},
+                    },
+                    "legend": {
+                        "position": "right",
+                        "labels": {"color": _CHART_TEXT, "font": {"size": 12}},
+                    },
+                    "datalabels": {"color": _CHART_TEXT, "font": {"weight": "bold"}},
+                },
+                "cutout": "55%",
+            },
+        }
+        pairs.append(("🦁 Top species seen", _quickchart_url(cfg, w=720, h=420)))
+
+    # 3. Event mix donut (categories — visual/audio/behaviour/env/threat).
+    cat_labels = [
+        k for k in ("visual", "audio", "behaviour", "environment", "threat") if cats.get(k, 0) > 0
+    ]
+    if cat_labels:
+        cfg = {
+            "type": "doughnut",
+            "data": {
+                "labels": [k.title() for k in cat_labels],
+                "datasets": [
+                    {
+                        "data": [int(cats[k]) for k in cat_labels],
+                        "backgroundColor": [_PALETTE_CATS[k] for k in cat_labels],
+                        "borderColor": _CHART_BG,
+                        "borderWidth": 2,
+                    }
+                ],
+            },
+            "options": {
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "Event mix by type",
+                        "color": _CHART_TEXT,
+                        "font": {"size": 16, "weight": "bold"},
+                    },
+                    "legend": {
+                        "position": "right",
+                        "labels": {"color": _CHART_TEXT, "font": {"size": 12}},
+                    },
+                },
+                "cutout": "55%",
+            },
+        }
+        pairs.append(("🎯 Event mix by type", _quickchart_url(cfg, w=720, h=420)))
+
+    # 4. Top labels horizontal bar.
+    lbls = labels[:8]
+    if lbls:
+        cfg = {
+            "type": "bar",
+            "data": {
+                "labels": [friendly_label(k)[:24] for k, _ in lbls],
+                "datasets": [
+                    {
+                        "label": "Count",
+                        "data": [int(v) for _, v in lbls],
+                        "backgroundColor": _CHART_ACCENT,
+                        "borderRadius": 3,
+                    }
+                ],
+            },
+            "options": {
+                "indexAxis": "y",
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": "What fired most",
+                        "color": _CHART_TEXT,
+                        "font": {"size": 16, "weight": "bold"},
+                    },
+                    "legend": {"display": False},
+                },
+                "scales": {
+                    "x": {
+                        "ticks": {"color": _CHART_TEXT, "font": {"size": 11}},
+                        "grid": {"color": _CHART_GRID},
+                        "beginAtZero": True,
+                    },
+                    "y": {
+                        "ticks": {"color": _CHART_TEXT, "font": {"size": 11}},
+                        "grid": {"color": _CHART_GRID, "display": False},
+                    },
+                },
+            },
+        }
+        pairs.append(("📈 What fired most", _quickchart_url(cfg, w=720, h=420)))
+
+    return pairs
+
+
 def build_digest_message(
     summary: str,
     analytics: dict,
@@ -532,11 +754,17 @@ async def send_digest(
     bot_token: str | None = None,
     chat_id: str | None = None,
 ) -> dict:
-    """Send a daily digest message to Telegram.
+    """Send the daily digest to Telegram.
 
-    Same auth + transport semantics as send_alert. Splits across
-    multiple sends only if the body exceeds Telegram's 4096-char
-    cap — usually fits in one.
+    Two-step delivery:
+      1. ``sendMediaGroup`` with up to 4 chart PNGs rendered by
+         QuickChart.io. Telegram fetches each URL server-side and
+         renders an album. First photo carries a caption with the
+         header + KPI line.
+      2. ``sendMessage`` with the narration paragraph + reel link.
+
+    Falls back gracefully if QuickChart is unreachable or returns
+    no usable URLs — the text-only message still goes out.
     """
     token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
@@ -545,16 +773,77 @@ async def send_digest(
     if not chat:
         raise RuntimeError("TELEGRAM_CHAT_ID is unset; digest cannot be sent.")
 
-    body = build_digest_message(summary, analytics, player_url, n_clips, n_events)
-    # Telegram caps a single sendMessage at 4096 chars. The digest
-    # body is comfortably under that even with 6 species + 6 labels.
-    if len(body) > 4090:
-        body = body[:4080] + "\n…"
-    url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+    a = analytics or {}
+    tc = a.get("tier_counts") or {1: 0, 2: 0, 3: 0}
+    header_caption = (
+        f"📊 <b>WildWatch · Daily Summary</b>\n"
+        f"<i>Last 24h · {n_events} events · {n_clips} clips in reel</i>\n"
+        f"🔵 <b>Info {tc.get(1, 0)}</b>   "
+        f"🟡 <b>Notable {tc.get(2, 0)}</b>   "
+        f"🔴 <b>Urgent {tc.get(3, 0)}</b>"
+    )
+    # Trim caption to Telegram's 1024-char photo-caption cap. We
+    # only attach a caption to the FIRST photo of the album.
+    if len(header_caption) > 1020:
+        header_caption = header_caption[:1010] + "\n…"
+
+    chart_pairs = _digest_chart_urls(a)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        media_payload = None
+        if chart_pairs:
+            # sendMediaGroup takes an array of InputMediaPhoto objects.
+            # Telegram fetches each URL itself — it does not relay them
+            # through us. Quota is per-bot, not per-URL.
+            media = []
+            for i, (_cap, photo_url) in enumerate(chart_pairs[:4]):
+                item: dict = {"type": "photo", "media": photo_url}
+                if i == 0:
+                    item["caption"] = header_caption
+                    item["parse_mode"] = "HTML"
+                media.append(item)
+            try:
+                group_url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
+                media_resp = await client.post(group_url, json={"chat_id": chat, "media": media})
+                if media_resp.status_code < 400 and media_resp.json().get("ok"):
+                    media_payload = media_resp.json()
+                else:
+                    logger.warning(
+                        "send_digest: sendMediaGroup HTTP %s body=%r",
+                        media_resp.status_code,
+                        media_resp.text[:300],
+                    )
+            except httpx.TransportError as e:
+                logger.warning(
+                    "send_digest: sendMediaGroup network err: %s (args=%r)",
+                    type(e).__name__,
+                    getattr(e, "args", ()),
+                )
+
+        # Always send the text message — carries the narration +
+        # reel link. If the media group failed it ALSO carries the
+        # header so the operator still sees stats.
+        body_parts: list[str] = []
+        if media_payload is None:
+            # Fallback: include header + ASCII charts + KPIs.
+            body_parts.append(build_digest_message(summary, a, player_url, n_clips, n_events))
+        else:
+            # Album already showed the header; text message focuses
+            # on narration + link.
+            if summary:
+                body_parts.append("📝 <b>Narration</b>")
+                body_parts.append(_html_escape(summary))
+            if player_url:
+                body_parts.append("")
+                safe = _html_escape(player_url)
+                body_parts.append(f'▶ <a href="{safe}">Watch full reel on VideoDB</a>')
+        body = "\n".join(body_parts) or "(empty digest)"
+        if len(body) > 4090:
+            body = body[:4080] + "\n…"
+        msg_url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
+        try:
             resp = await client.post(
-                url,
+                msg_url,
                 json={
                     "chat_id": chat,
                     "text": body,
@@ -562,19 +851,23 @@ async def send_digest(
                     "disable_web_page_preview": True,
                 },
             )
-    except httpx.TransportError as e:
-        logger.warning(
-            "telegram digest network error: %s (args=%r)",
-            type(e).__name__,
-            getattr(e, "args", ()),
-        )
-        raise RuntimeError(f"telegram network error: {type(e).__name__}") from None
-    if resp.status_code >= 400:
-        body_resp = resp.text[:300] if resp.text else ""
-        raise RuntimeError(
-            f"telegram digest send failed: HTTP {resp.status_code} body={body_resp!r}"
-        )
-    payload = resp.json()
-    if not payload.get("ok"):
-        raise RuntimeError(payload.get("description", "telegram digest send failed"))
-    return payload
+        except httpx.TransportError as e:
+            logger.warning(
+                "telegram digest text network error: %s (args=%r)",
+                type(e).__name__,
+                getattr(e, "args", ()),
+            )
+            raise RuntimeError(f"telegram network error: {type(e).__name__}") from None
+        if resp.status_code >= 400:
+            body_resp = resp.text[:300] if resp.text else ""
+            raise RuntimeError(
+                f"telegram digest send failed: HTTP {resp.status_code} body={body_resp!r}"
+            )
+        payload = resp.json()
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description", "telegram digest send failed"))
+        # Return text-message payload (the canonical receipt) with a
+        # hint about whether the album was delivered.
+        payload["_album_sent"] = media_payload is not None
+        payload["_album_count"] = len(chart_pairs) if media_payload else 0
+        return payload
