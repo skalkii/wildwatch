@@ -132,8 +132,13 @@ def _open_user_only_append(path: Path):
     file leaks the active connection id (which a local attacker could
     use to spoof events). Force 0o600 at open time so multi-user hosts
     can't snoop.
+
+    O_NOFOLLOW defends against a pre-staged symlink at the target path
+    (e.g. `/tmp/videodb_events.jsonl` → `/etc/cron.d/anything`). Without
+    it `O_CREAT` follows the symlink and writes to the attacker's target
+    with our perms applied. ELOOP raised here aborts cleanly.
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
     fd = os.open(str(path), flags, 0o600)
     return os.fdopen(fd, "a", encoding="utf-8")
 
@@ -151,8 +156,13 @@ def append_event(event: dict):
 
 
 def _write_user_only(path: Path, contents: str) -> None:
-    """Write ``contents`` to ``path`` with 0o600 perms (user-only)."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    """Write ``contents`` to ``path`` with 0o600 perms (user-only).
+
+    O_NOFOLLOW defends against a pre-staged symlink (see _open_user_only_
+    append). ELOOP from the open call propagates as OSError; better to
+    fail loudly than write to an attacker target.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     fd = os.open(str(path), flags, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(contents)
