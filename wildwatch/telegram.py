@@ -13,6 +13,7 @@ plain-text rows so the message reads as a digest, not a config dump.
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import re
@@ -190,28 +191,11 @@ def humanise_explanation(text: str) -> str:
     return "\n".join(lines)
 
 
-def _escape_old_markdown(s: str) -> str:
-    """Escape Telegram old-Markdown special chars in user-content strings.
-
-    The four chars `_ * ` [` have special meaning in old Markdown mode:
-      - `_italic_` / `*bold*` / `` `code` `` — wraps formatting
-      - `[text](url)` — link syntax; an unclosed `[` triggers
-        "can't parse entities: Can't find end of the entity ..."
-
-    Our Path-B explanation strings carry bracket-tagged AI output
-    (``[SCENE] ...``, ``[ANIMAL] ...``) directly from the species
-    prompt. Without escaping, Telegram 400-rejects the message and
-    the webhook handler then returns 500 — the phone never buzzes
-    even though the SDK call "succeeded".
-    """
+def _html_escape(s: str) -> str:
+    """Escape HTML special chars in user-content for parse_mode=HTML."""
     if not s:
         return ""
-    out: list[str] = []
-    for ch in s:
-        if ch in ("_", "*", "`", "["):
-            out.append("\\")
-        out.append(ch)
-    return "".join(out)
+    return html.escape(s, quote=False)
 
 
 def build_message(
@@ -220,42 +204,38 @@ def build_message(
     explanation: str | None,
     stream_url: str | None,
 ) -> str:
-    """Return the Markdown body posted to Telegram.
+    """Return the HTML body posted to Telegram (parse_mode=HTML).
 
-    Note: Markdown link syntax `[label](url)` breaks Telegram's parser when
-    the URL itself contains `?` + `=` (our console-player wrapper). Send raw
-    URLs inline instead; Telegram auto-detects + makes them tappable.
-
-    The ``explanation`` field is escaped via ``_escape_old_markdown``
-    because Path-B alerts pass bracket-tagged AI output verbatim, which
-    Telegram's parser interprets as unclosed link syntax and rejects.
+    HTML mode is used (not old Markdown) because:
+      - clean ``<a href="URL">label</a>`` lets us hide long m3u8 URLs
+        behind a short "Play clip" — the URL itself is never shown,
+        so a 110-character signed manifest doesn't dominate the
+        message. Old Markdown's ``[label](url)`` breaks on URLs
+        containing ``?`` or ``=``.
+      - escape rules are simpler (only ``< > &`` need escaping).
+      - bracket-tagged AI output (``[SCENE]``, ``[ANIMAL]``) is
+        unambiguous text — no special meaning in HTML mode.
     """
     emoji = TIER_EMOJI.get(tier, "⚪")
     tier_name = TIER_LABEL.get(tier, "?")
-    # Title-case the event label so it reads as English instead of
-    # snake_case (the internal id_var form).
     pretty_label = friendly_label(label)
-    parts = [f"{emoji} *[{tier_name}]* *{_escape_old_markdown(pretty_label)}*"]
+    parts = [f"{emoji} <b>[{_html_escape(tier_name)}] {_html_escape(pretty_label)}</b>"]
     if explanation:
-        # 1. Humanise bracket-tagged AI output to plain lines.
-        # 2. Escape Markdown specials so unbalanced `[` / `*` / `_` / `` ` ``
-        #    chars left in the lead-in sentence don't break Telegram's parser.
         humanised = humanise_explanation(explanation)
-        parts.append(_escape_old_markdown(humanised))
+        parts.append(_html_escape(humanised))
     if stream_url:
+        # Hide the long m3u8 URL behind a short tappable label.
+        # Telegram renders only the label text; the URL stays
+        # invisible in the message body, so the chat reads cleanly
+        # even when the signed manifest URL is 110+ chars.
         already_player = stream_url.startswith(PLAYER_PREFIX) or stream_url.startswith(
             "https://player.videodb.io"
         )
-        if already_player:
-            # SDK-generated player URL — single link.
-            parts.append(f"▶ {stream_url}")
-        else:
-            # Single link only — raw HLS m3u8. Works in iOS Safari natively
-            # and opens in VLC on any platform via tap-and-play. User
-            # feedback: the console.videodb.io wrapper added an ugly empty
-            # preview box on mobile + still required the same VLC fallback
-            # for Android, so it gave no value over the raw link.
-            parts.append(f"▶ {stream_url}")
+        link_label = "Play in browser" if already_player else "Play clip"
+        # `quote=True` so any literal `"` in the URL doesn't break the
+        # attribute. Stream URLs rarely have them but defensive.
+        safe_url = html.escape(stream_url, quote=True)
+        parts.append(f'▶ <a href="{safe_url}">{link_label}</a>')
     return "\n".join(parts)
 
 
@@ -400,7 +380,7 @@ async def send_alert(
                 json={
                     "chat_id": chat,
                     "text": text,
-                    "parse_mode": "Markdown",
+                    "parse_mode": "HTML",
                     # Disable Telegram's link-preview card on the console
                     # player URL — it renders an ugly empty box on mobile
                     # because the page is a JS-loaded SPA with no OG tags.

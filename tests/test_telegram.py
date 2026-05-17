@@ -89,7 +89,7 @@ async def test_send_alert_posts_to_send_message() -> None:
     body = json.loads(route.calls.last.request.content)
     assert body["chat_id"] == CHAT_ID
     assert "baboon alarm" in body["text"]
-    assert body.get("parse_mode") == "Markdown"
+    assert body.get("parse_mode") == "HTML"
 
 
 @pytest.mark.asyncio
