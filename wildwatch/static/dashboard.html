@@ -1047,7 +1047,7 @@ function _friendlyStageMsg(s) {
   if (/^rtstream status=connected/i.test(m)) return 'Receiving frames from the live camera.';
   if (/^rtstream status=(error|failed|disconnected)/i.test(m))
     return 'Live camera connection lost.';
-  if (/^uploaded \\S+ . scene . audio indexes processing/i.test(m))
+  if (/^uploaded \S+ . scene . audio indexes processing/i.test(m))
     return 'Upload complete. The AI is reading the clip in the background.';
   if (/scene index processing/i.test(m))
     return 'Upload complete. The AI is reading the clip in the background.';
@@ -1701,12 +1701,12 @@ function _parseSceneText(raw) {
   // which fields are populated.
   const out = {scene: null, animals: [], notes: null, sounds: [], signals: [], summary: null};
   if (!raw) return out;
-  const tokens = raw.split(/(\\[[A-Z_]+\\])/).map(s => s.trim()).filter(Boolean);
+  const tokens = raw.split(/(\[[A-Z_]+\])/).map(s => s.trim()).filter(Boolean);
   for (let i = 0; i < tokens.length; i++) {
-    const m = tokens[i].match(/^\\[([A-Z_]+)\\]$/);
+    const m = tokens[i].match(/^\[([A-Z_]+)\]$/);
     if (!m) continue;
     const tag = m[1];
-    const body = (tokens[i+1] || '').replace(/^\\s*[:;,]\\s*/, '').trim();
+    const body = (tokens[i+1] || '').replace(/^\s*[:;,]\s*/, '').trim();
     if (tag === 'SCENE')   out.scene = _parseKVList(body);
     if (tag === 'ANIMAL')  out.animals.push(_parseKVList(body));
     if (tag === 'NOTES')   out.notes = (out.notes ? out.notes + ' ' : '') + body;
@@ -1721,7 +1721,7 @@ function _parseKVList(s) {
   // "key=value; key=value" → {key: value}. Tolerates the trailing
   // semicolons VideoDB sometimes emits and stripped values.
   const out = {};
-  s.split(/[;\\n]/).forEach(part => {
+  s.split(/[;\n]/).forEach(part => {
     const ix = part.indexOf('=');
     if (ix < 0) return;
     const k = part.slice(0, ix).trim();
@@ -2329,7 +2329,7 @@ function renderUsageRow(x) {
 
 function renderInvoices(invoices) {
   if (!Array.isArray(invoices) || invoices.length === 0) {
-    return '<div class="faint text-sm">No invoices yet — VideoDB hasn\\'t billed anything for this account.</div>';
+    return '<div class="faint text-sm">No invoices yet — VideoDB hasn\'t billed anything for this account.</div>';
   }
   // Each invoice shape varies; pull the most-likely fields gracefully.
   const rows = invoices.map(inv => {
