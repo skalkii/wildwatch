@@ -160,6 +160,21 @@ def _upload_rate_limit_check(client_ip: str) -> bool:
     the visible behaviour is identical. Plus a hard size cap with LRU
     pop on overflow to bound memory under attacker probing.
     """
+    # Special case: when we can't identify the client (request.client is
+    # None, e.g. some test harnesses or serverless deployments where the
+    # platform strips peer info), bypass the bucket rather than collapsing
+    # every unknown caller into a single shared 3-token pool. The shared
+    # pool produces spurious 429s for legit traffic. Operators behind a
+    # real proxy should set WILDWATCH_TRUSTED_PROXY=1 to read the actual
+    # client IP from X-Forwarded-For; if they don't, the rate limiter is
+    # ineffective by design — log a warning so it shows up.
+    if client_ip == "unknown":
+        logger.warning(
+            "upload rate limit: client_ip is 'unknown' — bypassing bucket. "
+            "Set WILDWATCH_TRUSTED_PROXY=1 if behind a reverse proxy."
+        )
+        return True
+
     now = time.time()
     with _upload_bucket_lock:
         tokens, last = _upload_buckets.get(client_ip, (float(_UPLOAD_BUCKET_CAPACITY), now))
