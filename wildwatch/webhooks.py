@@ -128,30 +128,42 @@ def _spawn_bg(coro, *, label: str) -> asyncio.Task:
     return task
 
 
-class _CacheEntry(TypedDict):
-    """Shape contract for the three module-level caches.
+# Per-cache TypedDicts so each cache's payload is type-narrowed at its
+# call site. Sharing a single `_CacheEntry(data: Any)` let a future writer
+# put `{"videos": ...}` into `_remote_cache` without a static error.
 
-    Locks guard the read-TTL-then-write pattern from concurrent route
-    handlers — without them the same stale entry can be re-fetched in
-    parallel by two requests racing past the TTL check.
-    """
+_RemoteData = dict[str, Any]  # {"rtstreams": list, "sandboxes": list, "error"?: str}
+_VideosData = dict[str, Any]  # {"videos": list, "error"?: str}
+_UsageData = dict[str, Any] | None
 
+
+class _RemoteCacheEntry(TypedDict):
     at: float
-    data: Any  # endpoint-specific payload shape
+    data: _RemoteData
 
 
-_remote_cache: _CacheEntry = {"at": 0.0, "data": {"rtstreams": [], "sandboxes": []}}
+class _VideosCacheEntry(TypedDict):
+    at: float
+    data: _VideosData
+
+
+class _UsageCacheEntry(TypedDict):
+    at: float
+    data: _UsageData
+
+
+_remote_cache: _RemoteCacheEntry = {"at": 0.0, "data": {"rtstreams": [], "sandboxes": []}}
 _REMOTE_TTL_S = 10.0
 _remote_lock = threading.Lock()
 
-_videos_cache: _CacheEntry = {"at": 0.0, "data": {"videos": []}}
+_videos_cache: _VideosCacheEntry = {"at": 0.0, "data": {"videos": []}}
 _VIDEOS_TTL_S = 30.0
 _videos_lock = threading.Lock()
 
 # `data` defaults to None (not {}) so the `data is not None` check below is
 # unambiguous — an empty-dict response would otherwise miss the cache and
 # hammer the SDK on every poll.
-_usage_cache: _CacheEntry = {"at": 0.0, "data": None}
+_usage_cache: _UsageCacheEntry = {"at": 0.0, "data": None}
 _USAGE_TTL_S = 60.0
 _usage_lock = threading.Lock()
 
