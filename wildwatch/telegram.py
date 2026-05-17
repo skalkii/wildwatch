@@ -30,6 +30,29 @@ SEND_MESSAGE_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 _TAG_RE = re.compile(r"\[([A-Z_]+)\]")
 
+# Acronyms preserved as-is when label-case-ifying snake_case event labels.
+_ACRONYMS = {"HLS", "RTSP", "RTMP", "AI", "VLC", "AAC", "URL", "API", "ID"}
+
+
+def friendly_label(label: str) -> str:
+    """Turn `potential_human_intrusion_visual` into `Potential Human Intrusion Visual`.
+
+    Splits on underscores, title-cases each word, preserves a small list
+    of acronyms (HLS, RTSP, AI, …). Used in the Telegram header so
+    rangers don't see snake_case identifiers.
+    """
+    if not label:
+        return ""
+    out: list[str] = []
+    for w in label.split("_"):
+        if not w:
+            continue
+        if w.upper() in _ACRONYMS:
+            out.append(w.upper())
+        else:
+            out.append(w[0].upper() + w[1:].lower())
+    return " ".join(out)
+
 
 def _kv(s: str) -> dict[str, str]:
     """Parse ``key=value; key=value`` lists from a bracket-tag body."""
@@ -209,7 +232,10 @@ def build_message(
     """
     emoji = TIER_EMOJI.get(tier, "⚪")
     tier_name = TIER_LABEL.get(tier, "?")
-    parts = [f"{emoji} *[{tier_name}]* `{label}`"]
+    # Title-case the event label so it reads as English instead of
+    # snake_case (the internal id_var form).
+    pretty_label = friendly_label(label)
+    parts = [f"{emoji} *[{tier_name}]* *{_escape_old_markdown(pretty_label)}*"]
     if explanation:
         # 1. Humanise bracket-tagged AI output to plain lines.
         # 2. Escape Markdown specials so unbalanced `[` / `*` / `_` / `` ` ``

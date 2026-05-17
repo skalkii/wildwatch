@@ -970,10 +970,22 @@ function renderEvent(ev) {
       <span class="inline-flex items-center gap-2">${TIER_NAME[tier] || tier} ${ev.event_id ? _idPill(ev.event_id, {truncate: true}) : ''}</span>
       <span class="mono">${ts}</span>
     </div>
-    <div class="text-sm mono mt-1" style="color:var(--text)">${escapeHtml(ev.label || '')}</div>
+    <div class="text-sm font-semibold mt-1" style="color:var(--text)">${escapeHtml(_friendlyLabel(ev.label || ''))}</div>
     <div class="text-xs muted mt-1">${escapeHtml(ev.explanation || '')}</div>
     <div class="mt-1.5">${stream}</div>
   </div>`;
+}
+
+// Convert snake_case / SCREAMING_SNAKE event labels to Title Case
+// English. Keep acronyms intact (HLS, RTSP, AI).
+function _friendlyLabel(s) {
+  if (!s) return '';
+  const ACRONYMS = new Set(['HLS','RTSP','RTMP','AI','VLC','AAC','URL','API','ID']);
+  return String(s).split('_').map(w => {
+    if (!w) return '';
+    if (ACRONYMS.has(w.toUpperCase())) return w.toUpperCase();
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  }).join(' ');
 }
 
 function formatUptime(sec) {

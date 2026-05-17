@@ -27,7 +27,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_build_message_includes_tier_emoji() -> None:
     msg = build_message(tier=3, label="POACHING_ALERT", explanation="shot heard", stream_url=None)
     assert TIER_EMOJI[3] in msg
-    assert "POACHING_ALERT" in msg
+    # Snake-case event labels are now rendered as Title Case English.
+    assert "Poaching Alert" in msg
     assert "shot heard" in msg
 
 
