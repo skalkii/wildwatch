@@ -15,10 +15,15 @@ import pytest
 @pytest.fixture(autouse=True, scope="session")
 def _allow_no_origin_for_tests() -> None:
     """The CSRF/Origin guard rejects mutating requests without an Origin
-    header. TestClient doesn't send one by default. Rather than monkey-
-    patching every test to inject headers, set the explicit escape-hatch
-    env var that the middleware honours, exactly as a CLI operator would."""
-    os.environ.setdefault("WILDWATCH_ALLOW_NO_ORIGIN", "1")
+    header. TestClient doesn't send one by default. Patch the env AND
+    the module-level `_ALLOW_NO_ORIGIN` constant — webhooks reads the
+    env once at import time, so by the time pytest's autouse fixture
+    runs, the constant has already been computed as False.
+    """
+    os.environ["WILDWATCH_ALLOW_NO_ORIGIN"] = "1"
+    from wildwatch import webhooks as _wh
+
+    _wh._ALLOW_NO_ORIGIN = True
     yield
 
 

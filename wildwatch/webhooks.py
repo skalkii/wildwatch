@@ -348,6 +348,20 @@ for _extra in (os.getenv("WILDWATCH_ALLOWED_ORIGINS") or "").split(","):
 # the VideoDB webhook callback comes from VideoDB's own infra.
 _CSRF_EXEMPT_PATH_PREFIXES = ("/webhook/",)
 
+# `WILDWATCH_ALLOW_NO_ORIGIN=1` is a process-lifetime escape hatch for
+# CLI clients. Read it ONCE at module import (not per request) so an
+# operator who sets it for a one-off bootstrap can't accidentally leave
+# it set and silently disable CSRF protection for the next deploy. Loud
+# WARNING at startup so the log shows every operator that the guard is
+# off — if you see this in prod logs, something is wrong.
+_ALLOW_NO_ORIGIN = os.environ.get("WILDWATCH_ALLOW_NO_ORIGIN") == "1"
+if _ALLOW_NO_ORIGIN:
+    logger.warning(
+        "CSRF Origin check DISABLED via WILDWATCH_ALLOW_NO_ORIGIN=1 — "
+        "mutating /api/* requests no longer require an Origin header. "
+        "Intended for trusted CLI use only; do not set in production."
+    )
+
 
 @app.middleware("http")
 async def _csrf_origin_guard(request: Request, call_next):
@@ -360,8 +374,9 @@ async def _csrf_origin_guard(request: Request, call_next):
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         # DEFAULT-DENY on missing Origin for mutating requests. CLI users
-        # can opt out via WILDWATCH_ALLOW_NO_ORIGIN=1 if they really need it.
-        if os.environ.get("WILDWATCH_ALLOW_NO_ORIGIN") == "1":
+        # can opt out via WILDWATCH_ALLOW_NO_ORIGIN=1 (read once at module
+        # import so it shows in startup logs).
+        if _ALLOW_NO_ORIGIN:
             return await call_next(request)
         return JSONResponse(
             status_code=403,
