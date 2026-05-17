@@ -90,7 +90,12 @@ def _init_from_argv() -> None:
     PID_FILE = OUTPUT_DIR / "videodb_ws_pid"
 
 
-import videodb  # noqa: E402  -- load_dotenv must run before SDK init (skill pattern)
+# NOTE: `import videodb` is intentionally deferred to inside
+# `listen_with_retry()` below. Importing it at module level would (1)
+# require load_dotenv to have run first (skill pattern), and (2) slow
+# any test that imports `wildwatch.ws_listener` by ~hundreds of ms
+# for SDK init. The lazy import inside the function fires only when
+# the listener actually runs.
 
 # Track if this is the first connection (for clearing events)
 _first_connection = True
@@ -154,6 +159,9 @@ def cleanup_pid():
 async def listen_with_retry():
     """Main listen loop with auto-reconnect and exponential backoff."""
     global _first_connection
+
+    # Deferred import — see module-level comment.
+    import videodb
 
     retry_count = 0
     backoff = INITIAL_BACKOFF
