@@ -16,7 +16,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Never, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,12 @@ MAX_RECENT_EVENTS = 50
 class _AlertEventRequired(TypedDict):
     tier: int
     label: str
+    # `type: Never` makes the absence of this key structurally
+    # load-bearing — a caller that constructs `{"tier": 1, "label": "x",
+    # "type": "source_progress"}` is rejected at the type-check layer.
+    # The runtime discriminator (`"type" not in event`) aligns with the
+    # static contract so the two can't drift.
+    type: Never
 
 
 class AlertEvent(_AlertEventRequired, total=False):

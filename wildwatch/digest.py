@@ -196,7 +196,7 @@ _TIER_OVERLAY = {
 
 
 def build_timeline(
-    events: list[dict[str, Any]],
+    events: list[DigestEventLike],
     corpus_state: dict[str, dict],
     conn: Any,
     clip_seconds: int = DEFAULT_CLIP_SECONDS,

@@ -44,7 +44,12 @@ def atomic_write_json(path: Path, data: Any, *, indent: int | None = 2) -> None:
         # the process umask permissions (usually 0o644 — world-readable).
         # On containers with umask=0o000 this window let any local user
         # read .state.json before the chmod corrected it.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        # O_NOFOLLOW: refuse to follow a pre-staged symlink at the .tmp
+        # path. Without this, a local attacker with write access to the
+        # repo dir could symlink .state.json.tmp → /etc/cron.d/whatever
+        # and our O_CREAT would write the JSON payload there with 0o600.
+        # Parity with ws_listener which got this in round-4.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
         fd = os.open(str(tmp), flags, 0o600)
         fdopen_succeeded = False
         try:
