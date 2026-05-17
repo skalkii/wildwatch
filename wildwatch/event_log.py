@@ -51,29 +51,36 @@ def _iter_records() -> Iterator[dict[str, Any]]:
 
     Streams the log file line-by-line so multi-MB logs don't load into
     memory all at once. Corrupt lines are skipped + counted; the
-    aggregate is logged once when the iterator drains.
+    aggregate is logged in a ``finally`` block so the warning fires
+    even when the iterator is exhausted early (``break`` / ``islice``
+    / ``GeneratorExit``).
     """
     if not LOG_FILE.exists():
         return
     n_skipped = 0
-    with LOG_FILE.open("r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                n_skipped += 1
-                continue
-    if n_skipped:
-        # Visible in production logs so a partial-write crash doesn't
-        # silently shrink the digest pool.
-        logger.warning(
-            "event_log: skipped %s corrupt line(s) in %s; digest pool may be smaller than expected",
-            n_skipped,
-            LOG_FILE,
-        )
+    try:
+        with LOG_FILE.open("r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    n_skipped += 1
+                    continue
+    finally:
+        if n_skipped:
+            # Visible in production logs so a partial-write crash
+            # doesn't silently shrink the digest pool. In a ``finally``
+            # block so the warning fires even if the consumer
+            # ``break``s out of the iterator early.
+            logger.warning(
+                "event_log: skipped %s corrupt line(s) in %s; "
+                "digest pool may be smaller than expected",
+                n_skipped,
+                LOG_FILE,
+            )
 
 
 def read_all() -> list[dict[str, Any]]:

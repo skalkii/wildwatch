@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from wildwatch.events import EVENT_DEFINITIONS
+from wildwatch.prompts import DEFAULT_UPLOAD_PROMPT_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,12 @@ _EVENT_INDEX_KIND = {
 INDEX_READY_STATUSES = {"ready", "indexed", "complete", "completed", "done"}
 _READY = INDEX_READY_STATUSES  # legacy alias for in-module call sites
 
+# Statuses a scene index can be in BEFORE it reaches one of the READY
+# states. Shared with webhooks.py via
+# ``from wildwatch.post_upload_analysis import INDEX_STUCK_STATUSES``.
+# Used to identify indexes that may need a transcript probe / purge.
+INDEX_STUCK_STATUSES = frozenset({"processing", "queued", "pending", "initiated"})
+
 # How long to wait for an index to finish, total (seconds).
 _INDEX_WAIT_S = 20 * 60
 _POLL_INTERVAL_S = 6
@@ -119,12 +126,12 @@ _AUDIO_WAIT_S = 3 * 60
 # from spamming Telegram with 200 "gunshot" alerts on a single clip.
 _MAX_FIRES_PER_UPLOAD = 12
 
+# Audio-specific override of the shared upload context: post-upload
+# analysis cares about anthropogenic sounds, so the prompt seeds the
+# audio index with hints for gunshot / chainsaw / vehicle. Everything
+# else (location, species list) comes from the canonical dict.
 _DEFAULT_PROMPT_CONTEXT = {
-    "location_context": "uploaded clip (any environment)",
-    "species_list": (
-        "common wildlife — oryx, springbok, elephant, lion, giraffe, zebra, "
-        "leopard, hyena, jackal, kudu, buffalo, hippo, crocodile, baboon"
-    ),
+    **DEFAULT_UPLOAD_PROMPT_CONTEXT,
     "expected_sounds": (
         "wind, drinking, hooves, occasional bird and mammal vocalisations, "
         "possible anthropogenic sounds (gunshot, chainsaw, vehicle)"
@@ -223,7 +230,7 @@ def purge_stuck_audio_indexes(video: Any, source_id: str) -> int:
     removed = 0
     for idx in _audio_indexes(video):
         status = str(idx.get("status", "")).lower()
-        if status not in ("processing", "queued", "pending", "initiated"):
+        if status not in INDEX_STUCK_STATUSES:
             continue
         idx_id = idx.get("scene_index_id") or idx.get("id")
         if not idx_id:

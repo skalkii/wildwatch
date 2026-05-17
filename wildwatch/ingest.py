@@ -27,6 +27,7 @@ import subprocess
 from typing import Any
 
 from wildwatch import dashboard, sources
+from wildwatch.prompts import DEFAULT_UPLOAD_PROMPT_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -144,16 +145,9 @@ def _is_youtube_live(url: str) -> bool | None:
 # ──── handlers ────────────────────────────────────────────────────────────
 
 
-_DEFAULT_SCENE_PROMPT_CONTEXT = {
-    "location_context": "uploaded clip (any environment)",
-    "species_list": (
-        "common wildlife — oryx, springbok, elephant, lion, giraffe, zebra, "
-        "leopard, hyena, jackal, kudu, buffalo, hippo, crocodile, baboon, "
-        "warthog, wild dog, various birds. If no wildlife, describe what is "
-        "in the scene."
-    ),
-    "expected_sounds": "any ambient sound",
-}
+# Generic-upload context for the auto scene index. Audio-specific
+# overrides live in post_upload_analysis.py.
+_DEFAULT_SCENE_PROMPT_CONTEXT = DEFAULT_UPLOAD_PROMPT_CONTEXT
 
 
 async def _kick_off_scene_index(video, source_id: str) -> None:

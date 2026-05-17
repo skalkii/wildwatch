@@ -194,12 +194,22 @@ def _get_executor() -> ThreadPoolExecutor:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """FastAPI lifespan: clean up the SDK executor at shutdown so uvicorn
-    reload / SIGINT doesn't leak worker threads."""
+    reload / SIGINT doesn't leak worker threads.
+
+    Reset ``_SDK_EXECUTOR`` to None AFTER shutdown so a subsequent
+    ``_get_executor()`` call rebuilds it from scratch. Without the
+    reset, ``uvicorn --reload`` re-runs the lifespan but the module
+    isn't re-imported — ``_get_executor()`` would return the already-
+    shut-down instance and the next ``_async_sdk`` call would raise
+    ``RuntimeError: cannot schedule new futures after shutdown``.
+    """
+    global _SDK_EXECUTOR
     try:
         yield
     finally:
         if _SDK_EXECUTOR is not None:
             _SDK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+            _SDK_EXECUTOR = None
 
 
 app = FastAPI(title="WildWatch webhook receiver", lifespan=_lifespan)
@@ -472,6 +482,18 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    """Timing-safe string compare for the webhook secret.
+
+    ``str.__eq__`` short-circuits on the first byte mismatch, which
+    leaks the prefix length to a timing-attack adversary.
+    ``hmac.compare_digest`` is the stdlib equivalent for this use case.
+    """
+    import hmac
+
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 _WEBHOOK_SECRET = os.environ.get("WILDWATCH_WEBHOOK_SECRET", "").strip() or None
 if _WEBHOOK_SECRET is None:
     logger.warning(
@@ -699,18 +721,6 @@ async def events_stream() -> StreamingResponse:
 # ──── Source CRUD routes ──────────────────────────────────────────────────
 
 
-def _constant_time_eq(a: str, b: str) -> bool:
-    """Timing-safe string compare for the webhook secret.
-
-    ``str.__eq__`` short-circuits on the first byte mismatch, which
-    leaks the prefix length to a timing-attack adversary. ``hmac.compare_digest``
-    is the stdlib equivalent for this use case.
-    """
-    import hmac
-
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
-
-
 # ──── Source input validation ────
 # Closes the SSRF surface flagged by the security review: each source
 # kind narrows the acceptable URL scheme + bans internal-network hosts
@@ -732,6 +742,48 @@ _PRIVATE_HOST_PATTERNS = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _host_is_private(host: str) -> bool:
+    """True if ``host`` resolves (literally) to a private/link-local address.
+
+    Layered guard:
+
+      1. Fast regex match against the textual host. Handles the obvious
+         ``localhost`` / ``10.x`` / ``192.168.x`` / ``::1`` / ``fe80::``
+         cases.
+      2. Parse via ``ipaddress`` (when the host IS an IP literal) and
+         check the standard private/loopback/link-local flags. This
+         catches IPv4-mapped IPv6 forms like ``::ffff:127.0.0.1`` —
+         which the textual regex would miss but which an SSRF attack
+         on an IPv6-capable runtime could exploit.
+
+    DNS names that resolve to private IPs are NOT blocked here — we
+    don't do active resolution at validation time (would slow ingest +
+    add a DNS-rebinding surface). The SDK / runtime gets the final
+    say if it ever decides to fetch the URL.
+    """
+    import ipaddress
+
+    if not host:
+        return False
+    if _PRIVATE_HOST_PATTERNS.match(host):
+        return True
+    # Strip the bracket form ``[::1]`` urlparse may leave behind.
+    candidate = host.strip("[]")
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False  # DNS name, not an IP literal
+    if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_unspecified:
+        return True
+    # IPv4-mapped IPv6 (``::ffff:a.b.c.d``) — ipaddress exposes the
+    # embedded v4 address via ``.ipv4_mapped``.
+    if hasattr(addr, "ipv4_mapped") and addr.ipv4_mapped is not None:
+        mapped = addr.ipv4_mapped
+        if mapped.is_loopback or mapped.is_private or mapped.is_link_local:
+            return True
+    return False
 
 
 def _validate_source_input(kind: str | None, raw: str) -> str:
@@ -781,7 +833,7 @@ def _validate_source_input(kind: str | None, raw: str) -> str:
     # Private-network host block — only matters for http/https/rtsp
     # variants where the URL is fetched server-side. ``bore.pub`` is
     # public so legitimate live-bridge URLs pass.
-    if host and _PRIVATE_HOST_PATTERNS.match(host):
+    if _host_is_private(host):
         raise ValueError(
             f"input host {host!r} is on a private / link-local network "
             "and cannot be used as a remote source"
@@ -1260,11 +1312,13 @@ async def api_video_indexes(video_id: str) -> dict:
         )
         # Annotate stuck audio indexes only — skip the transcript probe
         # entirely when no audio index needs it (saves a round-trip).
+        from wildwatch.post_upload_analysis import INDEX_STUCK_STATUSES
+
         stuck_audio = [
             i
             for i in indexes
             if "audio" in str(i.get("name", "")).lower()
-            and str(i.get("status", "")).lower() in ("processing", "queued", "pending", "initiated")
+            and str(i.get("status", "")).lower() in INDEX_STUCK_STATUSES
         ]
         if stuck_audio:
             try:

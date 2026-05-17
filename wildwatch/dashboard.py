@@ -189,9 +189,48 @@ def get_stats() -> dict[str, Any]:
 # ``importlib.resources`` even when the package is installed as a wheel.
 
 
+_FALLBACK_HTML = (
+    "<!doctype html><meta charset='utf-8'>"
+    "<title>WildWatch — dashboard unavailable</title>"
+    "<body style='font-family:system-ui;padding:2rem;background:#0e1715;color:#e6edeb;'>"
+    "<h1>Dashboard static asset missing</h1>"
+    "<p><code>wildwatch/static/dashboard.html</code> could not be located. "
+    "If you installed via <code>pip install</code> (not editable), the wheel "
+    "may have been built without <code>[tool.setuptools.package-data]</code> "
+    "for the static dir. Reinstall with <code>pip install -e .</code> or "
+    "rebuild the wheel.</p>"
+    "<p>The API and webhook receiver still work — only the UI shell is missing.</p>"
+    "</body>"
+)
+
+
 @_lru_cache(maxsize=1)
 def get_dashboard_html() -> str:
-    """Return the dashboard HTML, read once and cached."""
-    return (
-        _resources.files("wildwatch").joinpath("static/dashboard.html").read_text(encoding="utf-8")
-    )
+    """Return the dashboard HTML, read once and cached.
+
+    The HTML lives in ``wildwatch/static/dashboard.html`` and ships
+    inside the wheel via ``[tool.setuptools.package-data]``. A missing
+    file means a broken install (or someone deleted the static dir
+    in development) — return a small ranger-readable fallback page
+    instead of a 500 stack trace, and ERROR-log the cause so the
+    operator can fix it.
+
+    ``@lru_cache`` does not cache exceptions, so a transient
+    ``FileNotFoundError`` is retried on every request. Catching here
+    means the cache stores the fallback string and the operator
+    sees a consistent state.
+    """
+    try:
+        return (
+            _resources.files("wildwatch")
+            .joinpath("static/dashboard.html")
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError) as e:
+        logger.error(
+            "dashboard.get_dashboard_html: static/dashboard.html unavailable "
+            "(%s: %s) — serving fallback page",
+            type(e).__name__,
+            e,
+        )
+        return _FALLBACK_HTML
