@@ -441,9 +441,15 @@ async def _fire_synthesised(
     secret = os.getenv("WILDWATCH_WEBHOOK_SECRET", "").strip()
     if secret:
         headers["X-WildWatch-Secret"] = secret
+    # 30s timeout — receive_alert runs genai_friendly_explanation
+    # (up to 15s) THEN send_alert (which does the Telegram HTTP call,
+    # another ~5-10s in a cold-cache state). 10s was too tight: the
+    # path-B POST timed out before the webhook chain completed, leaving
+    # us logging "webhook POST failed: ReadTimeout" while the actual
+    # Telegram delivery may or may not have completed in the background.
     try:
         r = await client.post(
-            f"{base_url}/webhook/{tier}", json=payload, headers=headers, timeout=10.0
+            f"{base_url}/webhook/{tier}", json=payload, headers=headers, timeout=30.0
         )
         if r.status_code >= 400:
             logger.warning(
