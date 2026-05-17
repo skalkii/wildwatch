@@ -762,7 +762,30 @@ async def api_upload_source(
         # don't leave an orphan `status=error` source row behind. Delete
         # the record entirely so /api/sources doesn't show a phantom.
         if e.status_code == 415:
-            await asyncio.to_thread(sources.delete_source, s.id)
+            try:
+                await asyncio.to_thread(sources.delete_source, s.id)
+            except Exception as del_err:
+                # Logging-only — don't mask the original 415 with a 500.
+                logger.warning(
+                    "api_upload_source: cleanup delete failed for %s: %s",
+                    s.id,
+                    del_err,
+                )
+            # Notify SSE subscribers so the open dashboard tab doesn't
+            # keep showing a stale card after the source row vanishes.
+            try:
+                dashboard.broadcast(
+                    {
+                        "type": "source_deleted",
+                        "source_id": s.id,
+                        "reason": "rejected_mime",
+                    }
+                )
+            except Exception:
+                logger.warning(
+                    "api_upload_source: dashboard.broadcast(source_deleted) failed",
+                    exc_info=True,
+                )
         else:
             await asyncio.to_thread(
                 sources.update_source, s.id, status="error", error=str(e.detail)
@@ -805,6 +828,17 @@ async def api_delete_source(source_id: str) -> dict:
             logger.warning("delete: %s", msg)
             warnings.append(msg)
     await asyncio.to_thread(sources.delete_source, source_id)
+    # Notify SSE subscribers so any open dashboard tab clears the card
+    # immediately instead of waiting for the next /api/sources poll.
+    try:
+        dashboard.broadcast(
+            {"type": "source_deleted", "source_id": source_id, "reason": "user_deleted"}
+        )
+    except Exception:
+        logger.warning(
+            "api_delete_source: dashboard.broadcast(source_deleted) failed",
+            exc_info=True,
+        )
     status = "deleted_with_warnings" if warnings else "deleted"
     return {"status": status, "id": source_id, "warnings": warnings}
 

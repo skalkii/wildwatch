@@ -861,8 +861,8 @@ function startSSE() {
   es.onmessage = (m) => {
     let payload = null;
     try { payload = JSON.parse(m.data); } catch (e) { /* connect comment */ }
-    if (payload && payload.type === 'source_progress') {
-      fetchSources();  // refresh sources view on every progress event
+    if (payload && (payload.type === 'source_progress' || payload.type === 'source_deleted')) {
+      fetchSources();  // refresh sources view on every progress/deletion event
     }
     fetchStats();  // always refresh alert feed (cheap)
   };
