@@ -1098,6 +1098,35 @@ async def api_source_use_bridge(source_id: str, payload: BridgeFinalize) -> dict
             status_code=400,
             detail="rtsp_url must start with rtsp:// or rtmp://",
         )
+    # VideoDB rejects local addresses with "Local streams are not supported".
+    # Reject them here too so the user gets an immediate, specific error
+    # instead of a generic VideoDB 4xx after the source flips status.
+    lower_url = new_url.lower()
+    private_markers = (
+        "://localhost",
+        "://127.",
+        "://10.",
+        "://192.168.",
+        "://0.0.0.0",
+        "://::1",
+    )
+    if any(m in lower_url for m in private_markers):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "VideoDB rejects local RTSP addresses (rtsp://localhost, "
+                "192.168.x.x, 10.x.x.x, etc.) — the stream needs a "
+                "publicly-routable host. Run the bridge command which "
+                "auto-starts a bore.pub tunnel; the script prints "
+                "'PUBLIC URL: rtsp://bore.pub:<port>/<slug>' — paste THAT."
+            ),
+        )
+    # Also catch 172.16-172.31 (private class B) explicitly.
+    if re.search(r"://172\.(1[6-9]|2[0-9]|3[01])\.", lower_url):
+        raise HTTPException(
+            status_code=400,
+            detail="VideoDB rejects RFC1918 private addresses — use a public tunnel.",
+        )
     await asyncio.to_thread(
         sources.update_source,
         source_id,

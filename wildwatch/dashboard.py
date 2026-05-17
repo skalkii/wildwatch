@@ -1133,22 +1133,28 @@ function renderSource(s) {
   const disconnectBtn = isStreamKind
     ? `<button data-action="disconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Stop the live rtstream on VideoDB. Keeps the source row.">Disconnect</button>`
     : '';
-  // Bridge helper card — shown when an `_ingest_youtube` probe found a
-  // live YouTube URL that VideoDB can't read directly. Render a copy-paste
-  // command + a "Use this RTSP URL" submission that promotes the source
-  // to a real rtsp:// source via /api/sources/{id}/use-bridge.
+  // Bridge helper card — shown when `_ingest_youtube` detects a live URL.
+  // VideoDB requires a PUBLICLY-routable rtsp host (it rejects
+  // rtsp://localhost outright), so the helper walks the operator through
+  // 3 steps: start mediamtx, start bore (TCP tunnel), then run the bridge
+  // script. The script prints the public URL the operator pastes back.
+  const _step = (n, label, cmd, copy=true) =>
+    `<div class="text-[11.5px] muted mt-2"><span class="pill mono" style="color:#f59e0b; background:color-mix(in oklab,#f59e0b 14%,transparent); border-color:color-mix(in oklab,#f59e0b 30%,transparent);">${n}</span> ${label}</div>
+    <div class="flex items-stretch gap-1 mt-1">
+      <code class="mono text-[11px] flex-1 px-2 py-1.5 rounded" style="background:var(--bg-soft); border:1px solid var(--border); white-space:nowrap; overflow-x:auto;">${escapeHtml(cmd)}</code>
+      ${copy ? `<button data-action="copy-text" data-text="${escapeHtml(cmd)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Copy">&#x29C9;</button>` : ''}
+    </div>`;
   const bridgeBlock = (s.status === 'needs_bridge' && s.bridge_command)
     ? `<div class="card-soft p-3 mt-2" style="border-left:3px solid #f59e0b">
-        <div class="text-[12px] font-semibold mb-1" style="color:#f59e0b">Live stream &mdash; bridge needed</div>
-        <div class="text-[11.5px] muted mb-2">VideoDB only accepts <code class="mono">rtsp://</code> for live streams. Run this command in a new terminal:</div>
-        <div class="flex items-stretch gap-1 mb-2">
-          <code class="mono text-[11px] flex-1 px-2 py-1.5 rounded" style="background:var(--bg-soft); border:1px solid var(--border); white-space:nowrap; overflow-x:auto;">${escapeHtml(s.bridge_command)}</code>
-          <button data-action="copy-text" data-text="${escapeHtml(s.bridge_command)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Copy the bridge command">&#x29C9;</button>
-        </div>
-        <div class="text-[11.5px] muted mb-1.5">Then paste the resulting RTSP URL here (default: <code class="mono">${escapeHtml(s.bridge_rtsp || 'rtsp://localhost:8554/<slug>')}</code>):</div>
-        <div class="flex items-stretch gap-1">
-          <input id="bridge-input-${escapeHtml(s.id)}" type="text" placeholder="${escapeHtml(s.bridge_rtsp || 'rtsp://localhost:8554/...')}" value="${escapeHtml(s.bridge_rtsp || '')}" class="input flex-1 px-2 py-1.5 text-[11px] mono" style="min-width:0;">
-          <button data-action="use-bridge" data-id="${escapeHtml(s.id)}" class="btn btn-primary text-[11px] !py-1 !px-2" title="Submit the bridge RTSP URL — flips this source to kind=rtsp and re-runs ingest.">Use bridge</button>
+        <div class="text-[12px] font-semibold mb-1" style="color:#f59e0b">Live stream &mdash; public RTSP bridge needed</div>
+        <div class="text-[11.5px] muted">VideoDB rejects <code class="mono">rtsp://localhost</code>. You need a public TCP tunnel. Three commands, three terminals (only the third needs to repeat per source):</div>
+        ${_step('1', 'one-time install (skip if already done):', 'brew install streamlink ffmpeg mediamtx bore-cli')}
+        ${_step('2', 'start mediamtx + bore (leave running):', 'mediamtx bridge/mediamtx.yml &amp; bore local 8554 --to bore.pub &amp;')}
+        ${_step('3', 'pump THIS source through the bridge:', s.bridge_command)}
+        <div class="text-[11.5px] muted mt-2">Step 3 prints a line like <code class="mono">PUBLIC URL: rtsp://bore.pub:&lt;port&gt;/${escapeHtml(s.bridge_command.split(' ').pop())}</code>. Paste that here:</div>
+        <div class="flex items-stretch gap-1 mt-1">
+          <input id="bridge-input-${escapeHtml(s.id)}" type="text" placeholder="rtsp://bore.pub:&lt;port&gt;/&lt;slug&gt;" value="${escapeHtml(s.bridge_rtsp || '')}" class="input flex-1 px-2 py-1.5 text-[11px] mono" style="min-width:0;">
+          <button data-action="use-bridge" data-id="${escapeHtml(s.id)}" class="btn btn-primary text-[11px] !py-1 !px-2" title="Submit the public bridge RTSP URL — flips this source to kind=rtsp and re-runs ingest.">Use bridge</button>
         </div>
       </div>`
     : '';

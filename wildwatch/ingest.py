@@ -343,24 +343,26 @@ async def _ingest_youtube(source, coll: Any) -> None:
     _emit(source.id, "connecting", stage_msg="probing youtube live status")
     is_live = await asyncio.to_thread(_is_youtube_live, source.input)
     if is_live is True:
-        # Live YouTube can't be handed to VideoDB directly — it only accepts
-        # rtsp:// / rtmp:// for live streams. Don't error out; park the
-        # source in `needs_bridge` status. The dashboard's renderSource
-        # picks this up and shows a copy-paste helper card with the exact
-        # command + an input to paste the bridge RTSP URL back.
-        #
-        # Use a short slug derived from the source id so concurrent bridges
-        # on the same host don't collide on /stream-name.
+        # Live YouTube can't be handed to VideoDB directly. VideoDB rejects
+        # `rtsp://localhost:*` ("Local streams are not supported"), so just
+        # running mediamtx + streamlink locally isn't enough — we also need
+        # bore.pub (or any TCP tunnel) to give the stream a publicly-
+        # routable host:port. Park the source in `needs_bridge` and the
+        # dashboard renders a multi-step helper card.
         slug = source.id[:8]
         bridge_cmd = f'./bridge/start_bridge.sh "{source.input}" {slug}'
-        bridge_rtsp = f"rtsp://localhost:8554/{slug}"
+        # Don't pre-fill rtsp://localhost:... — VideoDB rejects it. The
+        # bridge script prints the real public URL (rtsp://bore.pub:<port>/<slug>)
+        # which the operator copies from terminal output.
+        bridge_rtsp = ""
         _emit(
             source.id,
             "needs_bridge",
             stage_msg=(
-                "Live YouTube needs an RTSP bridge — VideoDB only accepts "
-                "rtsp:// for live streams. Run the bridge command in a new "
-                "terminal, then paste the resulting RTSP URL back."
+                "Live YouTube needs a PUBLIC RTSP bridge — VideoDB rejects "
+                "rtsp://localhost. Start mediamtx + bore, run the bridge "
+                "command, then paste the rtsp://bore.pub:<port>/<slug> URL "
+                "that the script prints."
             ),
             bridge_command=bridge_cmd,
             bridge_rtsp=bridge_rtsp,

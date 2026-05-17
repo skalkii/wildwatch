@@ -120,7 +120,10 @@ async def test_dispatch_youtube_live_parks_in_needs_bridge(
 
     assert out.status == "needs_bridge"
     assert out.bridge_command and "start_bridge.sh" in out.bridge_command
-    assert out.bridge_rtsp and out.bridge_rtsp.startswith("rtsp://localhost:8554/")
+    # bridge_rtsp is intentionally empty — VideoDB rejects rtsp://localhost
+    # so we don't pre-fill the input. The bridge script prints the real
+    # rtsp://bore.pub:<port>/<slug> public URL which the operator pastes.
+    assert out.bridge_rtsp == ""
     coll.upload.assert_not_called()
 
 
