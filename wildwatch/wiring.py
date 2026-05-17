@@ -78,16 +78,45 @@ def wire_alerts(
         # and bypass the per-alert failure tracking entirely.
         idx = indexes.get(kind)
         if idx is None:
+            # Mirror the per-alert idempotency check (line ~140 of the inner
+            # loop). On re-run with the same rtstream_id, an existing
+            # sentinel means we already logged + recorded this failure;
+            # count it as `reused` and move on so logs don't storm.
+            already_recorded_count = 0
             for ev_id_var in event_id_vars:
+                existing = alert_state.get(f"{kind}.{ev_id_var}")
+                if (
+                    existing is not None
+                    and existing.get("rtstream_id") == rtstream_id
+                    and existing.get("error") == "index_missing"
+                ):
+                    already_recorded_count += 1
+                    result.reused += 1
+                    continue
                 result.failed += 1
                 result.failures.append(
                     WireFailure(kind, ev_id_var, "KeyError: index missing from indexes dict")
                 )
-            logger.error(
-                "wire_alerts: index %r missing from indexes dict; marking %d events as failed",
-                kind,
-                len(event_id_vars),
-            )
+                alert_state[f"{kind}.{ev_id_var}"] = {
+                    "alert_id": None,
+                    "rtstream_id": rtstream_id,
+                    "event_id": None,
+                    "label": label_by_id.get(ev_id_var, ev_id_var),
+                    "tier": tier_by_id.get(ev_id_var),
+                    "callback_url": None,
+                    "ws_connection_id": ws_connection_id,
+                    "error": "index_missing",
+                }
+            # Only log on FRESH failures — re-runs that hit only sentinels
+            # are silent.
+            if already_recorded_count < len(event_id_vars):
+                logger.error(
+                    "wire_alerts: index %r missing from indexes dict; "
+                    "marking %d new + %d already-recorded events as failed",
+                    kind,
+                    len(event_id_vars) - already_recorded_count,
+                    already_recorded_count,
+                )
             continue
         for ev_id_var in event_id_vars:
             # Guard events_map too — if the event registration failed
@@ -95,12 +124,34 @@ def wire_alerts(
             # to KeyError before the per-alert try/except.
             event_id = events_map.get(ev_id_var)
             if event_id is None:
+                # Mirror the missing-index retry-storm guard: if this
+                # (kind, ev_id_var) already has an event_id_missing
+                # sentinel for THIS rtstream, count it as reused and
+                # don't re-log.
+                existing = alert_state.get(f"{kind}.{ev_id_var}")
+                if (
+                    existing is not None
+                    and existing.get("rtstream_id") == rtstream_id
+                    and existing.get("error") == "event_id_missing"
+                ):
+                    result.reused += 1
+                    continue
                 result.failed += 1
                 result.failures.append(
                     WireFailure(kind, ev_id_var, "KeyError: event_id missing from events_map")
                 )
+                alert_state[f"{kind}.{ev_id_var}"] = {
+                    "alert_id": None,
+                    "rtstream_id": rtstream_id,
+                    "event_id": None,
+                    "label": label_by_id.get(ev_id_var, ev_id_var),
+                    "tier": tier_by_id.get(ev_id_var),
+                    "callback_url": None,
+                    "ws_connection_id": ws_connection_id,
+                    "error": "event_id_missing",
+                }
                 logger.error(
-                    "wire_alerts: event %r not in events_map; skipping",
+                    "wire_alerts: event %r not in events_map; skipping (sentinel persisted)",
                     ev_id_var,
                 )
                 continue
