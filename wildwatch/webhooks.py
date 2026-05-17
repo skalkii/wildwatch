@@ -24,7 +24,10 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from pathlib import Path as PPath
-from typing import Annotated, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypedDict
+
+if TYPE_CHECKING:
+    import videodb as _videodb_types  # for type annotations only
 from urllib.parse import urlparse
 
 import aiofiles
@@ -606,8 +609,11 @@ class SourceCreate(BaseModel):
 # cold-cache callers from each running `videodb.connect()` and the second
 # overwriting the first.
 class _ConnCache(TypedDict):
-    conn: Any
-    coll: Any
+    # Annotated with the real SDK types when TYPE_CHECKING; runtime stays
+    # `None | Any` so the videodb import isn't pulled in for callers who
+    # only need the FastAPI app object.
+    conn: _videodb_types.Connection | None
+    coll: _videodb_types.Collection | None
 
 
 _conn_cache: _ConnCache = {"conn": None, "coll": None}
