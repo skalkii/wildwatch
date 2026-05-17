@@ -20,22 +20,17 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
-from wildwatch.events import EVENT_DEFINITIONS, INDEX_EVENT_MAP, EventIdVar, IndexKind
+from wildwatch.events import EVENT_DEFINITIONS, INDEX_EVENT_MAP
 
 logger = logging.getLogger(__name__)
 
 
 class WireFailure(NamedTuple):
-    """One row of WireResult.failures — typed so callers don't rely on
-    positional access. A tuple was load-bearing on position; future
-    changes would silently flip kind ↔ ev_id_var renders.
+    """One row of WireResult.failures — named so callers don't rely on
+    positional access."""
 
-    kind + event_id_var narrowed to their Literal aliases so a typo in
-    a programmatic construction site (e.g. `WireFailure("speciez", ...)`)
-    is a static error rather than a silent log entry."""
-
-    kind: IndexKind
-    event_id_var: EventIdVar
+    kind: str
+    event_id_var: str
     error_repr: str
 
 

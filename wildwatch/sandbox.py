@@ -166,30 +166,18 @@ def managed_sandbox(
         # 3. Body raised, teardown also raised → re-raise body but ATTACH
         #    teardown error as __cause__ via `raise from`, so both are
         #    visible in the traceback without demoting the body.
-        if body_exc is not None and teardown_exc is not None:
-            # Annotate the body exception with the teardown billing leak
-            # note; PEP 678 `add_note` (3.11+) keeps both surfaces visible.
-            try:
+        if body_exc is not None:
+            if teardown_exc is not None:
+                # PEP 678 add_note keeps both surfaces visible in the
+                # traceback so the teardown billing leak isn't hidden by
+                # the body error. Unconditional on Py3.11+.
                 body_exc.add_note(
                     f"NOTE: managed_sandbox teardown also failed for "
                     f"{getattr(sb, 'id', '?')} — sandbox may still be billing. "
                     f"See logger.error above. Teardown exc: {teardown_exc!r}"
                 )
-            except Exception as note_err:
-                # Loud-log instead of silently swallowing — if the
-                # annotation fails AND we never log it, the billing leak
-                # may be invisible.
-                logger.error(
-                    "managed_sandbox: add_note failed: %r — teardown_exc=%r",
-                    note_err,
-                    teardown_exc,
-                )
-            # `raise body_exc.with_traceback(body_exc.__traceback__)` would
-            # work but `raise body_exc` from a fresh `except` frame
-            # re-attaches the current __traceback__, dropping the original
-            # call stack. Use with_traceback explicitly to preserve it.
-            raise body_exc.with_traceback(body_exc.__traceback__)
-        if body_exc is not None:
+            # raise with_traceback explicitly so the original call stack
+            # isn't dropped by the fresh `except` frame.
             raise body_exc.with_traceback(body_exc.__traceback__)
         if teardown_exc is not None:
             raise RuntimeError(

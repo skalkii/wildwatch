@@ -16,7 +16,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Never, TypedDict
+from typing import Any, Literal, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -32,36 +32,14 @@ MAX_RECENT_EVENTS = 50
 #     UI updates. Tagged with `type: source_progress | source_deleted`.
 #     Never counted as an alert.
 #
-# Runtime discriminator: presence/absence of the `type` key. The
-# TypedDicts below document the invariant; static checkers can flag a
-# caller that accidentally puts a `type` key in an alert dict, which
-# would silently route it to the UI-signal branch and drop it from
-# tier counts. The runtime check stays as `"type" not in event` to
-# avoid touching every existing emit site.
+# Runtime discriminator: presence/absence of the `type` key.
 
 
-# Split into required-base + optional-extras using TypedDict inheritance.
-# Static checkers reject `{}` as an AlertEvent or `{}` as a UISignalEvent
-# now — tier/label and type are mandatory, respectively. Without this an
-# empty dict matched either TypedDict structurally and the runtime
-# discriminator (`"type" not in event`) would treat it as an alert and
-# increment _total / _tier_counts.
+class AlertEvent(TypedDict, total=False):
+    """Alert payload — counted into tier stats. No `type` key."""
 
-
-class _AlertEventRequired(TypedDict):
     tier: int
     label: str
-    # `type: Never` makes the absence of this key structurally
-    # load-bearing — a caller that constructs `{"tier": 1, "label": "x",
-    # "type": "source_progress"}` is rejected at the type-check layer.
-    # The runtime discriminator (`"type" not in event`) aligns with the
-    # static contract so the two can't drift.
-    type: Never
-
-
-class AlertEvent(_AlertEventRequired, total=False):
-    """Alert payload — NO `type` key, tier+label REQUIRED."""
-
     event_id: str | None
     confidence: float | None
     explanation: str | None
@@ -72,14 +50,11 @@ class AlertEvent(_AlertEventRequired, total=False):
     received_at: float
 
 
-class _UISignalRequired(TypedDict):
+class UISignalEvent(TypedDict, total=False):
+    """UI signal payload — routed to SSE only, not counted as alerts."""
+
     type: Literal["source_progress", "source_deleted"]
     source_id: str
-
-
-class UISignalEvent(_UISignalRequired, total=False):
-    """UI signal payload — `type` + `source_id` REQUIRED. Routed to SSE only."""
-
     status: str
     stage_msg: str | None
     progress_pct: int | None
@@ -91,8 +66,6 @@ class UISignalEvent(_UISignalRequired, total=False):
     reason: str
     received_at: float
 
-
-BroadcastEvent = AlertEvent | UISignalEvent
 
 # Module-level state ------------------------------------------------------
 

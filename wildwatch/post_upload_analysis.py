@@ -98,8 +98,12 @@ _EVENT_INDEX_KIND = {
     "human_intrusion_visual": "environment",
 }
 
-# Ready-status set — matches `webhooks.py` / `ingest.py`.
-_READY = {"ready", "indexed", "complete", "completed", "done"}
+# Canonical "this index has finished" status set. Shared with
+# webhooks.py via `from wildwatch.post_upload_analysis import
+# INDEX_READY_STATUSES`. NB: distinct from ingest._RT_READY_STATUSES,
+# which is the rtstream-state set (different SDK surface).
+INDEX_READY_STATUSES = {"ready", "indexed", "complete", "completed", "done"}
+_READY = INDEX_READY_STATUSES  # legacy alias for in-module call sites
 
 # How long to wait for an index to finish, total (seconds).
 _INDEX_WAIT_S = 20 * 60

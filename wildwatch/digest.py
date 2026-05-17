@@ -16,55 +16,11 @@ corpus clips so the demo always has a reel to play.
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol, TypedDict, runtime_checkable
+from typing import Any
 
 from wildwatch import event_log
 
 logger = logging.getLogger(__name__)
-
-
-class DigestResult(TypedDict):
-    """Stable shape returned by build_digest. The previous bare-dict
-    return let callers typo a key (e.g. `result["streamurl"]`) and get
-    a silent KeyError at runtime rather than a static error."""
-
-    n_events: int
-    n_clips: int
-    stream_url: str | None
-    player_url: str | None
-    summary: str | None
-
-
-class _DigestEventInput(TypedDict, total=False):
-    """Minimal TypedDict for SYNTHETIC fallback event construction.
-
-    `total=False` marks both keys OPTIONAL. TypedDicts always tolerate
-    extra keys at runtime; static checkers also reject extras when typing
-    a variable against a TypedDict. Real event-log dicts carry many
-    additional fields and flow through `build_timeline` via the broader
-    `DigestEventLike` protocol below (which accepts any object with the
-    two attribute-style accessors we use). The TypedDict here exists
-    purely so the fallback `_DigestEventInput(tier=3, label="")` call
-    site is type-checked at construction.
-    """
-
-    tier: int
-    label: str | None
-
-
-@runtime_checkable
-class DigestEventLike(Protocol):
-    """Structural type for inputs `build_timeline` reads via `.get`.
-
-    Protocol > TypedDict for the public API surface: TypedDicts reject
-    superset dicts at the type-check layer, but real event-log entries
-    carry many fields beyond tier+label. A Protocol expresses "any object
-    with these two readable attributes" without forcing a structural
-    subset. Marked `@runtime_checkable` only for completeness; we don't
-    isinstance-check it.
-    """
-
-    def get(self, key: str, default: Any = ...) -> Any: ...
 
 
 # Eager import of the editor surface so an import error surfaces at module
@@ -225,7 +181,7 @@ _TIER_OVERLAY = {
 
 
 def build_timeline(
-    events: list[DigestEventLike],
+    events: list[dict],
     corpus_state: dict[str, dict],
     conn: Any,
     clip_seconds: int = DEFAULT_CLIP_SECONDS,
@@ -338,11 +294,10 @@ def build_digest(
     add_text_overlays: bool = True,
     add_music: bool = False,
     add_voiceover: bool = False,
-) -> DigestResult:
+) -> dict:
     """End-to-end: read log -> pick top N -> Timeline -> playable URL.
 
-    Returns a ``DigestResult`` TypedDict — callers get static-checked
-    access to all five fields.
+    Returns ``{n_events, n_clips, stream_url, player_url, summary}``.
     """
     import time
 
@@ -356,13 +311,12 @@ def build_digest(
     if not picked:
         # Empty log: synthesise a demo montage from any corpus clips we have.
         # Include explicit empty "label" so downstream consumers that read
-        # ev.get("label") see the expected key (rather than relying on
-        # `or ""` everywhere).
+        # ev.get("label") see the expected key.
         logger.info("digest: event log empty; synthesising default montage")
         picked = [
-            _DigestEventInput(tier=3, label=""),
-            _DigestEventInput(tier=2, label=""),
-            _DigestEventInput(tier=1, label=""),
+            {"tier": 3, "label": ""},
+            {"tier": 2, "label": ""},
+            {"tier": 1, "label": ""},
         ]
 
     timeline, n_clips = build_timeline(

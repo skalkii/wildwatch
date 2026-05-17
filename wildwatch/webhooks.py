@@ -1902,7 +1902,7 @@ async def api_search(req: SearchRequest) -> dict:
             out.update(extra)
         return out
 
-    _READY = {"ready", "indexed", "complete", "completed", "done"}
+    from wildwatch.post_upload_analysis import INDEX_READY_STATUSES
 
     async def _video_scene_search(v: Any, query: str) -> list[dict]:
         """Search one video's scene index. Returns shots or empty list."""
@@ -1911,7 +1911,7 @@ async def api_search(req: SearchRequest) -> dict:
         except Exception as e:
             logger.debug("collection-search: list_scene_index failed for %s: %r", v.id, e)
             return []
-        ready = [i for i in idxs if str(i.get("status", "")).lower() in _READY]
+        ready = [i for i in idxs if str(i.get("status", "")).lower() in INDEX_READY_STATUSES]
         if not ready:
             return []
         kwargs: dict[str, Any] = {"query": query, "score_threshold": 0.3}
