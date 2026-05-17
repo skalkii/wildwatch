@@ -1450,9 +1450,27 @@ async def api_video_clip(video_id: str, start: float, end: float) -> dict:
 
 @app.get("/api/rtstreams/{rt_id}/indexes")
 async def api_rtstream_indexes(rt_id: str) -> dict:
+    """Return scene indexes for an rtstream.
+
+    Returns 404 (not 500) when VideoDB reports "Stream not found" — the
+    rtstream may have been deleted out-of-band or the id is stale in
+    `.state.json`. The dashboard renders 404 as a "gone" state rather
+    than a generic SDK error banner.
+    """
     try:
         coll = await _async_sdk(_get_coll, timeout_s=10.0)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"connection failed: {e}") from e
+    try:
         rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
+    except Exception as e:
+        msg = str(e)
+        if "Stream not found" in msg or "not found" in msg.lower():
+            raise HTTPException(
+                status_code=404, detail=f"rtstream {rt_id} not found on VideoDB"
+            ) from e
+        raise HTTPException(status_code=502, detail=f"get_rtstream failed: {e}") from e
+    try:
         raw = _coerce_to_list(
             await _async_sdk(rt.list_scene_indexes, timeout_s=5.0),
             source=f"rtstream({rt_id}).list_scene_indexes",
@@ -1469,7 +1487,7 @@ async def api_rtstream_indexes(rt_id: str) -> dict:
         ]
         return {"rtstream_id": rt_id, "indexes": indexes}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=502, detail=f"list_scene_indexes failed: {e}") from e
 
 
 @app.get("/api/rtstreams/{rt_id}/scenes/{index_id}")

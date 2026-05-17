@@ -1332,8 +1332,13 @@ function formatDuration(sec) {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
-function videoKindIcon(name) {
-  const n = (name || '').toLowerCase();
+function videoKindIcon(v) {
+  // Accepts either a name string (legacy) or a library entry object.
+  const isObj = v && typeof v === 'object';
+  if (isObj && v._kind === 'rtstream') {
+    return { label: 'Live stream', color: '#ef4444' };
+  }
+  const n = (isObj ? (v.name || '') : (v || '')).toLowerCase();
   let label = 'Clip';
   let color = '#0ea5e9';
   if (n.includes('live') || n.includes('rtsp') || n.includes('segment')) { label = 'Stream snippet'; color = '#a78bfa'; }
@@ -1346,8 +1351,10 @@ function videoKindIcon(name) {
 // hit the API. _libraryVids is the raw payload from /api/videos.
 let _libraryVids = [];
 
-function _libraryKindKey(name) {
-  const n = (name || '').toLowerCase();
+function _libraryKindKey(v) {
+  // Accepts entry obj OR plain name string for back-compat.
+  if (v && typeof v === 'object' && v._kind === 'rtstream') return 'stream';
+  const n = (typeof v === 'object' ? (v.name || '') : (v || '')).toLowerCase();
   if (n.includes('live') || n.includes('rtsp') || n.includes('segment')) return 'stream';
   if (n.includes('digest') || n.includes('reel') || n.includes('highlight')) return 'reel';
   if (n.includes('upload') || n.includes('sample')) return 'uploaded';
@@ -1369,7 +1376,7 @@ function _renderLibrary() {
     );
   }
   if (kind !== 'all') {
-    vids = vids.filter(v => _libraryKindKey(v.name) === kind);
+    vids = vids.filter(v => _libraryKindKey(v) === kind);
   }
   const cmp = {
     'name-asc':    (a,b) => (a.name||'').localeCompare(b.name||''),
@@ -1402,24 +1409,35 @@ function _renderLibrary() {
     return;
   }
   el.innerHTML = vids.map(v => {
-    const dur = formatDuration(v.length);
-    const kindMeta = videoKindIcon(v.name);
+    const isRtstream = v._kind === 'rtstream';
+    const dur = isRtstream ? 'LIVE' : formatDuration(v.length);
+    const kindMeta = videoKindIcon(v);
     const thumb = v.thumbnail_url
       ? `<img src="${escapeHtml(v.thumbnail_url)}" alt="" class="w-14 h-14 rounded-md object-cover shrink-0" loading="lazy">`
       : `<div class="w-14 h-14 rounded-md shrink-0 flex items-center justify-center" style="background:color-mix(in oklab,${kindMeta.color} 14%,transparent); color:${kindMeta.color}">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          ${isRtstream
+            ? '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5 12a7 7 0 0 1 14 0"/><path d="M2 12a10 10 0 0 1 20 0"/></svg>'
+            : '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>'
+          }
         </div>`;
     const playUrl = safeUrl(v.stream_url);
     const playBtn = playUrl
       ? `<a href="${escapeHtml(playUrl)}" target="_blank" rel="noopener" data-stop-propagation class="link text-[11px] mono shrink-0">&#9658; play</a>`
       : '';
-    const deleteBtn = `<button data-action="delete-video" data-id="${escapeHtml(v.id)}" data-name="${escapeHtml(v.name || v.id)}" data-stop-propagation class="text-[11px] shrink-0" style="background:none; border:1px solid var(--border); color:#ef4444; padding:0.15rem 0.45rem; border-radius:5px; cursor:pointer;" title="Delete this video from VideoDB">&times; delete</button>`;
-    return `<div class="card-soft p-2.5 flex items-center gap-3 cursor-pointer hover:border-[var(--border-strong)] transition" style="border:1px solid var(--border)" data-action="show-video" data-id="${escapeHtml(v.id)}">
+    const deleteBtn = isRtstream
+      ? ''  // rtstreams aren't deleted from the library — use Sources tab to disconnect.
+      : `<button data-action="delete-video" data-id="${escapeHtml(v.id)}" data-name="${escapeHtml(v.name || v.id)}" data-stop-propagation class="text-[11px] shrink-0" style="background:none; border:1px solid var(--border); color:#ef4444; padding:0.15rem 0.45rem; border-radius:5px; cursor:pointer;" title="Delete this video from VideoDB">&times; delete</button>`;
+    const action = isRtstream ? 'show-rtstream' : 'show-video';
+    const rtStatusPill = isRtstream && v._rt_status
+      ? `<span class="pill" style="color:#a78bfa; background:color-mix(in oklab,#a78bfa 14%,transparent);">${escapeHtml(v._rt_status)}</span>`
+      : '';
+    return `<div class="card-soft p-2.5 flex items-center gap-3 cursor-pointer hover:border-[var(--border-strong)] transition" style="border:1px solid var(--border)" data-action="${action}" data-id="${escapeHtml(v.id)}">
       ${thumb}
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap">
-          <div class="text-sm font-medium truncate" title="${escapeHtml(v.name || 'untitled')}">${escapeHtml(v.name || 'Untitled clip')}</div>
+          <div class="text-sm font-medium truncate" title="${escapeHtml(v.name || 'untitled')}">${escapeHtml(v.name || 'Untitled')}</div>
           <span class="pill" style="color:${kindMeta.color}; background:color-mix(in oklab,${kindMeta.color} 14%,transparent);">${kindMeta.label}</span>
+          ${rtStatusPill}
         </div>
         <div class="text-[11px] faint flex items-center gap-2 mt-0.5 flex-wrap" data-stop-propagation>
           <span class="mono">${dur}</span>
@@ -1436,12 +1454,29 @@ function _renderLibrary() {
 }
 
 async function fetchVideos() {
+  // Merge two SDK surfaces into the Library: archive videos
+  // (`coll.get_videos`) AND live rtstreams (`coll.list_rtstreams`,
+  // surfaced via /api/remote). Both are "things the AI is watching" —
+  // surfacing them together stops users wondering why a connected RTSP
+  // source doesn't appear in the Library.
   try {
-    const r = await fetch('/api/videos');
-    const d = await r.json();
-    _libraryVids = d.videos || [];
+    const [vr, rr] = await Promise.all([
+      fetch('/api/videos').then(r => r.json()).catch(() => ({ videos: [] })),
+      fetch('/api/remote').then(r => r.json()).catch(() => ({ rtstreams: [] })),
+    ]);
+    const videos = (vr.videos || []).map(v => ({ ...v, _kind: 'video' }));
+    const rtstreams = (rr.rtstreams || []).map(rt => ({
+      id: rt.id,
+      name: rt.name || rt.id,
+      length: null,
+      stream_url: null,
+      thumbnail_url: null,
+      _kind: 'rtstream',
+      _rt_status: rt.status,
+    }));
+    _libraryVids = [...rtstreams, ...videos];
     _renderLibrary();
-  } catch (e) { console.warn('videos fetch failed', e); }
+  } catch (e) { console.warn('library fetch failed', e); }
 }
 
 async function deleteVideo(videoId, name) {
@@ -1515,6 +1550,72 @@ function _indexStatusPill(status) {
 }
 
 const _READY_INDEX_STATUSES = ['ready', 'indexed', 'complete', 'completed', 'done'];
+
+async function showRtstreamDetail(rtId) {
+  // Mirror of showVideoDetail but for rtstreams. Live streams have their
+  // own SDK surface (`rtstream.list_scene_indexes` / `rtstream.search`)
+  // that's distinct from the uploaded-video API. Path-B alerts don't
+  // run here — rtstreams use bootstrap.py's wired events. Show whatever
+  // indexes exist + status, but skip the re-index / scene-clip player
+  // controls that only make sense for archive videos.
+  const el = $('content-detail');
+  el.dataset.videoId = '';
+  el.dataset.rtstreamId = rtId;
+  el.innerHTML = `<span class="faint">loading rtstream ${escapeHtml(rtId)} &hellip;</span>`;
+  try {
+    const r = await fetch(`/api/rtstreams/${encodeURIComponent(rtId)}/indexes`);
+    const d = await r.json();
+    if (!r.ok) {
+      const detail = d.detail || JSON.stringify(d);
+      const hint = (r.status === 404)
+        ? '<div class="text-[11.5px] muted mt-1">The rtstream is no longer on VideoDB. It may have been disconnected or the stream registration expired.</div>'
+        : '';
+      el.innerHTML = `<div class="card-soft p-4">
+        <div class="text-sm font-medium" style="color:#ef4444">Couldn't load rtstream</div>
+        <div class="text-[11.5px] mt-1">${escapeHtml(detail)}</div>
+        ${hint}
+      </div>`;
+      return;
+    }
+    const idxs = d.indexes || [];
+    if (idxs.length === 0) {
+      el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+          <div class="text-[11px] faint inline-flex items-center gap-2">RTStream ${_idPill(rtId, {truncate: true})}</div>
+        </div>
+        <div class="card-soft p-4">
+          <div class="text-sm font-medium">No indexes wired yet</div>
+          <div class="text-[11.5px] faint mt-1">Live rtstreams need <code class="mono">scripts/bootstrap.py</code> to wire the four AI indexes (species / behavior / environment / audio) and the 18 event alerts. From a terminal:</div>
+          <pre class="mono text-[11px] mt-2 p-2 rounded" style="background:var(--bg-soft); border:1px solid var(--border); overflow-x:auto;">uv run python scripts/bootstrap.py --observe 300</pre>
+          <div class="text-[11.5px] faint mt-1">You also need <code class="mono">WEBHOOK_BASE_URL</code> in <code class="mono">.env</code> pointing at a public tunnel (cloudflared) so VideoDB can POST alert callbacks back to your laptop.</div>
+        </div>`;
+      return;
+    }
+    el.innerHTML = `<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+        <div class="text-[11px] faint inline-flex items-center gap-2">RTStream ${_idPill(rtId, {truncate: true})}</div>
+      </div>
+      <div class="space-y-2">
+        ${idxs.map(i => {
+          const idxId = i.rtstream_index_id || i.id || '';
+          const name = i.name || `Index ${idxId.slice(0, 8)}…`;
+          return `<div class="card-soft p-3">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  ${_indexKindPill(name)}
+                  <div class="text-sm font-medium truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+                </div>
+                <div class="mt-1">${_idPill(idxId, {truncate: true})}</div>
+              </div>
+              ${_indexStatusPill(i.status)}
+            </div>
+            ${i.prompt ? `<div class="text-[11px] faint mt-2 break-words" style="white-space:pre-wrap; max-height:120px; overflow-y:auto;">${escapeHtml(String(i.prompt).slice(0, 600))}${i.prompt.length > 600 ? '…' : ''}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`;
+  }
+}
 
 async function showVideoDetail(videoId) {
   const el = $('content-detail');
@@ -2348,6 +2449,7 @@ document.addEventListener('click', (e) => {
     case 'disconnect':      disconnectSource(id);    break;
     case 'delete':          deleteSource(id);        break;
     case 'show-video':      showVideoDetail(id);     break;
+    case 'show-rtstream':   showRtstreamDetail(id);  break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
     case 'toggle-scenes-pane': {
       const pane = document.getElementById(t.dataset.pane);
