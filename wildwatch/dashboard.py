@@ -44,14 +44,31 @@ def reset_state() -> None:
 
 
 def broadcast(event: dict[str, Any]) -> None:
-    """Record + fanout to every subscriber. Called from webhook handler."""
+    """Record + fanout to every subscriber.
+
+    Two classes of broadcasts share this channel:
+
+    1. **Alerts** — payloads coming through ``/webhook/{tier}``. These have
+       a numeric ``tier`` and live in the alert feed + KPI counters.
+
+    2. **UI signals** — non-alert pushes the server emits to make the
+       dashboard reactive (currently only ``type="source_progress"`` from
+       ``wildwatch.ingest``). These MUST flow through SSE so cards animate,
+       but they must NOT pollute the alert feed or the tier counters.
+
+    We discriminate on ``event.get("type")``: alerts never set ``type``;
+    UI signals always do. Older callers that don't set ``type`` are
+    therefore treated as alerts — backwards-compatible.
+    """
     global _total, _dropped_total
-    _total += 1
-    tier = int(event.get("tier", 0))
-    _tier_counts[tier] += 1
-    _recent_events.append({**event, "received_at": event.get("received_at", time.time())})
-    if len(_recent_events) > MAX_RECENT_EVENTS:
-        _recent_events.pop(0)
+    is_alert = "type" not in event
+    if is_alert:
+        _total += 1
+        tier = int(event.get("tier", 0))
+        _tier_counts[tier] += 1
+        _recent_events.append({**event, "received_at": event.get("received_at", time.time())})
+        if len(_recent_events) > MAX_RECENT_EVENTS:
+            _recent_events.pop(0)
     # Fanout to subscribers (sync put_nowait so the webhook response path
     # never blocks on a slow SSE client). A full queue means the client
     # is too slow to drain — we drop the event but COUNT and LOG it so
