@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from pathlib import Path as PPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import urlparse
 
 import aiofiles
@@ -73,25 +73,30 @@ def _spawn_bg(coro, *, label: str) -> asyncio.Task:
     return task
 
 
-# Cache for /api/remote: list_rtstreams + list_sandboxes (10s TTL to avoid
-# hammering the SDK from dashboard polls). Locks guard the read-TTL-then-
-# write pattern from concurrent route handlers — without them the same
-# stale entry can be re-fetched in parallel by two requests racing past
-# the TTL check.
-_remote_cache: dict = {"at": 0.0, "data": {"rtstreams": [], "sandboxes": []}}
+class _CacheEntry(TypedDict):
+    """Shape contract for the three module-level caches.
+
+    Locks guard the read-TTL-then-write pattern from concurrent route
+    handlers — without them the same stale entry can be re-fetched in
+    parallel by two requests racing past the TTL check.
+    """
+
+    at: float
+    data: Any  # endpoint-specific payload shape
+
+
+_remote_cache: _CacheEntry = {"at": 0.0, "data": {"rtstreams": [], "sandboxes": []}}
 _REMOTE_TTL_S = 10.0
 _remote_lock = threading.Lock()
 
-# Cache for /api/videos (30s TTL).
-_videos_cache: dict = {"at": 0.0, "data": {"videos": []}}
+_videos_cache: _CacheEntry = {"at": 0.0, "data": {"videos": []}}
 _VIDEOS_TTL_S = 30.0
 _videos_lock = threading.Lock()
 
-# Cache for /api/usage (60s TTL — billing endpoints are slow).
 # `data` defaults to None (not {}) so the `data is not None` check below is
 # unambiguous — an empty-dict response would otherwise miss the cache and
 # hammer the SDK on every poll.
-_usage_cache: dict = {"at": 0.0, "data": None}
+_usage_cache: _CacheEntry = {"at": 0.0, "data": None}
 _USAGE_TTL_S = 60.0
 _usage_lock = threading.Lock()
 
@@ -112,11 +117,12 @@ def _get_executor() -> ThreadPoolExecutor:
                 _SDK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sdk")
                 import atexit
 
-                atexit.register(
-                    lambda: (
-                        _SDK_EXECUTOR and _SDK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-                    )
-                )
+                # Capture the executor reference in the closure so atexit
+                # operates on the exact instance we just created — not a
+                # later reassignment via the global. Idempotent shutdown
+                # makes a double-call (atexit + lifespan) safe regardless.
+                _exec_ref = _SDK_EXECUTOR
+                atexit.register(lambda: _exec_ref.shutdown(wait=False, cancel_futures=True))
     return _SDK_EXECUTOR
 
 
@@ -145,16 +151,44 @@ def _with_timeout(fn, *args, timeout_s: float = 5.0, **kwargs):
     try:
         return fut.result(timeout=timeout_s)
     except FutureTimeoutError as e:
+        # IMPORTANT: fut.cancel() is a NO-OP on an already-running future.
+        # ThreadPoolExecutor workers cannot be interrupted from the outside.
+        # A truly hung SDK call (e.g. a stuck network read) will keep the
+        # worker thread occupied until the call eventually returns — that
+        # consumes a slot in our 4-worker pool. The pool is sized assuming
+        # most calls complete within timeout_s. If a deployment sees pool
+        # exhaustion, switch the affected call sites to use a subprocess
+        # or grow the pool. We still call cancel() for the case where the
+        # future hasn't started yet (queued waiting for a worker).
         fut.cancel()
         fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
         raise TimeoutError(f"SDK call {fn_name!r} timed out after {timeout_s}s") from e
 
 
 async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
-    """Async wrapper: dispatch a blocking SDK call to the thread pool
-    without blocking the asyncio event loop. Use this from `async def`
-    route handlers. `_with_timeout` is fine from sync handlers."""
-    return await asyncio.to_thread(_with_timeout, fn, *args, timeout_s=timeout_s, **kwargs)
+    """Async wrapper: dispatch a blocking SDK call directly to our SDK
+    thread pool via ``loop.run_in_executor``, with a deadline enforced by
+    ``asyncio.wait_for``. ONE worker thread per call.
+
+    Previous implementation called ``asyncio.to_thread(_with_timeout, ...)``
+    which took a slot in asyncio's default thread pool AND inside that
+    thread blocked on ``ThreadPoolExecutor.submit().result()`` — TWO
+    threads per call, halving the effective throughput of ``_SDK_EXECUTOR``.
+    """
+    import functools
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(fn, *args, **kwargs)
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_get_executor(), call),
+            timeout=timeout_s,
+        )
+    except TimeoutError as e:
+        # asyncio.wait_for raises builtin TimeoutError in 3.11+; catch
+        # at the same site so we can re-raise with the function name.
+        fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+        raise TimeoutError(f"SDK call {fn_name!r} timed out after {timeout_s}s") from e
 
 
 # ── CSRF / cross-origin guard for mutating endpoints ────────────────────
@@ -192,30 +226,33 @@ async def _csrf_origin_guard(request: Request, call_next):
 
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
-        # DEFAULT-DENY on missing Origin for mutating requests. The previous
-        # UA-sniff bypass let any client without "mozilla/chrome/..." in its
-        # UA through (curl, browser extensions, service workers, attackers
-        # spoofing UA), defeating the purpose. CLI users can add their host
-        # via WILDWATCH_ALLOW_NO_ORIGIN=1 if they really need it.
+        # DEFAULT-DENY on missing Origin for mutating requests. CLI users
+        # can opt out via WILDWATCH_ALLOW_NO_ORIGIN=1 if they really need it.
         if os.environ.get("WILDWATCH_ALLOW_NO_ORIGIN") == "1":
             return await call_next(request)
         return JSONResponse(
             status_code=403,
             content={
+                "reason": "missing_origin",
                 "detail": (
                     "missing Origin/Referer on mutating request. "
                     "Set WILDWATCH_ALLOW_NO_ORIGIN=1 for trusted CLI use."
-                )
+                ),
             },
         )
     try:
         host = (urlparse(origin).hostname or "").lower()
     except Exception:
-        return JSONResponse(status_code=403, content={"detail": "bad Origin"})
+        return JSONResponse(
+            status_code=403, content={"reason": "bad_origin", "detail": "bad Origin"}
+        )
     if host not in _ALLOWED_ORIGIN_HOSTS:
+        # `reason` lets a proxy-stripped-Origin case (missing_origin) be
+        # distinguished from a real cross-origin attempt (disallowed_host)
+        # in monitoring without parsing the detail string.
         return JSONResponse(
             status_code=403,
-            content={"detail": f"Origin {host!r} not allowed"},
+            content={"reason": "disallowed_host", "detail": f"Origin {host!r} not allowed"},
         )
     return await call_next(request)
 
@@ -323,7 +360,7 @@ async def api_remote() -> JSONResponse:
         if (now - _remote_cache["at"]) < _REMOTE_TTL_S:
             return JSONResponse(_remote_cache["data"])
     try:
-        coll = _get_coll()
+        coll = await asyncio.to_thread(_get_coll)
         rts = await _async_sdk(coll.list_rtstreams, timeout_s=5.0) or []
         sbs = await _async_sdk(_get_conn().list_sandboxes, timeout_s=5.0) or []
         rtstreams = [
@@ -407,7 +444,12 @@ class SourceCreate(BaseModel):
 # latency and turns the dashboard into a slow disaster. Lock prevents two
 # cold-cache callers from each running `videodb.connect()` and the second
 # overwriting the first.
-_conn_cache: dict[str, Any] = {"conn": None, "coll": None}
+class _ConnCache(TypedDict):
+    conn: Any
+    coll: Any
+
+
+_conn_cache: _ConnCache = {"conn": None, "coll": None}
 # RLock not Lock — _get_coll acquires the lock and then calls _get_conn
 # which acquires it again. A plain threading.Lock would deadlock on the
 # same thread. RLock allows recursive acquisition by the holder.
@@ -457,13 +499,18 @@ async def api_create_source(payload: SourceCreate) -> dict:
 
     `upload` is rejected at the Pydantic Literal layer — use the dedicated
     multipart endpoint /api/sources/upload.
+
+    Both ``sources.add_source`` (disk IO + lock) and ``_get_coll`` (cold-
+    start SDK auth) are blocking and must not run on the event loop.
     """
     try:
-        s = sources.add_source(kind=payload.kind, input=payload.input, name=payload.name)
+        s = await asyncio.to_thread(
+            sources.add_source, kind=payload.kind, input=payload.input, name=payload.name
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    coll = _get_coll()
+    coll = await asyncio.to_thread(_get_coll)
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch({s.id})")
     return s.__dict__
 
@@ -474,8 +521,9 @@ def _looks_like_video(head: bytes) -> bool:
     Without this the upload endpoint accepts any bytes, renames them to
     `.mp4`, and hands them to VideoDB. An attacker can upload HTML/script
     that any downstream player or VideoDB previewer might interpret.
-    Cheap defence: require the first 32 bytes to match a known video
-    container signature.
+    Cheap defence: require the first ~200 bytes to match a known video
+    container signature (the MPEG-TS check needs 189 bytes for the
+    sync-byte recurrence at offset 188; other containers need <32).
     """
     if len(head) < 12:
         return False
@@ -488,8 +536,12 @@ def _looks_like_video(head: bytes) -> bool:
     # AVI — RIFF....AVI
     if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
         return True
-    # MPEG-TS — sync byte every 188 bytes; first byte 0x47
-    if head[:1] == b"\x47":
+    # MPEG-TS — sync byte 0x47 recurs every 188 bytes. A single 0x47 at
+    # offset 0 matches any file starting with ASCII 'G' (e.g. an HTML
+    # tag like `<G...>`), so require the recurrence to confirm the
+    # container. If the head sniff is < 189 bytes we can't verify and
+    # err on the side of rejecting.
+    if head[:1] == b"\x47" and len(head) >= 189 and head[188:189] == b"\x47":
         return True
     # MPEG-PS / MPEG-1 / MPEG-2 video
     if head[:4] == b"\x00\x00\x01\xba" or head[:4] == b"\x00\x00\x01\xb3":
@@ -505,8 +557,14 @@ async def api_upload_source(
     file: Annotated[UploadFile, File(...)],
     name: Annotated[str, Form(...)],
 ) -> dict:
-    """Multipart upload path. Streams to a tempfile, then dispatches."""
-    s = sources.add_source(kind="upload", input="", name=name)
+    """Multipart upload path. Streams to a tempfile, then dispatches.
+
+    Bytes are streamed through aiofiles (already async). Everything else
+    that touches .state.json or the SDK goes through asyncio.to_thread to
+    keep the event loop unblocked. On 415 we DELETE the source row rather
+    than leaving an orphan `status=error` entry.
+    """
+    s = await asyncio.to_thread(sources.add_source, kind="upload", input="", name=name)
 
     tmp = tempfile.NamedTemporaryFile(
         delete=False, prefix=f"wildwatch-upload-{s.id[:8]}-", suffix=".mp4"
@@ -519,11 +577,11 @@ async def api_upload_source(
         async with aiofiles.open(tmp_path, "wb") as out:
             while chunk := await file.read(1024 * 1024):
                 # Reject obviously non-video uploads on the first chunk.
-                # Renaming attacker bytes to `.mp4` and feeding them to
-                # VideoDB is a real risk if any downstream service ever
-                # treats the file as HTML/JS.
                 if not sniff_done:
-                    if not _looks_like_video(chunk[:32]):
+                    # 256 bytes covers both the simple ftyp/EBML/RIFF
+                    # signatures at the head AND the MPEG-TS sync byte
+                    # recurrence at offset 188.
+                    if not _looks_like_video(chunk[:256]):
                         raise HTTPException(
                             status_code=415,
                             detail=(
@@ -534,29 +592,40 @@ async def api_upload_source(
                         )
                     sniff_done = True
                 written += len(chunk)
-                if written > UPLOAD_MAX_BYTES:
+                # >= not > so the cap is a hard ceiling (a file of exactly
+                # UPLOAD_MAX_BYTES bytes previously slipped through).
+                if written >= UPLOAD_MAX_BYTES:
                     raise HTTPException(
                         status_code=413,
                         detail=f"upload exceeds {UPLOAD_MAX_BYTES // (1024 * 1024)} MB cap",
                     )
                 await out.write(chunk)
-        sources.update_source(
+        await asyncio.to_thread(
+            sources.update_source,
             s.id,
             input=str(tmp_path),
             stage_msg=f"received {written} bytes; queued for upload",
         )
     except HTTPException as e:
         tmp_path.unlink(missing_ok=True)
-        sources.update_source(s.id, status="error", error=str(e.detail))
+        # 415 specifically means we refused to accept the file at all —
+        # don't leave an orphan `status=error` source row behind. Delete
+        # the record entirely so /api/sources doesn't show a phantom.
+        if e.status_code == 415:
+            await asyncio.to_thread(sources.delete_source, s.id)
+        else:
+            await asyncio.to_thread(
+                sources.update_source, s.id, status="error", error=str(e.detail)
+            )
         raise
     except Exception as e:
         tmp_path.unlink(missing_ok=True)
-        sources.update_source(s.id, status="error", error=str(e))
+        await asyncio.to_thread(sources.update_source, s.id, status="error", error=str(e))
         raise
 
-    coll = _get_coll()
+    coll = await asyncio.to_thread(_get_coll)
     _spawn_bg(ingest.dispatch(s.id, coll=coll), label=f"ingest.dispatch.upload({s.id})")
-    return sources.get_source(s.id).__dict__
+    return (await asyncio.to_thread(sources.get_source, s.id)).__dict__
 
 
 @app.delete("/api/sources/{source_id}")
@@ -568,7 +637,7 @@ async def api_delete_source(source_id: str) -> dict:
     # but collect every failure so the caller can see remote resources that
     # may still be running (and burning credits). All blocking SDK calls go
     # through asyncio.to_thread so the event loop stays responsive.
-    coll = _get_coll()
+    coll = await asyncio.to_thread(_get_coll)
     warnings: list[str] = []
     if s.rtstream_id:
         try:
@@ -597,7 +666,7 @@ async def api_disconnect_source(source_id: str) -> dict:
         raise HTTPException(status_code=404, detail="source not found")
     if not s.rtstream_id:
         return {"status": "noop", "reason": "no rtstream attached"}
-    coll = _get_coll()
+    coll = await asyncio.to_thread(_get_coll)
     try:
         rt = await asyncio.to_thread(coll.get_rtstream, s.rtstream_id)
         await asyncio.to_thread(rt.stop)
@@ -612,15 +681,21 @@ async def api_disconnect_source(source_id: str) -> dict:
 
 @app.post("/api/sources/{source_id}/reconnect")
 async def api_reconnect_source(source_id: str) -> dict:
-    s = sources.get_source(source_id)
+    s = await asyncio.to_thread(sources.get_source, source_id)
     if s is None:
         raise HTTPException(status_code=404, detail="source not found")
-    sources.update_source(source_id, status="queued", error=None, stage_msg="reconnect requested")
-    coll = _get_coll()
+    await asyncio.to_thread(
+        sources.update_source,
+        source_id,
+        status="queued",
+        error=None,
+        stage_msg="reconnect requested",
+    )
+    coll = await asyncio.to_thread(_get_coll)
     _spawn_bg(
         ingest.dispatch(source_id, coll=coll), label=f"ingest.dispatch.reconnect({source_id})"
     )
-    return sources.get_source(source_id).__dict__
+    return (await asyncio.to_thread(sources.get_source, source_id)).__dict__
 
 
 # ──── Indexed Content explorer routes ────────────────────────────────────
@@ -639,7 +714,7 @@ async def api_list_videos() -> JSONResponse:
         if (now - _videos_cache["at"]) < _VIDEOS_TTL_S:
             return JSONResponse(_videos_cache["data"])
     try:
-        coll = _get_coll()
+        coll = await asyncio.to_thread(_get_coll)
         videos = await _async_sdk(coll.get_videos, timeout_s=8.0)
         items = []
         for v in videos:
@@ -691,12 +766,12 @@ def _coerce_to_list(value: Any, *, source: str) -> list:
 
 
 @app.get("/api/videos/{video_id}/indexes")
-def api_video_indexes(video_id: str) -> dict:
+async def api_video_indexes(video_id: str) -> dict:
     try:
-        coll = _get_coll()
-        video = coll.get_video(video_id)
+        coll = await asyncio.to_thread(_get_coll)
+        video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         indexes = _coerce_to_list(
-            video.list_scene_index(),
+            await _async_sdk(video.list_scene_index, timeout_s=5.0),
             source=f"video({video_id}).list_scene_index",
         )
         return {"video_id": video_id, "indexes": indexes}
@@ -705,12 +780,12 @@ def api_video_indexes(video_id: str) -> dict:
 
 
 @app.get("/api/videos/{video_id}/scenes/{index_id}")
-def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
+async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
     try:
-        coll = _get_coll()
-        video = coll.get_video(video_id)
+        coll = await asyncio.to_thread(_get_coll)
+        video = await _async_sdk(coll.get_video, video_id, timeout_s=5.0)
         scenes = _coerce_to_list(
-            video.get_scene_index(index_id),
+            await _async_sdk(video.get_scene_index, index_id, timeout_s=5.0),
             source=f"video({video_id}).get_scene_index({index_id})",
         )
         # Server-side slice -- callers can paginate later
@@ -720,12 +795,12 @@ def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dict:
 
 
 @app.get("/api/rtstreams/{rt_id}/indexes")
-def api_rtstream_indexes(rt_id: str) -> dict:
+async def api_rtstream_indexes(rt_id: str) -> dict:
     try:
-        coll = _get_coll()
-        rt = coll.get_rtstream(rt_id)
+        coll = await asyncio.to_thread(_get_coll)
+        rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
         raw = _coerce_to_list(
-            rt.list_scene_indexes(),
+            await _async_sdk(rt.list_scene_indexes, timeout_s=5.0),
             source=f"rtstream({rt_id}).list_scene_indexes",
         )
         indexes = [
@@ -744,12 +819,12 @@ def api_rtstream_indexes(rt_id: str) -> dict:
 
 
 @app.get("/api/rtstreams/{rt_id}/scenes/{index_id}")
-def api_rtstream_scenes(rt_id: str, index_id: str, page_size: int = 20) -> dict:
+async def api_rtstream_scenes(rt_id: str, index_id: str, page_size: int = 20) -> dict:
     try:
-        coll = _get_coll()
-        rt = coll.get_rtstream(rt_id)
-        idx = rt.get_scene_index(index_id)
-        data = idx.get_scenes(page=1, page_size=page_size)
+        coll = await asyncio.to_thread(_get_coll)
+        rt = await _async_sdk(coll.get_rtstream, rt_id, timeout_s=5.0)
+        idx = await _async_sdk(rt.get_scene_index, index_id, timeout_s=5.0)
+        data = await _async_sdk(idx.get_scenes, page=1, page_size=page_size, timeout_s=5.0)
         return {"rtstream_id": rt_id, "index_id": index_id, "data": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -1026,7 +1101,7 @@ async def api_usage() -> dict:
 
 
 @app.post("/api/search")
-def api_search(req: SearchRequest) -> dict:
+async def api_search(req: SearchRequest) -> dict:
     """Search across collection/video/rtstream scopes.
 
     Skill conformance (video-db/skills · search-reference.md):
@@ -1038,7 +1113,7 @@ def api_search(req: SearchRequest) -> dict:
         "No results found"); catch it and return ``shots: []`` instead of
         a 500. That's what every skill example does.
     """
-    coll = _get_coll()
+    coll = await asyncio.to_thread(_get_coll)
     # Late import — videodb is heavy + we want the SDK constants if available.
     try:
         from videodb import IndexType, SearchType
@@ -1057,7 +1132,7 @@ def api_search(req: SearchRequest) -> dict:
             if SearchType is not None:
                 kwargs["search_type"] = SearchType.semantic
             try:
-                result = coll.search(**kwargs)
+                result = await _async_sdk(coll.search, timeout_s=10.0, **kwargs)
             except Exception as e:
                 if "No results found" in str(e):
                     return _empty("collection")
@@ -1068,12 +1143,12 @@ def api_search(req: SearchRequest) -> dict:
         if req.scope == "video":
             if not req.target_id:
                 raise HTTPException(status_code=400, detail="target_id required for video scope")
-            v = coll.get_video(req.target_id)
+            v = await _async_sdk(coll.get_video, req.target_id, timeout_s=5.0)
             kwargs = {"query": req.query, "score_threshold": 0.3}
             if IndexType is not None:
                 kwargs["index_type"] = IndexType.scene
             try:
-                result = v.search(**kwargs)
+                result = await _async_sdk(v.search, timeout_s=10.0, **kwargs)
             except Exception as e:
                 if "No results found" in str(e):
                     return _empty("video", {"video_id": req.target_id})
@@ -1088,14 +1163,14 @@ def api_search(req: SearchRequest) -> dict:
         if req.scope == "rtstream":
             if not req.target_id:
                 raise HTTPException(status_code=400, detail="target_id required for rtstream scope")
-            rt = coll.get_rtstream(req.target_id)
+            rt = await _async_sdk(coll.get_rtstream, req.target_id, timeout_s=5.0)
             kwargs = {"query": req.query, "score_threshold": 0.3}
             if IndexType is not None:
                 kwargs["index_type"] = IndexType.scene
             if req.index_id:
                 kwargs["index_id"] = req.index_id
             try:
-                result = rt.search(**kwargs)
+                result = await _async_sdk(rt.search, timeout_s=10.0, **kwargs)
             except Exception as e:
                 if "No results found" in str(e):
                     return _empty("rtstream", {"rtstream_id": req.target_id})

@@ -293,10 +293,10 @@ flowchart TD
 1. **Browser opens Usage tab** — triggers `fetchUsage()`.
 2. **Single GET** — `/api/usage` returns all three layers in one response (cached 60 s server-side).
 3. **Server handler** — `webhooks.py:api_usage`.
-4. **Three parallel data sources**:
+4. **Three parallel data sources** (each behind a 5 s `_with_timeout` so a hung SDK call can't freeze the dashboard, dispatched via `asyncio.to_thread` so the event loop stays responsive):
     - **`_estimate_credit_burn_usd`** — local upper-bound from `.state.json` start timestamps × hourly rate. Cross-checked against `coll.list_rtstreams()` to skip non-running entries.
-    - **`conn.check_usage()`** — VideoDB's real per-period total + price card + balance + plan. 5-second timeout.
-    - **`conn.get_invoices()`** — list of closed billing periods. 5-second timeout.
+    - **`conn.check_usage()`** — VideoDB's real per-period total + price card + balance + plan. Feeds the per-resource cost breakdown card.
+    - **`conn.get_invoices()`** — list of closed billing periods. Normalised by `_coerce_to_list` (not `or []`) so a non-list SDK return logs a warning instead of silently zeroing.
 5. **Live-status verification** — for each `rtstreams` entry in `.state.json`, only meter it if VideoDB confirms it's in `connected/running/ingesting/indexing/ready` state. Stale entries are skipped. If the SDK call fails, fall back to the legacy upper-bound and emit a `warning` field so the dashboard can show a banner.
 6. **Real-billing math** — for each `key` in `cost_metric`, compute `usage[key] × cost_metric[key]`. Sort descending. This is the breakdown that exposes the "transcription = $96" surprise from prior smoke runs.
 7. **Closed-invoice list** — top 10 invoices, normalised to a `{description, when, amount}` shape by `dashboard.py:renderInvoices`.

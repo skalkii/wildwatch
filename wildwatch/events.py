@@ -16,6 +16,11 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+# Single source of truth for the four index kinds. wiring.INDEX_EVENT_MAP
+# is typed against this, so a typo in any new entry becomes a static error
+# at definition time rather than a KeyError mid-bootstrap.
+IndexKind = Literal["species", "behavior", "environment", "audio"]
+
 
 class EventDefinition(TypedDict):
     """One row in EVENT_DEFINITIONS — typed so a typo in any literal becomes
@@ -184,7 +189,7 @@ EVENT_DEFINITIONS: list[EventDefinition] = [
 
 # Wire-up matrix: which events attach to which index kind.
 # Bootstrap walks this map and calls index.create_alert() per (stream, kind, event_id).
-INDEX_EVENT_MAP: dict[str, list[str]] = {
+INDEX_EVENT_MAP: dict[IndexKind, list[str]] = {
     "species": ["rare_species", "mixed_aggregation", "juvenile_present", "large_aggregation"],
     "behavior": ["predator_activity", "parental_care", "welfare_concern", "notable_social"],
     "environment": ["mortality_event", "human_intrusion_visual", "camera_health", "water_critical"],

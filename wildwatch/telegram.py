@@ -85,21 +85,28 @@ async def send_alert(
         )
     text = build_message(tier=tier, label=label, explanation=explanation, stream_url=stream_url)
     url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            url,
-            json={
-                "chat_id": chat,
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": False,
-            },
-        )
-    # Don't call resp.raise_for_status() — its HTTPStatusError stringifies
-    # the full request URL, which contains the bot token. When the
-    # exception propagates up to logger.exception(..., exc_info=True) in
-    # webhooks.py, that traceback writes the token into the log file.
-    # Instead, surface status_code + sanitized body in a RuntimeError.
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                json={
+                    "chat_id": chat,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": False,
+                },
+            )
+    except httpx.TransportError as e:
+        # httpx transport-layer exceptions (ConnectTimeout, ConnectError,
+        # ReadError) carry the full request URL via e.request.url — that
+        # URL contains the bot token. If we let this propagate with
+        # `from e`, logger.exception(..., exc_info=True) prints the chained
+        # traceback INCLUDING the URL, leaking the token to logs.
+        # Re-raise WITHOUT `from e` to break the exception chain.
+        raise RuntimeError(f"telegram network error: {type(e).__name__}") from None
+    # Don't call resp.raise_for_status() either — HTTPStatusError ALSO
+    # stringifies the URL with the bot token. Surface status + sanitized
+    # body in a RuntimeError instead.
     if resp.status_code >= 400:
         body = resp.text[:300] if resp.text else ""
         raise RuntimeError(f"telegram send failed: HTTP {resp.status_code} body={body!r}")

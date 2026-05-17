@@ -16,16 +16,39 @@ corpus clips so the demo always has a reel to play.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
 from wildwatch import event_log
 
 logger = logging.getLogger(__name__)
 
+
+class DigestResult(TypedDict):
+    """Stable shape returned by build_digest. The previous bare-dict
+    return let callers typo a key (e.g. `result["streamurl"]`) and get
+    a silent KeyError at runtime rather than a static error."""
+
+    n_events: int
+    n_clips: int
+    stream_url: str | None
+    player_url: str | None
+    summary: str | None
+
+
 # Eager import of the editor surface so an import error surfaces at module
 # load (e.g. application startup) rather than when an operator triggers a
 # digest build mid-demo. Wrapped in try/except so test environments without
 # the full SDK can still import this module.
+#
+# Pre-bind every editor name to None BEFORE attempting the import. The
+# `from ... import (...)` statement is not atomic — if it fails midway,
+# Python leaves any earlier names bound (or not, depending on Python
+# version + import order). Pre-binding ensures the module namespace is
+# consistent with `_EDITOR_AVAILABLE` regardless of which name failed.
+AudioAsset = Background = Clip = Font = TextAsset = None  # type: ignore[assignment]
+Timeline = Track = Transition = VideoAsset = None  # type: ignore[assignment]
+_EDITOR_AVAILABLE = False
+
 try:
     from videodb.editor import (  # type: ignore[import-not-found]
         AudioAsset,
@@ -42,11 +65,9 @@ try:
     _EDITOR_AVAILABLE = True
 except Exception as _editor_err:  # pragma: no cover — env-dependent
     logger.warning(
-        "digest: videodb.editor import failed (%s); build_timeline will fail loudly", _editor_err
+        "digest: videodb.editor import failed (%s); build_timeline will fail loudly",
+        _editor_err,
     )
-    AudioAsset = Background = Clip = Font = TextAsset = None  # type: ignore[assignment]
-    Timeline = Track = Transition = VideoAsset = None  # type: ignore[assignment]
-    _EDITOR_AVAILABLE = False
 
 
 # Map tier -> ordered list of preferred corpus slugs to represent that tier.
@@ -207,11 +228,11 @@ def build_digest(
     *,
     add_text_overlays: bool = True,
     add_music: bool = False,
-) -> dict[str, Any]:
+) -> DigestResult:
     """End-to-end: read log -> pick top N -> Timeline -> playable URL.
 
-    Returns dict { "n_events", "n_clips", "stream_url", "player_url",
-    "summary" }.
+    Returns a ``DigestResult`` TypedDict — callers get static-checked
+    access to all five fields.
     """
     import time
 

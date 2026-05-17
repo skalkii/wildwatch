@@ -144,11 +144,13 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env  # fill creds
 
-uvicorn wildwatch.webhooks:app --port 8000 &       # dashboard
-mediamtx bridge/mediamtx.yml &                      # RTSP relay (brew install mediamtx)
-bore local 8554 --to bore.pub &                     # public RTSP tunnel
-cloudflared tunnel --url http://localhost:8000 &    # public webhook URL
+uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 &  # dashboard
+mediamtx bridge/mediamtx.yml &                                  # RTSP relay (brew install mediamtx)
+bore local 8554 --to bore.pub &                                 # public RTSP tunnel
+cloudflared tunnel --url http://localhost:8000 &                # public webhook URL
 ```
+
+> **Security note**: the server is bound to `127.0.0.1` because every `POST/PUT/PATCH/DELETE /api/*` route is guarded by an Origin/Referer middleware that defaults to allowing `localhost` only. Browsers send `Origin` automatically; CLI clients (curl, scripts) without an `Origin` header are rejected with `403` unless `WILDWATCH_ALLOW_NO_ORIGIN=1` is set in the env. Add LAN hosts via `WILDWATCH_ALLOWED_ORIGINS=hostA,hostB`. `POST /webhook/*` is exempt — VideoDB calls it cross-origin.
 
 ---
 

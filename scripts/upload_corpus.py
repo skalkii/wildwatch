@@ -37,10 +37,12 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    """Atomic write: .tmp then rename. Survives SIGKILL mid-write."""
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(STATE_FILE)
+    """Atomic, durable, chmod-600 write — shared helper. Survives SIGKILL
+    mid-write AND keeps perms 0600 (was inline write_text + replace which
+    inherited the process umask, typically 0644)."""
+    from wildwatch.state_io import atomic_write_json
+
+    atomic_write_json(STATE_FILE, state)
 
 
 def main() -> int:

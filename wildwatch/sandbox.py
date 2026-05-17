@@ -131,20 +131,26 @@ def managed_sandbox(
     sandbox id even after teardown.
     """
     sb = ensure_sandbox(conn, tier=tier, name=name)
-    teardown_failed = False
+    body_exc: BaseException | None = None
+    teardown_exc: BaseException | None = None
     try:
         yield sb
+    except BaseException as e:
+        # Capture the body exception so a teardown failure can't shadow it
+        # (Python's implicit __context__ chaining would demote the body
+        # error to a suppressed cause — callers catching the synthetic
+        # RuntimeError below would never see what actually went wrong
+        # inside the `with` block).
+        body_exc = e
     finally:
         try:
             sb.stop()
             sb.wait_for_stop(timeout=120)
-        except Exception:
-            teardown_failed = True
+        except Exception as e:
+            teardown_exc = e
             # ERROR not WARNING — a sandbox that fails to stop is BILLING.
             # WARNING is operator-skippable; this is real money leaking until
-            # someone wakes up. exc_info captures the SDK exception class so
-            # the next debug pass knows whether it was an auth, network, or
-            # state error.
+            # someone wakes up.
             logger.error(
                 "managed_sandbox: STOP FAILED for sandbox %s — STILL BILLING. "
                 "Tier=%s. Manually stop at https://console.videodb.io.",
@@ -152,10 +158,30 @@ def managed_sandbox(
                 getattr(sb, "tier", "?"),
                 exc_info=True,
             )
-        # Surface the failure to the caller so smoke scripts / bootstrap can
-        # fail loudly rather than swallowing a billing leak.
-        if teardown_failed:
+
+        # Re-raise rules:
+        # 1. Body raised, teardown OK → re-raise body (preserve original).
+        # 2. Body OK, teardown raised → raise loud RuntimeError so the
+        #    caller learns about the billing leak.
+        # 3. Body raised, teardown also raised → re-raise body but ATTACH
+        #    teardown error as __cause__ via `raise from`, so both are
+        #    visible in the traceback without demoting the body.
+        if body_exc is not None and teardown_exc is not None:
+            # Annotate the body exception with the teardown billing leak
+            # note; PEP 678 `add_note` (3.11+) keeps both surfaces visible.
+            try:
+                body_exc.add_note(
+                    f"NOTE: managed_sandbox teardown also failed for "
+                    f"{getattr(sb, 'id', '?')} — sandbox may still be billing. "
+                    f"See logger.error above. Teardown exc: {teardown_exc!r}"
+                )
+            except Exception:
+                pass
+            raise body_exc
+        if body_exc is not None:
+            raise body_exc
+        if teardown_exc is not None:
             raise RuntimeError(
                 f"managed_sandbox: stop failed for {getattr(sb, 'id', '?')} — "
                 "see logs; sandbox may still be billing."
-            )
+            ) from teardown_exc

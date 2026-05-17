@@ -23,19 +23,24 @@ def _allow_no_origin_for_tests() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_conn_cache() -> None:
-    """Reset the process-wide VideoDB connection cache before every test.
+def _reset_global_state() -> None:
+    """Reset process-wide module globals between every test.
 
-    Tests that patch ``videodb.connect`` rely on the patch actually being
-    invoked. Since _get_conn() caches the connection for the life of the
-    process, the first test's Mock would persist into later tests'
-    patches, hiding the new side_effect/return_value behind a stale
-    handle. Clearing the cache around each test makes each patch effective.
+    Two state surfaces leak between tests by default:
+      - `_conn_cache` — videodb.connect patches are sticky once the cache
+        is warm; later tests inherit a previous test's Mock unless we clear.
+      - `dashboard` counters (`_total`, `_tier_counts`, `_recent_events`,
+        `_subscribers`, `_dropped_total`, `_started_at`) — tests that POST
+        /webhook/* accumulate into these, polluting `/api/stats` assertions
+        in later tests.
     """
+    from wildwatch import dashboard as _dash
     from wildwatch import webhooks as _wh
 
     _wh._conn_cache["conn"] = None
     _wh._conn_cache["coll"] = None
+    _dash.reset_state()
     yield
     _wh._conn_cache["conn"] = None
     _wh._conn_cache["coll"] = None
+    _dash.reset_state()

@@ -48,9 +48,13 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
-    tmp.replace(STATE_FILE)
+    # Use the shared atomic helper so the file is fsynced AND chmod-600
+    # before publication. The previous inline write left .state.json
+    # world-readable (umask 0644), undoing the perm tightening that
+    # production writers apply.
+    from wildwatch.state_io import atomic_write_json
+
+    atomic_write_json(STATE_FILE, state)
 
 
 def main() -> int:

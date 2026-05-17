@@ -18,11 +18,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 from wildwatch.events import EVENT_DEFINITIONS, INDEX_EVENT_MAP
 
 logger = logging.getLogger(__name__)
+
+
+class WireFailure(NamedTuple):
+    """One row of WireResult.failures — typed so callers don't rely on
+    positional access. A tuple was load-bearing on position; future
+    changes would silently flip kind ↔ ev_id_var renders."""
+
+    kind: str
+    event_id_var: str
+    error_repr: str
 
 
 @dataclass
@@ -31,10 +41,7 @@ class WireResult:
     reused: int = 0
     replaced: int = 0
     failed: int = 0
-    # (kind, event_id_var, exception_repr) for each create_alert that raised.
-    # Kept short — caller decides how to render. Without this, one bad
-    # event id would silently kill 17 downstream wirings with no record.
-    failures: list[tuple[str, str, str]] = field(default_factory=list)
+    failures: list[WireFailure] = field(default_factory=list)
 
 
 def wire_alerts(
@@ -66,9 +73,37 @@ def wire_alerts(
 
     result = WireResult()
     for kind, event_id_vars in INDEX_EVENT_MAP.items():
-        idx = indexes[kind]
+        # Guard the lookup — a stream connected without audio support, or
+        # a misspelled key in INDEX_EVENT_MAP, used to raise KeyError here
+        # and bypass the per-alert failure tracking entirely.
+        idx = indexes.get(kind)
+        if idx is None:
+            for ev_id_var in event_id_vars:
+                result.failed += 1
+                result.failures.append(
+                    WireFailure(kind, ev_id_var, "KeyError: index missing from indexes dict")
+                )
+            logger.error(
+                "wire_alerts: index %r missing from indexes dict; marking %d events as failed",
+                kind,
+                len(event_id_vars),
+            )
+            continue
         for ev_id_var in event_id_vars:
-            event_id = events_map[ev_id_var]
+            # Guard events_map too — if the event registration failed
+            # during bootstrap and didn't populate this id_var, we used
+            # to KeyError before the per-alert try/except.
+            event_id = events_map.get(ev_id_var)
+            if event_id is None:
+                result.failed += 1
+                result.failures.append(
+                    WireFailure(kind, ev_id_var, "KeyError: event_id missing from events_map")
+                )
+                logger.error(
+                    "wire_alerts: event %r not in events_map; skipping",
+                    ev_id_var,
+                )
+                continue
             tier = tier_by_id[ev_id_var]
             cb = f"{base_url}/webhook/{tier}"
             key = f"{kind}.{ev_id_var}"
@@ -93,7 +128,7 @@ def wire_alerts(
                 alert_id = idx.create_alert(event_id, **create_kwargs)
             except Exception as e:
                 result.failed += 1
-                result.failures.append((kind, ev_id_var, repr(e)))
+                result.failures.append(WireFailure(kind, ev_id_var, repr(e)))
                 logger.error(
                     "wire_alerts: create_alert failed for kind=%s event=%s "
                     "(label=%s tier=%s rtstream=%s): %s",

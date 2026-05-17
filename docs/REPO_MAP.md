@@ -274,6 +274,7 @@ These are the executable entry points. You run them, they do one thing, they exi
 
 | Test file | What it locks down |
 | --- | --- |
+| `conftest.py` | Two autouse session fixtures: (1) sets `WILDWATCH_ALLOW_NO_ORIGIN=1` so the CSRF middleware lets TestClient through, (2) resets the process-wide `_conn_cache` before/after every test so `videodb.connect` patches actually take effect. |
 | `test_config.py` | `config.py` constants are well-formed. |
 | `test_prompts.py` | The four prompt files exist, load, format. |
 | `test_events.py` | `EVENT_DEFINITIONS` is well-typed and `INDEX_EVENT_MAP` covers it. |
@@ -299,7 +300,12 @@ These are the executable entry points. You run them, they do one thing, they exi
 
 - `config.py` — every stream URL + their per-stream prompt context lives here. The only place you edit when adding a new stream.
 - `.state.json` — runtime persisted state: connected rtstreams, events, alerts, sources, sandbox id, webhook base URL. **Atomically rewritten** by `state_io.py` after every change.
-- `.env` — secrets: `VIDEO_DB_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional `WILDWATCH_ALLOWED_ORIGINS`.
+- `.env` — secrets and optional config:
+  - `VIDEO_DB_API_KEY` — required, from https://console.videodb.io
+  - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — required for Telegram alerts
+  - `WILDWATCH_ALLOWED_ORIGINS` — optional comma-separated hosts whitelisted by the CSRF/Origin guard (in addition to `localhost`/`127.0.0.1`/`0.0.0.0`)
+  - `WILDWATCH_ALLOW_NO_ORIGIN=1` — optional escape hatch for trusted CLI clients (curl/scripts) that don't send an `Origin` header. Use sparingly; defeats the CSRF guard for the process lifetime.
+  - `VIDEODB_EVENTS_DIR` — optional directory where `wildwatch/ws_listener.py` writes the `videodb_ws_id` file (defaults to `/tmp`)
 - `.env.example` — template; copy to `.env` and fill in.
 
 ---

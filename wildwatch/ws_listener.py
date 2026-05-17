@@ -64,18 +64,33 @@ def parse_args():
     return clear, Path(output_dir), cwd
 
 
-CLEAR_EVENTS, OUTPUT_DIR, USER_CWD = parse_args()
+# Module-level defaults so importing this file (e.g. from pytest) doesn't
+# parse sys.argv — which would silently consume pytest's positional test
+# paths as our OUTPUT_DIR. Real CLI invocation runs `_init_from_argv()`
+# inside `main()` to populate these.
+CLEAR_EVENTS: bool = False
+OUTPUT_DIR: Path = Path(os.environ.get("VIDEODB_EVENTS_DIR", "/tmp"))
+USER_CWD: str | None = None
 
-if USER_CWD:
-    load_dotenv(Path(USER_CWD) / ".env")
-else:
-    load_dotenv()
+EVENTS_FILE: Path = OUTPUT_DIR / "videodb_events.jsonl"
+WS_ID_FILE: Path = OUTPUT_DIR / "videodb_ws_id"
+PID_FILE: Path = OUTPUT_DIR / "videodb_ws_pid"
+
+
+def _init_from_argv() -> None:
+    """Parse argv, load .env, recompute paths. Only called from main()."""
+    global CLEAR_EVENTS, OUTPUT_DIR, USER_CWD, EVENTS_FILE, WS_ID_FILE, PID_FILE
+    CLEAR_EVENTS, OUTPUT_DIR, USER_CWD = parse_args()
+    if USER_CWD:
+        load_dotenv(Path(USER_CWD) / ".env")
+    else:
+        load_dotenv()
+    EVENTS_FILE = OUTPUT_DIR / "videodb_events.jsonl"
+    WS_ID_FILE = OUTPUT_DIR / "videodb_ws_id"
+    PID_FILE = OUTPUT_DIR / "videodb_ws_pid"
+
 
 import videodb  # noqa: E402  -- load_dotenv must run before SDK init (skill pattern)
-
-EVENTS_FILE = OUTPUT_DIR / "videodb_events.jsonl"
-WS_ID_FILE = OUTPUT_DIR / "videodb_ws_id"
-PID_FILE = OUTPUT_DIR / "videodb_ws_pid"
 
 # Track if this is the first connection (for clearing events)
 _first_connection = True
@@ -89,8 +104,12 @@ def log(msg: str):
 
 def append_event(event: dict):
     """Append event to JSONL file with timestamps."""
-    event["ts"] = datetime.now(UTC).isoformat()
-    event["unix_ts"] = datetime.now(UTC).timestamp()
+    # Single clock read — using two separate datetime.now(UTC) calls
+    # produces an inconsistent (ts, unix_ts) pair if a clock adjustment
+    # or leap second lands between the two reads.
+    now = datetime.now(UTC)
+    event["ts"] = now.isoformat()
+    event["unix_ts"] = now.timestamp()
     with open(EVENTS_FILE, "a") as f:
         f.write(json.dumps(event) + "\n")
 
@@ -205,6 +224,7 @@ async def main_async():
 
 
 def main():
+    _init_from_argv()
     write_pid()
     try:
         asyncio.run(main_async())
