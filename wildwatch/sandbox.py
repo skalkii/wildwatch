@@ -175,11 +175,22 @@ def managed_sandbox(
                     f"{getattr(sb, 'id', '?')} — sandbox may still be billing. "
                     f"See logger.error above. Teardown exc: {teardown_exc!r}"
                 )
-            except Exception:
-                pass
-            raise body_exc
+            except Exception as note_err:
+                # Loud-log instead of silently swallowing — if the
+                # annotation fails AND we never log it, the billing leak
+                # may be invisible.
+                logger.error(
+                    "managed_sandbox: add_note failed: %r — teardown_exc=%r",
+                    note_err,
+                    teardown_exc,
+                )
+            # `raise body_exc.with_traceback(body_exc.__traceback__)` would
+            # work but `raise body_exc` from a fresh `except` frame
+            # re-attaches the current __traceback__, dropping the original
+            # call stack. Use with_traceback explicitly to preserve it.
+            raise body_exc.with_traceback(body_exc.__traceback__)
         if body_exc is not None:
-            raise body_exc
+            raise body_exc.with_traceback(body_exc.__traceback__)
         if teardown_exc is not None:
             raise RuntimeError(
                 f"managed_sandbox: stop failed for {getattr(sb, 'id', '?')} — "
