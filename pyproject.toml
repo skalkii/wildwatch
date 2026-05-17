@@ -11,6 +11,12 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "skalkii" }]
 dependencies = [
+    # NOTE: pinned to the upstream hackathon BRANCH, not a commit SHA.
+    # A force-push to that branch silently changes the dependency on
+    # the next `pip install`. For any post-hackathon use, repin to a
+    # commit:
+    #   videodb @ git+https://github.com/Video-DB/videodb-python.git@<sha>
+    # (find the SHA via `pip show videodb | grep Location` after install).
     "videodb @ git+https://github.com/Video-DB/videodb-python.git@hackathon",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",

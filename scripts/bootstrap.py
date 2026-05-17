@@ -114,7 +114,11 @@ def _read_ws_connection_id() -> str | None:
         return None
     try:
         return p.read_text().strip() or None
-    except Exception:
+    except Exception as e:
+        # Was silent — a permissions / encoding failure on the WS id
+        # file would skip dual delivery without any operator-visible
+        # signal. Surface it.
+        print(f"[ws] WARN: could not read {p}: {type(e).__name__}: {e}")
         return None
 
 

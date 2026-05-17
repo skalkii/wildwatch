@@ -30,6 +30,10 @@ from wildwatch import dashboard, sources
 
 logger = logging.getLogger(__name__)
 
+# Module-level burst counter for _emit's dashboard.broadcast failures.
+# Reset to 0 on the first successful broadcast after a failure burst.
+_BROADCAST_FAIL_COUNTER: dict[str, int] = {"n": 0}
+
 
 # ──── progress helper ─────────────────────────────────────────────────────
 
@@ -60,8 +64,19 @@ def _emit(source_id: str, status: str, stage_msg: str | None = None, **extra: An
                 "error": src.error,
             }
         )
-    except Exception:
-        logger.exception("ingest: dashboard.broadcast failed (non-fatal)")
+    except Exception as e:
+        # Circuit-break log spam: a persistently-broken SSE queue
+        # produced one full stack trace per ingest poll (every few
+        # seconds). Log the full traceback once per fail-burst, then
+        # downgrade subsequent failures to a short WARNING until a
+        # success resets the counter.
+        n = _BROADCAST_FAIL_COUNTER["n"] = _BROADCAST_FAIL_COUNTER["n"] + 1
+        if n == 1:
+            logger.exception("ingest: dashboard.broadcast failed (non-fatal)")
+        elif n % 50 == 0:
+            logger.warning("ingest: dashboard.broadcast still failing (%dx): %r", n, e)
+    else:
+        _BROADCAST_FAIL_COUNTER["n"] = 0
 
 
 # ──── URL classification helpers ──────────────────────────────────────────

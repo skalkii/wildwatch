@@ -536,7 +536,11 @@ async def _csrf_origin_guard(request: Request, call_next):
         )
     try:
         host = (urlparse(origin).hostname or "").lower()
-    except Exception:
+    except Exception as e:
+        # Was silent. A legitimate misconfigured reverse proxy sending
+        # a garbled Origin produces a 403 with no server-side trace —
+        # surface at DEBUG so the operator can grep for it.
+        logger.debug("CSRF: unparseable Origin %r: %r", origin, e)
         return JSONResponse(
             status_code=403, content={"reason": "bad_origin", "detail": "bad Origin"}
         )
@@ -1094,8 +1098,12 @@ async def api_upload_source(
         )
     s = await asyncio.to_thread(sources.add_source, kind="upload", input="", name=name)
 
+    # Use a neutral ``.partial`` suffix during the write so a process
+    # watching /tmp can't tell that a video upload is in progress
+    # before the magic-byte sniff passes. The file is renamed to
+    # ``.mp4`` after validation succeeds — see below.
     tmp = tempfile.NamedTemporaryFile(
-        delete=False, prefix=f"wildwatch-upload-{s.id[:8]}-", suffix=".mp4"
+        delete=False, prefix=f"wildwatch-upload-{s.id[:8]}-", suffix=".partial"
     )
     tmp_path = PPath(tmp.name)
     tmp.close()
@@ -1128,6 +1136,20 @@ async def api_upload_source(
                         detail=f"upload exceeds {UPLOAD_MAX_BYTES // (1024 * 1024)} MB cap",
                     )
                 await out.write(chunk)
+        # Validation passed: rename .partial → .mp4 so the SDK upload
+        # sees a sensibly-named file and any downstream tooling that
+        # filters /tmp by extension can pick it up.
+        final_path = tmp_path.with_suffix(".mp4")
+        try:
+            tmp_path.rename(final_path)
+            tmp_path = final_path
+        except OSError as e:
+            logger.warning(
+                "api_upload_source: rename %s → %s failed: %s — leaving .partial",
+                tmp_path,
+                final_path,
+                e,
+            )
         await asyncio.to_thread(
             sources.update_source,
             s.id,

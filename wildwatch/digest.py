@@ -303,8 +303,15 @@ def compute_analytics(events: list[dict]) -> dict:
                 import datetime as _dt
 
                 hourly[_dt.datetime.fromtimestamp(ts).hour] += 1
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as _e:
+            # Was a silent pass; visible at DEBUG so a malformed log
+            # row that skews the hourly chart is at least diagnosable
+            # with --log-level debug.
+            logger.debug(
+                "compute_analytics: skipping hourly bucket for malformed received_at=%r (%s)",
+                ev.get("received_at"),
+                _e,
+            )
         # Species + light_mode harvest from raw + rewritten explanation.
         haystack = " ".join(
             str(ev.get(k) or "") for k in ("explanation", "raw_explanation", "label")
@@ -590,7 +597,10 @@ def build_timeline(
                 timeline.add_track(music_track)
                 logger.info("digest: added generated music track id=%s (%ss)", music_id, total)
         except Exception as e:
-            logger.warning("digest: generate_music failed (%s); reel will be silent", e)
+            logger.warning(
+                "digest: generate_music failed (%s); background music omitted from reel",
+                e,
+            )
 
     ctx = {
         "video_track": video_track,

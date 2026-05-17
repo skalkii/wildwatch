@@ -168,7 +168,10 @@ def _has_transcript(video: Any, source_id: str) -> bool:
             elif isinstance(existing, str) and existing.strip():
                 return True
     except Exception as e:
-        logger.debug("post-analysis: get_transcript probe failed for %s: %r", source_id, e)
+        # Was DEBUG. If the SDK renamed get_transcript or auth dies,
+        # EVERY upload is treated as silent → entire audio analysis
+        # path silently skipped. Surface at WARNING.
+        logger.warning("post-analysis: get_transcript probe failed for %s: %r", source_id, e)
 
     # No cached transcript — try to generate one.
     try:
@@ -324,11 +327,23 @@ async def _wait_for_index(video: Any, index_name_substr: str, max_wait_s: int) -
     """
     deadline = time.time() + max_wait_s
     last_status: str | None = None
+    poll_fail_count = 0
     while time.time() < deadline:
         try:
             idxs = await asyncio.to_thread(video.list_scene_index) or []
+            poll_fail_count = 0
         except Exception as e:
-            logger.debug("post-analysis: list_scene_index poll failed: %r", e)
+            # Was DEBUG: the loop could spin for the full 20-minute
+            # deadline consuming a background-task slot with no
+            # operator-visible signal. Emit a WARNING on the first
+            # failure and every 10th after that until success.
+            poll_fail_count += 1
+            if poll_fail_count == 1 or poll_fail_count % 10 == 0:
+                logger.warning(
+                    "post-analysis: list_scene_index poll failed (%dx): %r",
+                    poll_fail_count,
+                    e,
+                )
             await asyncio.sleep(_POLL_INTERVAL_S)
             continue
         target = next(
@@ -480,7 +495,10 @@ async def run_post_upload_analysis(video: Any, source_id: str) -> None:
 
     base_url = _local_base_url()
     fired = 0
-    async with httpx.AsyncClient() as client:
+    # Per-request timeout already applied on each .post() call, but
+    # without a client-level timeout a stalled DNS / TCP handshake
+    # could hang the whole 20-minute analysis task indefinitely.
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for id_var, query in _EVENT_QUERY.items():
             if fired >= _MAX_FIRES_PER_UPLOAD:
                 logger.info(
