@@ -160,8 +160,27 @@ _usage_lock = threading.Lock()
 # importing this module (e.g. from pytest) doesn't spawn non-daemon worker
 # threads that hold up interpreter exit. atexit + lifespan shut it down
 # cleanly when it has been created.
+#
+# IMPORTANT POOL SATURATION SEMANTICS — ThreadPoolExecutor workers cannot
+# be interrupted. When `_async_sdk` times out via `asyncio.wait_for`, the
+# underlying worker thread keeps running until the (hung) SDK call
+# eventually returns. With max_workers=4, four simultaneous timeouts
+# pin all four workers for the SDK's natural completion time — every
+# subsequent call queues behind them. The saturation tripwire below
+# returns 503 BEFORE enqueueing when the pool is already full, so the
+# dashboard surfaces "VideoDB unreachable" instead of looking hung.
+_SDK_EXECUTOR_MAX_WORKERS = 4
 _SDK_EXECUTOR: ThreadPoolExecutor | None = None
 _executor_lock = threading.Lock()
+# Counter of futures we have submitted to the pool that have not yet
+# resolved. Guarded by _executor_lock so the tripwire compare is atomic.
+_sdk_in_flight: int = 0
+
+
+class SDKPoolSaturated(RuntimeError):
+    """Raised by _async_sdk when the SDK pool is already full of
+    likely-hung calls. Callers in route handlers should catch this and
+    return 503 so the dashboard can show a visible degraded state."""
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -169,7 +188,10 @@ def _get_executor() -> ThreadPoolExecutor:
     if _SDK_EXECUTOR is None:
         with _executor_lock:
             if _SDK_EXECUTOR is None:
-                _SDK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sdk")
+                _SDK_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=_SDK_EXECUTOR_MAX_WORKERS,
+                    thread_name_prefix="sdk",
+                )
                 import atexit
 
                 # Capture the executor reference in the closure so atexit
@@ -221,29 +243,85 @@ def _with_timeout(fn, *args, timeout_s: float = 5.0, **kwargs):
 
 
 async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
-    """Async wrapper: dispatch a blocking SDK call directly to our SDK
-    thread pool via ``loop.run_in_executor``, with a deadline enforced by
+    """Async wrapper: dispatch a blocking SDK call to our SDK thread pool
+    via ``loop.run_in_executor``, with a deadline enforced by
     ``asyncio.wait_for``. ONE worker thread per call.
 
-    Previous implementation called ``asyncio.to_thread(_with_timeout, ...)``
-    which took a slot in asyncio's default thread pool AND inside that
-    thread blocked on ``ThreadPoolExecutor.submit().result()`` — TWO
-    threads per call, halving the effective throughput of ``_SDK_EXECUTOR``.
+    POOL SATURATION GUARD: before enqueueing, check if the pool is
+    already full of likely-hung calls. If yes, raise ``SDKPoolSaturated``
+    immediately so the caller can return 503 instead of queueing behind
+    workers that cannot be interrupted. Without this, a single hung SDK
+    call locks up the entire dashboard until the hung call resolves
+    naturally.
+
+    TIMEOUT SEMANTICS: ``asyncio.wait_for`` cancels the asyncio future
+    but the underlying worker thread KEEPS RUNNING — ThreadPoolExecutor
+    workers cannot be interrupted from the outside. We still call
+    ``fut.cancel()`` for the case where the future was queued but not
+    yet picked up by a worker (cancel succeeds in that case).
     """
     import functools
 
+    global _sdk_in_flight
+    # Tripwire — refuse to enqueue when every worker is occupied AND
+    # the queue is forming. Use 2x worker count as the soft ceiling so
+    # a brief burst still works; sustained saturation rejects.
+    with _executor_lock:
+        if _sdk_in_flight >= _SDK_EXECUTOR_MAX_WORKERS * 2:
+            raise SDKPoolSaturated(
+                f"SDK thread pool saturated ({_sdk_in_flight} in-flight, "
+                f"workers={_SDK_EXECUTOR_MAX_WORKERS}) — VideoDB likely unreachable"
+            )
+        _sdk_in_flight += 1
+
     loop = asyncio.get_running_loop()
     call = functools.partial(fn, *args, **kwargs)
+    fut = loop.run_in_executor(_get_executor(), call)
+    timed_out = False
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(_get_executor(), call),
-            timeout=timeout_s,
-        )
+        return await asyncio.wait_for(fut, timeout=timeout_s)
     except TimeoutError as e:
-        # asyncio.wait_for raises builtin TimeoutError in 3.11+; catch
-        # at the same site so we can re-raise with the function name.
+        timed_out = True
         fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+        # Read the saturation counter under the lock so the log is
+        # consistent. Don't try to distinguish "cancel succeeded" vs
+        # "worker still running" — `asyncio.wait_for` cancels the asyncio
+        # wrapper, not the concurrent.futures.Future underneath, so the
+        # state is unreliable. Always release the slot via done-callback
+        # below; max(0, ...) in _release_in_flight_slot absorbs any
+        # over-decrement.
+        with _executor_lock:
+            in_flight_snapshot = _sdk_in_flight
+        logger.warning(
+            "_async_sdk: %r timed out after %ss; in_flight=%d (worker may still be running)",
+            fn_name,
+            timeout_s,
+            in_flight_snapshot,
+        )
         raise TimeoutError(f"SDK call {fn_name!r} timed out after {timeout_s}s") from e
+    finally:
+        if timed_out:
+            # On timeout we can't tell if the executor worker is still
+            # pinned (asyncio wraps the future). Defer the decrement to
+            # whenever the underlying future resolves — _release_in_
+            # flight_slot is idempotent-with-floor.
+            fut.add_done_callback(_release_in_flight_slot)
+        else:
+            with _executor_lock:
+                _sdk_in_flight = max(0, _sdk_in_flight - 1)
+
+
+def _release_in_flight_slot(_fut: Any) -> None:
+    """Decrement _sdk_in_flight when a timed-out worker finally completes.
+
+    Idempotent with floor at 0 so accidental over-decrement (e.g. if a
+    future fires its callback after the success path already decremented)
+    can never push the counter negative and trip the saturation guard
+    falsely.
+    """
+    global _sdk_in_flight
+    with _executor_lock:
+        _sdk_in_flight = max(0, _sdk_in_flight - 1)
 
 
 # ── CSRF / cross-origin guard for mutating endpoints ────────────────────
