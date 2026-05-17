@@ -106,7 +106,7 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Why it exists | VideoDB needs a public URL to POST alerts to. The same server also powers the dashboard so we don't run two processes. |
 | Key technology | FastAPI (Python web framework), `aiofiles` (async file uploads), `videodb` Python SDK. |
 | Who runs it | `uvicorn wildwatch.webhooks:app --port 8000` — what `docker-compose up` and the quickstart `Path B` both invoke. |
-| Notable bits | `_get_conn()` / `_get_coll()` cache the VideoDB connection so we don't re-auth on every request. `_with_timeout()` wraps blocking SDK calls in a 5s deadline so a hung VideoDB call can't freeze the dashboard. An Origin/CSRF middleware blocks mutating requests from unexpected pages. |
+| Notable bits | `_get_conn()` / `_get_coll()` cache the VideoDB connection (process-wide, RLock-guarded). `_async_sdk()` wraps every blocking SDK call in a 4-worker thread pool + per-call `asyncio.wait_for` deadline. Pool tracks `_sdk_in_flight`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. CancelledError (client disconnect) defers the slot release via `cf_fut.add_done_callback` so the counter doesn't leak. Origin/CSRF middleware blocks cross-origin mutating requests. Upload route adds magic-byte sniff + per-IP rate-limit + 413/415 `source_deleted` broadcast. |
 
 ### 3.2 `dashboard.py` — the live single-page UI
 
@@ -303,10 +303,21 @@ These are the executable entry points. You run them, they do one thing, they exi
 - `.env` — secrets and optional config:
   - `VIDEO_DB_API_KEY` — required, from https://console.videodb.io
   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — required for Telegram alerts
-  - `WILDWATCH_ALLOWED_ORIGINS` — optional comma-separated hosts whitelisted by the CSRF/Origin guard (in addition to `localhost`/`127.0.0.1`/`0.0.0.0`)
-  - `WILDWATCH_ALLOW_NO_ORIGIN=1` — optional escape hatch for trusted CLI clients (curl/scripts) that don't send an `Origin` header. Use sparingly; defeats the CSRF guard for the process lifetime.
-  - `VIDEODB_EVENTS_DIR` — optional directory where `wildwatch/ws_listener.py` writes the `videodb_ws_id` file (defaults to `/tmp`)
+  - `WILDWATCH_ALLOWED_ORIGINS` — optional comma-separated hosts whitelisted by the CSRF/Origin guard (in addition to `localhost`/`127.0.0.1`/`0.0.0.0`).
+  - `WILDWATCH_ALLOW_NO_ORIGIN=1` — optional escape hatch for trusted CLI clients (curl/scripts) that don't send an `Origin` header. Read once at module import + WARNING-logged at startup so it shows up in every log rotation.
+  - `WILDWATCH_TRUSTED_PROXY=1` — set when the server runs behind nginx / Cloudflare / ALB. The upload rate limiter then reads the first IP from `X-Forwarded-For` instead of the TCP peer (which would be the proxy itself, collapsing all clients into one shared bucket). NEVER set in a direct-exposure deployment — an attacker can spoof `X-Forwarded-For` to bypass per-IP limits.
+  - `VIDEODB_EVENTS_DIR` — optional directory where `wildwatch/ws_listener.py` writes the `videodb_ws_id` file (defaults to `/tmp`). Files there are created with `0o600` + `O_NOFOLLOW`.
 - `.env.example` — template; copy to `.env` and fill in.
+
+### Built-in upload protections
+
+`POST /api/sources/upload` carries three defences that fire BEFORE bytes touch disk:
+
+1. **Per-IP rate limit** — token bucket, capacity 3, refill 1 token/min/IP, OrderedDict-LRU capped at 50k entries. Returns `429` when exceeded. IPv6/port suffixes are normalised so `[::1]:1234` and `[::1]:9999` share one bucket.
+2. **MIME magic-byte sniff** — first 32 bytes must match a video container (`mp4`/`mov`/`webm`/`mkv`/`avi`/`mpeg-ps`/`flv`). Returns `415` on miss. MPEG-TS is deliberately excluded (sync-byte heuristic isn't bypass-resistant without a real packet parser).
+3. **Size cap** — `UPLOAD_MAX_BYTES = 500 MB`. Returns `413` when exceeded.
+
+`413` and `415` paths both delete the orphan Source row and emit a `source_deleted` SSE event so the dashboard card disappears immediately.
 
 ---
 

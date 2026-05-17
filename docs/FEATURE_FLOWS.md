@@ -64,8 +64,13 @@ flowchart TD
     C -->|file| D1[POST /api/sources/upload<br/>multipart/form-data]
     C -->|youtube/hls| D2[POST /api/sources<br/>kind=youtube/hls]
     C -->|rtsp/rtmp| D3[POST /api/sources<br/>kind=rtsp/rtmp]
-    D1 --> E[sources.py<br/>create Source<br/>status=queued]
-    D2 --> E
+    D1 --> RL{rate limit OK?<br/>3 tok / 1 per min}
+    RL -->|no| RJ429[429 Too Many Requests]
+    RL -->|yes| MS{MIME sniff<br/>first 32 bytes}
+    MS -->|fail| RJ415[415 + delete source + SSE]
+    MS -->|>500MB| RJ413[413 + delete source + SSE]
+    MS -->|pass| E
+    D2 --> E[sources.py<br/>create Source<br/>status=queued]
     D3 --> E
     E --> F[ingest.py:dispatch<br/>background task]
     F --> G{kind dispatch}
@@ -89,17 +94,19 @@ flowchart TD
 1. **User clicks +Add source** — button in the Sources tab (`dashboard.py` near the `add-source-btn` id).
 2. **Modal opens** — three-tab modal: file upload, URL paste, RTSP/RTMP. The active tab is tracked in JS (`modalKind`).
 3. **Kind dispatch** — the front-end picks the right endpoint and body shape. URL-paste auto-detects YouTube vs HLS by domain.
-4. **POST endpoint** — `webhooks.py:api_create_source` (JSON body) or `webhooks.py:api_create_source_upload` (multipart). Both validate inputs.
-5. **Source created** — `sources.py:create_source` writes a new entry to `.state.json["sources"][<uuid>]` with `status="queued"`. Immediately returns the id.
-6. **Dispatch background task** — `webhooks.py:_spawn_bg(ingest.dispatch(source_id, coll))`. The task is tracked in a Set so the garbage collector doesn't drop it mid-flight; the `done_callback` logs any exception.
-7–10. **Per-kind handler** — `ingest.py` has four dispatch branches:
+4. **Upload-only: per-IP rate limit** — `_upload_rate_limit_check(client_ip)` in `webhooks.py`. Token bucket, capacity 3, refill 1/min. Returns `429` over the cap. `_client_ip_from` honours `WILDWATCH_TRUSTED_PROXY=1` to use the first `X-Forwarded-For` IP instead of the TCP peer (normalised to strip `[ ]` brackets + `:port` so token rotation can't mint distinct keys). `client_ip == "unknown"` bypasses with a startup warning rather than collapsing every unknown-peer into one shared bucket.
+5. **Upload-only: MIME magic-byte sniff** — `_looks_like_video(chunk[:32])`. Allow list: `mp4` / `mov` / `webm` / `mkv` / `avi` / `mpeg-ps` / `flv`. MPEG-TS deliberately excluded. Miss → `415`. After-read size cap `>= 500 MB` → `413`. BOTH rejection paths delete the orphan source row AND broadcast a `source_deleted` SSE event so the dashboard card disappears immediately.
+6. **POST endpoint** — `webhooks.py:api_create_source` (JSON) or `webhooks.py:api_upload_source` (multipart).
+7. **Source created** — `sources.py:add_source` writes a new entry to `.state.json["sources"][<uuid>]` with `status="queued"`.
+8. **Dispatch background task** — `webhooks.py:_spawn_bg(ingest.dispatch(source_id, coll))`. The task is tracked in a Set so the garbage collector doesn't drop it mid-flight; the `done_callback` logs any exception.
+9–12. **Per-kind handler** — `ingest.py` has four dispatch branches:
     - `ingest_upload`: streams the temp file to VideoDB via `coll.upload(file_path=...)`.
     - `ingest_youtube`: probes the URL with `yt-dlp` first to surface 403s before billing VideoDB, then `coll.upload(url=...)`.
     - `ingest_hls`: HEAD-checks the manifest, then `coll.upload(url=...)`.
     - `ingest_rtstream`: `coll.connect_rtstream(url=..., media_types=["video","audio"], store=True)` and waits for `status="connected"`.
-11–12. **Progress states** — each handler updates the source's `status` field (`queued → connecting → ingesting → indexing → ready`) and broadcasts a `source_progress` SSE event after every change.
-13–14. **Ready** — the source now has a `video_id` (for uploads/URLs) or `rtstream_id` (for live streams) and is searchable.
-15. **Card flips to ready** — the dashboard re-fetches `/api/sources` on `source_progress`, the new green "ready" pill appears.
+13–14. **Progress states** — each handler updates the source's `status` field (`queued → connecting → ingesting → indexing → ready`) and broadcasts a `source_progress` SSE event after every change.
+15–16. **Ready** — the source now has a `video_id` (for uploads/URLs) or `rtstream_id` (for live streams) and is searchable.
+17. **Card flips to ready** — the dashboard re-fetches `/api/sources` on `source_progress` AND on `source_deleted`, so both happy-path and rejection-path UI updates are instant.
 
 ---
 
@@ -293,7 +300,7 @@ flowchart TD
 1. **Browser opens Usage tab** — triggers `fetchUsage()`.
 2. **Single GET** — `/api/usage` returns all three layers in one response (cached 60 s server-side).
 3. **Server handler** — `webhooks.py:api_usage`.
-4. **Three parallel data sources** (each behind a 5 s `_with_timeout` so a hung SDK call can't freeze the dashboard, dispatched via `asyncio.to_thread` so the event loop stays responsive):
+4. **Three parallel data sources** — all dispatched through `_async_sdk(fn, timeout_s=5.0)` which submits to a bounded 4-worker SDK thread pool and wraps the result with `asyncio.wait_for` so a hung VideoDB call can't park the event loop. The pool tracks `_sdk_in_flight` under `_executor_lock`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. Timeout / cancel paths defer the slot release via `cf_fut.add_done_callback` so the counter doesn't leak while a worker is still pinned.
     - **`_estimate_credit_burn_usd`** — local upper-bound from `.state.json` start timestamps × hourly rate. Cross-checked against `coll.list_rtstreams()` to skip non-running entries.
     - **`conn.check_usage()`** — VideoDB's real per-period total + price card + balance + plan. Feeds the per-resource cost breakdown card.
     - **`conn.get_invoices()`** — list of closed billing periods. Normalised by `_coerce_to_list` (not `or []`) so a non-list SDK return logs a warning instead of silently zeroing.

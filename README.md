@@ -150,7 +150,13 @@ bore local 8554 --to bore.pub &                                 # public RTSP tu
 cloudflared tunnel --url http://localhost:8000 &                # public webhook URL
 ```
 
-> **Security note**: the server is bound to `127.0.0.1` because every `POST/PUT/PATCH/DELETE /api/*` route is guarded by an Origin/Referer middleware that defaults to allowing `localhost` only. Browsers send `Origin` automatically; CLI clients (curl, scripts) without an `Origin` header are rejected with `403` unless `WILDWATCH_ALLOW_NO_ORIGIN=1` is set in the env. Add LAN hosts via `WILDWATCH_ALLOWED_ORIGINS=hostA,hostB`. `POST /webhook/*` is exempt — VideoDB calls it cross-origin.
+> **Security & limits notes** — applied automatically; see `.env.example` for the env vars:
+>
+> - **CSRF / Origin guard** — every mutating `/api/*` request needs an `Origin`/`Referer` matching `localhost` / `127.0.0.1` / `0.0.0.0` (or a host in `WILDWATCH_ALLOWED_ORIGINS=hostA,hostB`). Browsers send `Origin` automatically. CLI clients can set `WILDWATCH_ALLOW_NO_ORIGIN=1` to bypass; a startup log line surfaces when that's active. `/webhook/*` is exempt (VideoDB calls it cross-origin).
+> - **Upload rate limit** — `POST /api/sources/upload` is rate-limited per client IP via a token bucket (3 uploads, refill 1/min). Returns `429` over the cap. Set `WILDWATCH_TRUSTED_PROXY=1` if you're behind nginx / Cloudflare / ALB so the bucket reads the first `X-Forwarded-For` IP — otherwise every client collapses to the proxy's IP.
+> - **Upload MIME sniff** — first 32 bytes must match a known video container (`mp4` / `mov` / `webm` / `mkv` / `avi` / `mpeg-ps` / `flv`). MIME-rejected (`415`) and oversize (`413`) uploads are deleted server-side and emit a `source_deleted` SSE event so the dashboard card disappears immediately.
+> - **SDK pool saturation tripwire** — blocking VideoDB SDK calls run through a bounded thread pool (4 workers). When 2× saturated, new calls raise `SDKPoolSaturated → 503` instead of queueing forever. Hung VideoDB calls can't lock up the dashboard.
+> - **State file perms** — `.state.json` is written with `0o600` atomically; same for `/tmp/videodb_*` files written by the WebSocket listener. `O_NOFOLLOW` on creation defeats symlink TOCTOU on multi-user hosts.
 
 ---
 
