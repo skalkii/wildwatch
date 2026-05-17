@@ -107,36 +107,57 @@ WildWatch attacks all four simultaneously using VideoDB's prompt-driven VLM inde
 
 ```
 wildwatch/
-├── README.md              # Pitch, quickstart, architecture, demo embed
-├── CLAUDE.md              # This file
-├── .env.example           # VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-├── pyproject.toml         # or requirements.txt
-├── config.py              # Streams registry, prompt strings, event defs
+├── README.md                 # Pitch, free-tier local setup, demo flow
+├── CLAUDE.md                 # This file
+├── .env.example              # VIDEO_DB_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_BASE_URL
+├── pyproject.toml
+├── config.py                 # STREAMS registry (per-stream prompt context + RTSP URLs)
 ├── bridge/
-│   ├── docker-compose.yml # mediamtx + streamlink+ffmpeg for YouTube→RTSP
-│   └── README.md          # Bridge setup notes
-├── prompts/
-│   ├── species.txt        # See section 6 — Index 1
-│   ├── behavior.txt       # See section 6 — Index 2
-│   ├── environment.txt    # See section 6 — Index 3
-│   └── audio.txt          # See section 6 — Index 4
-├── wildwatch/
+│   ├── docker-compose.yml    # mediamtx + bore (public TCP tunnel)
+│   ├── start_bridge.sh       # streamlink + ffmpeg (H.264 Main@720p) push to mediamtx
+│   └── mediamtx.yml
+├── prompts/                  # The four AI prompts (see §6)
+│   ├── species.txt
+│   ├── behavior.txt
+│   ├── environment.txt
+│   └── audio.txt
+├── wildwatch/                # The Python package
 │   ├── __init__.py
-│   ├── pipeline.py        # Stream connect, index creation, event wiring
-│   ├── events.py          # Event/alert definitions (matches section 6)
-│   ├── correlation.py     # Cross-modal reasoning loop
-│   ├── webhooks.py        # FastAPI app receiving alerts → Telegram
-│   ├── telegram.py        # Telegram bot send_message + send_video
-│   ├── digest.py          # Daily highlight reel via programmable editing
-│   └── ui.py              # Optional: minimal live dashboard
+│   ├── webhooks.py           # FastAPI app: dashboard, /api/*, /webhook/{tier}, /api/digest/build
+│   ├── dashboard.py          # Single-page UI (HTML+CSS+JS in one file) + digest modal + Chart.js
+│   ├── sources.py            # Source CRUD + status machine
+│   ├── ingest.py             # File / URL / RTSP → VideoDB (yt-dlp, httpx, SDK)
+│   ├── events.py             # 18 event definitions + INDEX_EVENT_MAP
+│   ├── wiring.py             # index ↔ event ↔ webhook connector
+│   ├── correlation.py        # Cross-modal reasoning loop
+│   ├── digest.py             # Daily summary reel + compute_analytics + length-sync helpers
+│   ├── prompts.py            # Prompt loader + per-stream context formatter
+│   ├── sandbox.py            # Shared sandbox lifecycle
+│   ├── event_log.py          # Append-only JSONL alert log
+│   ├── state_io.py           # Atomic .state.json writes (O_NOFOLLOW + fsync)
+│   ├── telegram.py           # Bot API: send_alert + send_digest + QuickChart chart URLs
+│   └── post_upload_analysis.py   # Path-B sweep — synthesised alerts for uploaded clips
 ├── scripts/
-│   ├── bootstrap.py       # One-shot: connect streams, create indexes/events
-│   ├── iterate_prompt.py  # Run a prompt against sample_clip.mp4, print output
-│   └── replay.py          # Replay event log for demo
+│   ├── bootstrap.py          # One-shot: connect streams, create events/indexes/alerts
+│   ├── build_digest.py       # CLI fallback for the daily reel
+│   ├── run_correlation.py    # Cross-modal correlation loop runner
+│   ├── ws_listener.py        # Optional WebSocket subscriber (skill drop-in)
+│   ├── iterate_prompt.py     # Cheapest dev loop — run a prompt against a recorded clip
+│   ├── build_corpus.py       # Pull sample clips into VideoDB
+│   ├── upload_corpus.py
+│   ├── index_corpus.py
+│   ├── start_live_test.py    # End-to-end 15-min smoke
+│   └── *_smoke.py            # Per-primitive smoke tests
 ├── samples/
-│   └── sample_clip.mp4    # 30-min recorded clip for offline prompt iteration
+│   ├── *.mp4                 # Synth + curated reference clips
+│   └── triggers/             # 29 Africam URLs grouped by intended trigger
+├── docs/
+│   ├── REPO_MAP.md           # Every file explained in plain English
+│   ├── FEATURE_FLOWS.md      # Mermaid diagrams + walkthrough per feature
+│   ├── GENAI_ROADMAP.md      # GenAI surfaces wired + one real limitation
+│   └── videodb-sdk-cheatsheet.md
 └── demo/
-    ├── storyboard.md      # 90-second demo storyboard
+    ├── storyboard.md         # 90-second demo storyboard
     └── recording.md       # Notes on what to capture
 ```
 

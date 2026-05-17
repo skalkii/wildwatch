@@ -127,10 +127,11 @@ Existing conservation AI (SpeciesNet, Wildlife Insights, MegaDetector) processes
 | Act | `index.create_alert()` | Webhooks → FastAPI → Telegram with playable clip URLs. |
 | Act | `conn.connect_websocket()` | Optional dual-delivery channel (skill convention). |
 | Act | `rtstream.generate_stream()` / `video.generate_stream(timeline=…)` | Playable clip URLs attached to every alert. |
-| Act | `coll.generate_text()` | Telegram alert rewriter + daily summary paragraph. |
-| Act | `coll.generate_voice()` | Daily summary narration (`AudioAsset` on the reel timeline). |
-| Act | `coll.generate_music()` | Optional reel soundtrack. |
-| Act | Programmable editor (`Timeline`, `Track`, `Clip`, `VideoAsset`, `TextAsset`, `AudioAsset`, `Transition`) | Daily summary reel composition. |
+| Act | `coll.generate_text()` | Telegram alert rewriter (per-event) + daily summary paragraph (130-170 word documentary narrator script). |
+| Act | `coll.generate_voice()` | Daily summary narration via `voice_name="George"` (deep ElevenLabs voice) + slow config (`speed=0.85`, `stability=0.75`). Length drives the reel ↔ voice sync. |
+| Act | `coll.generate_music()` | Optional reel soundtrack AND automatic tail outro when narration is shorter than the picture. |
+| Act | Programmable editor (`Timeline`, `Track`, `Clip`, `VideoAsset(volume=0)`, `TextAsset`, `AudioAsset(volume=1.5)`, `Transition`) | Daily summary reel composition. Clip audio muted; narration boosted. |
+| Act | `coll.get_video().length` + `coll.get_videos()` | Probe / fallback to skip corpus videos missing `video_info` and discover usable replacements live. |
 
 One shared Medium `SandboxTier` for every index/generation call, status-gated, idle-timeout 600s — so credit burn is bounded.
 
@@ -203,15 +204,17 @@ The point of the demo is to show the full pipeline. Live wildlife feeds are stal
 2. **Wait for `ready`.** The card pulses through `queued → connecting → ingesting → indexing → ready` (1-3 min depending on length). Auto scene + audio indexing kicks off the moment upload finishes.
 3. **Watch the Alerts feed.** Path-B sweep searches each index for gunshot / chainsaw / rare-species / alarm-call / human-intrusion patterns and fires synthesised webhooks. Telegram buzzes; the dashboard's Alerts tab fills in.
 4. **(Optional) Fire test alerts.** Alerts tab → "Test the alert system" panel → 🟢 / 🟡 / 🔴 buttons. Useful for sanity-checking Telegram setup.
-5. **Build the daily summary.** Alerts tab → **Daily summary → Build**. The backend:
+5. **Build the daily summary.** Alerts tab → **Daily summary → Build**. The backend chain (~30-90s):
    - reads the last 24h of events from `data/live_event_log.jsonl`;
    - dedupes by `(label, source[:48], 60s bucket)` so one scene contributes one shot;
    - picks the top 10 by tier + recency;
-   - composes a Timeline reel (one VideoAsset per event + tier-label TextAsset overlays);
-   - calls `coll.generate_text` to write a 45-65 word ranger-friendly paragraph;
-   - calls `coll.generate_voice` to narrate that paragraph and attach the audio as an `AudioAsset` track;
-   - returns the player URL + summary text. UI shows both.
-6. **Click "▶ Play reel"** to watch the narrated compilation.
+   - runs `compute_analytics` to produce KPI counts, top species, hourly buckets, and event-category breakdown;
+   - composes a Timeline reel — each clip pulled from the actual triggering scene when the event has a `video_id`, falling back to corpus / live-collection videos otherwise. Clip audio muted via `VideoAsset(volume=0)`;
+   - `coll.generate_text` writes a 130-170 word documentary-narrator paragraph;
+   - `coll.generate_voice` (deep `George` voice, slow pacing) narrates it; the reel is then extended (more clip loops) or capped with a music tail so the picture and the narration end together;
+   - returns `{player_url, stream_url, summary, analytics, n_clips, n_events}`.
+6. **Modal opens automatically** with a 4-up KPI strip, a 2×2 charts grid (hourly bar, species donut, event-mix donut, top-labels horizontal bar), the inline HLS reel player, and the narration transcript. Modal palette flips with the dashboard light/dark toggle.
+7. **Telegram album lands** — same content as the modal: a `sendMediaGroup` of the four colour charts (rendered server-side by QuickChart.io) with KPI caption + a separate message carrying the narration and a tappable reel link.
 
 Total demo length: ~3 minutes once a clip is uploaded.
 
@@ -291,8 +294,11 @@ wildwatch/
 │   ├── events.py        #   18 event definitions + INDEX_EVENT_MAP
 │   ├── wiring.py        #   index ↔ event ↔ webhook connector
 │   ├── correlation.py   #   Cross-modal reasoning loop
-│   ├── digest.py        #   Daily summary reel (Timeline + generate_text + generate_voice)
-│   ├── telegram.py      #   Bot API send_alert with GenAI rewriter
+│   ├── digest.py        #   Daily summary reel + analytics aggregator
+│   │                    #     (Timeline, generate_text, generate_voice, length-sync,
+│   │                    #      tail-music, corpus + collection waterfall, compute_analytics)
+│   ├── telegram.py      #   Bot API: send_alert (per-event) + send_digest (daily album)
+│   │                    #     QuickChart.io chart PNGs via sendMediaGroup
 │   ├── post_upload_analysis.py  # Path-B sweep (Telegram on uploaded clips)
 │   ├── event_log.py     #   Append-only JSONL alert log
 │   ├── state_io.py      #   Atomic .state.json writes

@@ -8,19 +8,26 @@ surfaces, and the **one** real limitation that shaped scope.
 | Surface | Where | What it does |
 | --- | --- | --- |
 | `coll.generate_text` | `wildwatch/telegram.py:genai_friendly_explanation` | Rewrites bracket-tagged AI explanations into one-sentence ranger-friendly prose. Cached by `sha256(label + raw)`. Used by every alert (Telegram + dashboard feed). |
-| `coll.generate_text` | `wildwatch/digest.py:build_digest` | Summarises the last 24h of events into a 45-65 word paragraph for the daily reel. |
-| `coll.generate_voice` | `wildwatch/digest.py:build_digest` | Turns the summary paragraph into a narration `AudioAsset` attached to the reel timeline. |
-| `coll.generate_music` | `wildwatch/digest.py:build_timeline` | Background score on the reel (opt-in via `add_music=True`). |
-| `Timeline / Track / VideoAsset / AudioAsset / TextAsset / Transition` | `wildwatch/digest.py` | Stitches deduped tier-1/2/3 clips into the reel with overlays and (optional) music + voiceover. |
+| `coll.generate_text` | `wildwatch/digest.py:build_digest` | Documentary-narrator prompt produces a 130-170 word paragraph for the daily reel — opens with the day's most urgent finding and closes with a "watch for tonight" beat. |
+| `coll.generate_voice` | `wildwatch/digest.py:build_digest` | Turns the summary into narration via `voice_name="George"` (deep ElevenLabs voice) + `config={"speed":0.85, "stability":0.75}` for slow documentary pacing. Returned `audio.length` drives the reel-↔-voice length sync. |
+| `coll.generate_music` | `wildwatch/digest.py:build_timeline` + `_add_tail_music` | Background score on the reel (opt-in via `add_music=True`), AND short tail outro generated automatically when narration is shorter than the reel — `_add_tail_music(start=audio_len, duration=gap)` fills the silent end so the reel doesn't dead-air. |
+| `Timeline / Track / Clip / VideoAsset / AudioAsset / TextAsset / Transition / Font / Background` | `wildwatch/digest.py` | Stitches deduped tier-1/2/3 clips into the reel with `VideoAsset(volume=0)` (clip audio muted so narration sits clean), `AudioAsset(volume=1.5)` (narration boosted), and tier-label TextAsset overlays. `build_timeline` returns reel context that drives the per-clip looping in `_extend_reel_with_loop`. |
+| `coll.get_video(vid).length` | `wildwatch/digest.py:_video_has_info` | Probe to filter unusable corpus videos (audio-only / deleted / no `video_info`) before adding to the reel — the failure path that previously crashed `timeline.generate_stream` is now caught upfront. |
+| `coll.get_videos()` | `wildwatch/digest.py:_discover_collection_fallback` | Last-resort fallback when every state-corpus entry has been rejected — scans the live collection for any video that passes the `video_info` probe. |
+| External: **QuickChart.io** | `wildwatch/telegram.py:_digest_chart_urls` | Free public Chart.js → PNG renderer. URL-encodes Chart.js JSON configs (palette matched to dashboard modal); Telegram fetches each URL itself as a `sendMediaGroup` photo. No local image-gen deps. |
+| Telegram `sendMediaGroup` + `sendMessage` | `wildwatch/telegram.py:send_digest` | Two-step delivery: album of 1-4 colour charts + HTML caption with KPIs, then narration paragraph + reel link. ASCII-bar fallback via `build_digest_message` if QuickChart unreachable. |
 
 The dashboard's **Daily summary → Build** button on the Alerts tab fires
-`POST /api/digest/build` which runs the full chain synchronously.
+`POST /api/digest/build`. The endpoint runs the full chain
+synchronously (~30-90s), opens an in-app modal with the analytics
+charts + inline HLS reel, and (when `notify_telegram=true`,
+default) ships the same content to the configured Telegram chat.
 
 ## What is deliberately NOT in this repo
 
 We considered (and explicitly cut from hackathon scope):
 
-- **`generate_image` cover frames** — adds a third async call to the
+- **`generate_image` cover frames** — adds another async call to the
   digest path; not visible in a 90s demo video. Skip.
 - **`dub_video` for multilingual reels** — needs per-recipient language
   config + per-language Telegram chat fan-out. Cool, not load-bearing
@@ -28,6 +35,10 @@ We considered (and explicitly cut from hackathon scope):
 - **`generate_video` "what-if" footage** — generated content is not the
   pitch. Skip.
 - **Voice-driven alert acknowledgement** — out of demo path. Skip.
+- **Server-side chart image generation (Pillow / matplotlib)** —
+  QuickChart.io covers Telegram chart delivery without adding a
+  dep. Reconsider only if QuickChart's quota becomes an issue at
+  scale.
 
 ## The one real limitation: non-speech audio
 
@@ -95,11 +106,14 @@ dilutes that axis).
 | Per-day usage | Cost |
 | --- | --- |
 | ~100 alerts × `generate_text` (basic) for rewrite | $0.03 |
-| 1 × `generate_text` digest summary | $0.005 |
-| 1 × `generate_voice` digest narration | $0.05 |
-| 1 × `generate_music` background score | $0.10 |
+| 1 × `generate_text` digest summary (130-170 words) | $0.01 |
+| 1 × `generate_voice` digest narration (~60-90s slow voice) | $0.08 |
+| 1 × `generate_music` background score (when `add_music=True`) | $0.10 |
+| Conditional `generate_music` tail when narration < reel | $0.04 |
 | 1 × Timeline reel compile | $0.10 |
-| **Daily GenAI total** | **≈ $0.29** |
+| QuickChart.io chart PNGs (×4) | $0 (free public tier) |
+| Telegram `sendMediaGroup` + `sendMessage` | $0 |
+| **Daily GenAI total** | **≈ $0.36** |
 
 Negligible vs the perception pipeline (live RTStream visual + audio
 indexing is ~$5/h per stream).

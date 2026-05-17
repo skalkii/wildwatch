@@ -216,50 +216,74 @@ flowchart TD
 
 ---
 
-## Flow 5 — Daily highlight reel
+## Flow 5 — Daily highlight reel + visual summary modal + Telegram album
 
-Operator clicks "Daily summary → Build" on the dashboard's Alerts tab. 30-90 seconds later there's a playable, narrated reel of the day's most important events — with a one-paragraph summary written by `generate_text` and a voiceover narrating it via `generate_voice`.
+Operator clicks **Daily summary → Build** on the dashboard's Alerts tab. 30-90 seconds later three things land at once:
+1. An **in-app modal** opens with KPIs, four colour charts, an inline HLS reel, and the narration transcript.
+2. The reel itself — corpus clips muted, narrated by a deep slow voice, with a music tail if narration is shorter than the picture, or extra looped clips if narration is longer.
+3. A **Telegram album** with the same four charts as PNGs + narration + tappable reel link.
 
 ```mermaid
 flowchart TD
     A[Dashboard button<br/>POST /api/digest/build] --> B[event_log.read_since<br/>data/live_event_log.jsonl]
     B --> C[dedupe_events<br/>label + source[:48] + 60s bucket]
     C --> D[pick_top_events<br/>sort by tier desc, recency desc]
-    D --> E{any events?}
-    E -->|no| F[Synthesise default<br/>3-clip montage<br/>tiers 3,2,1]
-    E -->|yes| G[For each picked event]
-    F --> G
-    G --> H[pick_corpus_video_id<br/>tier → preferred slug → video_id]
-    H --> I[Track 1: video<br/>VideoAsset + Transition fade]
-    I --> J[Track 2: text overlay<br/>TextAsset tier+label]
-    J --> K[coll.generate_text<br/>45-65 word ranger-friendly summary]
-    K --> L{add_voiceover?}
-    L -->|yes| M[coll.generate_voice<br/>voice_name=Default, wait=True]
-    M --> N[Track 3: audio<br/>AudioAsset volume=0.9]
-    L -->|no| O
-    N --> O{add_music?}
-    O -->|yes| P[Track 4: audio<br/>coll.generate_music<br/>AudioAsset volume=0.25]
-    O -->|no| Q
-    P --> Q[timeline.generate_stream]
-    Q --> R[Return {player_url,<br/>stream_url, summary,<br/>n_clips, n_events}]
+    D --> E[compute_analytics<br/>tier counts, species, labels,<br/>hourly, categories]
+    E --> F{any events?}
+    F -->|no| G[Synthesise default<br/>3-clip montage tiers 3,2,1]
+    F -->|yes| H[build_timeline]
+    G --> H
+    H --> H1[For each event:<br/>pick video_id<br/>1. ev.video_id +start<br/>2. corpus_state<br/>3. coll.get_videos fallback]
+    H1 --> H2[Per clip:<br/>VideoAsset volume=0<br/>+ TextAsset tier label<br/>+ Transition fade]
+    H2 --> I[Track 1: video<br/>Track 2: overlay<br/>captured ctx: specs+tracks]
+    I --> J[coll.generate_text<br/>130-170 word narrator script]
+    J --> K[coll.generate_voice<br/>voice=George, speed=0.85,<br/>stability=0.75, wait=True]
+    K --> L{audio_len vs reel_seconds?}
+    L -->|voice longer| M[_extend_reel_with_loop<br/>append more clips via ctx<br/>until reel matches voice]
+    L -->|reel longer| N[_add_tail_music<br/>generate_music for gap<br/>start=audio_len]
+    L -->|match| O
+    M --> O[Track 3: audio<br/>AudioAsset volume=1.5]
+    N --> O
+    O --> P[timeline.generate_stream]
+    P --> Q[Return DigestResult:<br/>player_url + stream_url +<br/>summary + analytics +<br/>n_clips + n_events]
+    Q --> R[Dashboard modal<br/>_openDigestModal]
+    R --> R1[KPI strip 4-up]
+    R1 --> R2[Charts 2x2<br/>hourly bar + species donut<br/>+ categories donut + labels bar]
+    R2 --> R3[Inline HLS player hls.js]
+    R3 --> R4[Transcript paragraph]
+    Q --> S[send_digest]
+    S --> S1[_digest_chart_urls<br/>4 QuickChart.io PNG URLs]
+    S1 --> S2[Telegram sendMediaGroup<br/>album with HTML caption]
+    S2 --> S3[Telegram sendMessage<br/>narration + reel link]
 ```
 
 ### Node-by-node
 
-1. **Entry point** — Dashboard button fires `POST /api/digest/build` with `{since_hours, top_n, clip_seconds, add_text_overlays, add_voiceover}`. CLI fallback: `python scripts/build_digest.py`.
-2. **Read event log** — `wildwatch/event_log.py:read_since` reads `data/live_event_log.jsonl` and returns every event with `received_at >= now - since_hours*3600`. Tolerates malformed lines.
-3. **Dedupe** — `digest.py:dedupe_events` collapses `(label, source[:48], 60s bucket)` collisions. The same label firing five times in one minute on the same source contributes one clip, not five.
-4. **Pick top events** — `digest.py:pick_top_events` sorts by `(-tier, -received_at)` and keeps the first N. Urgent events ALWAYS appear before notable ones.
-5. **Empty-log fallback** — if no events fired today, build a default 3-clip montage (one per tier) so the demo always has a reel to show.
-6. **Pick corpus clip** — `digest.py:pick_corpus_video_id` maps the event's tier to a list of preferred corpus slugs (from `TIER_SLUG_PREFERENCE`) and returns the first with a `video_id` in `state["corpus"]`. Falls back to "any clip" if no slug matches.
-7. **Track 1 — video** — `VideoAsset(id=video_id, start=0)` wrapped in a `Clip(duration=4s, transition=fade)`.
-8. **Track 2 — text overlay** — `TextAsset(text="🟦 INFO\n<event label>", font=…, background=…)` with the tier color (#38bdf8 / #f59e0b / #ef4444) as the background.
-9. **Summary text** — `coll.generate_text(prompt="Summarise this wildlife monitoring digest...")` returns a 45-65 word ranger-friendly paragraph. The prompt explicitly forbids bracket tags and event-engine jargon. Failure is silent → no summary in result.
-10. **Voiceover (optional)** — `coll.generate_voice(text=summary, voice_name="Default", wait=True)` returns an audio asset whose id we wrap in `AudioAsset(volume=0.9)` on a new `Track`. Volume is higher than music because corpus clips are usually silent.
-11. **Music (optional)** — `coll.generate_music(prompt="documentary ambient...", duration=total)` on its own track at `volume=0.25`.
-12. **Generate stream** — `timeline.generate_stream()` compiles and serves. Returns HLS URL.
-13. **Player URL** — preferred path is `timeline.player_url`. Fallback to hand-built `console.videodb.io/player?url=...`.
-14. **Output** — `DigestResult` TypedDict: `{n_events, n_clips, stream_url, player_url, summary}`. Dashboard renders the summary paragraph + a "▶ Play reel" button.
+1. **Entry point** — Dashboard button fires `POST /api/digest/build` with `{since_hours, top_n, clip_seconds, add_text_overlays, add_voiceover, notify_telegram}`. CLI fallback: `python scripts/build_digest.py` (no Telegram, no modal).
+2. **Read event log** — `event_log.read_since` reads `data/live_event_log.jsonl` for `received_at >= now - since_hours*3600`. Tolerates malformed lines.
+3. **Dedupe** — `digest.dedupe_events` collapses `(label, source[:48], 60s bucket)` collisions so one scene contributes one clip.
+4. **Pick top events** — `digest.pick_top_events` sorts by `(-tier, -received_at)` and keeps top-N (urgent always first).
+5. **Compute analytics** — `digest.compute_analytics(events)` is the pure aggregator that produces every chart's data in one pass: tier KPIs, `top_labels`, `species` (parsed from `species=X` tags + common-name mentions), `hourly` (24-bucket activity), `light_modes`, `categories` (visual / audio / behaviour / environment / threat — overlapping).
+6. **Empty-log fallback** — three-tier synthetic montage so the demo always has a reel.
+7. **Per-event clip selection inside `build_timeline`** — three-stage waterfall:
+   - **1st choice:** the event's own `video_id` + numeric `start_time` + optional `end_time` (Path-B uploads carry this). Shows the actual triggering scene.
+   - **2nd choice:** `pick_corpus_video_id(tier, corpus_state, skip)` mapped via `TIER_SLUG_PREFERENCE`. Each candidate probed via `_video_has_info` (`video.length`) and skip-listed if VideoDB returns "Video info not available".
+   - **3rd choice:** `_discover_collection_fallback(conn, …)` enumerates `coll.get_videos()` for any usable upload.
+8. **Per-clip composition** — `VideoAsset(id, start=clip_start, volume=0)` (muted to make room for narration) wrapped in `Clip(duration=clip_dur, transition=fade)`. `TextAsset` overlay on a sibling track renders the tier label burn-in.
+9. **Build ctx** — `build_timeline` returns `(timeline, n_clips, reel_seconds, ctx)`. `ctx` carries `{video_track, overlay_track, clip_specs, cursor}` so the caller can extend or pad without re-probing.
+10. **Summary text** — `coll.generate_text(prompt=…)` with a 130-170 word documentary-narrator prompt. Forbids bracket tags + event-engine jargon. Failure silent.
+11. **Voiceover** — `coll.generate_voice(text=summary, voice_name="George", config={"speed":0.85, "stability":0.75}, wait=True)`. Slow deep ElevenLabs voice. Retries with default config if VideoDB rejects unknown config keys.
+12. **Length sync** — read `audio.length`:
+    - if `audio_len > reel_seconds`: `_extend_reel_with_loop(ctx, audio_len)` appends additional clips from `clip_specs` (round-robin) so the picture covers the narration. Overlay track follows.
+    - if `reel_seconds > audio_len`: `_add_tail_music(timeline, conn, start=audio_len, duration=gap)` generates a short ambient outro for the silent tail.
+13. **Voiceover track** — `AudioAsset(id=audio_id, volume=1.5)` on its own Track. `volume=1.5` (range 0..5) boosts the narration above the mixer baseline. Clip duration capped at `min(audio_len, reel_seconds)`.
+14. **Generate stream** — `timeline.generate_stream()` compiles. Returns HLS URL + player URL.
+15. **Response** — `dict`: `{n_events, n_clips, stream_url, player_url, summary, analytics, telegram_sent, telegram_error?}`.
+16. **Dashboard modal** — `_openDigestModal(d)` builds a full-screen overlay. `_digestTheme()` reads CSS vars off `:root` so light/dark theme propagates. Layout: 4-up KPI strip → charts grid (2×2, Chart.js via CDN) → inline HLS player (`hls.js` or Safari-native) → transcript paragraph. Escape / overlay-click / close button all destroy `Hls` + `Chart` instances.
+17. **Telegram delivery** — `telegram.send_digest` does two API calls:
+    - **`sendMediaGroup`** — album of up to 4 PNGs rendered by QuickChart.io. `_digest_chart_urls(analytics)` builds Chart.js JSON configs (matching the modal palette) and URL-encodes them; Telegram fetches each itself. First photo has HTML caption with header + 🔵🟡🔴 KPI line.
+    - **`sendMessage`** — narration paragraph + tappable `▶ Watch full reel` link.
+    - **Fallback** — if QuickChart unreachable or album fails, `build_digest_message` ASCII-bar version goes out as text so the operator still gets the stats.
 
 ---
 
