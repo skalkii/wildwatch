@@ -57,9 +57,6 @@ CORRELATION_RULES: list[dict] = [
 ]
 
 
-SEARCH_ERROR = object()  # sentinel: SDK error during search, distinct from no-match
-
-
 @dataclass
 class CorrelationHit:
     rule_name: str
@@ -127,7 +124,9 @@ def evaluate_rule(
         try:
             shots = search_fn(index_kind, query) or []
         except Exception as e:
-            # Network/SDK error — don't fire on partial truth.
+            # Network/SDK error — don't fire on partial truth. Logged
+            # at WARNING so a transient outage is visible in ops without
+            # blocking the next correlation cycle.
             logger.warning(
                 "search failed for rule=%s index=%s query=%r: %s",
                 rule["name"],
@@ -135,7 +134,7 @@ def evaluate_rule(
                 query,
                 e,
             )
-            return SEARCH_ERROR  # type: ignore[return-value]
+            return None
         in_window = shots_within_window(shots, window_start, now_ts)
         if not in_window:
             return None

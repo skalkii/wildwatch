@@ -107,11 +107,10 @@ def _init_from_argv() -> None:
 
 
 # NOTE: `import videodb` is intentionally deferred to inside
-# `listen_with_retry()` below. Importing it at module level would (1)
-# require load_dotenv to have run first (skill pattern), and (2) slow
-# any test that imports `wildwatch.ws_listener` by ~hundreds of ms
-# for SDK init. The lazy import inside the function fires only when
-# the listener actually runs.
+# `listen_with_retry()` below. Importing it at module level would
+# require load_dotenv to have run first (skill pattern). The lazy
+# import inside the function fires only when the listener actually
+# runs.
 
 # Track if this is the first connection (for clearing events)
 _first_connection = True

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from wildwatch.correlation import (
     CORRELATION_RULES,
-    SEARCH_ERROR,
     CorrelationHit,
     CorrelationState,
     evaluate_rule,
@@ -120,7 +119,9 @@ def test_correlation_state_cooldown_per_rule_independent() -> None:
     assert s.should_fire("rule_b", now_ts=1100.0, cooldown=300) is True
 
 
-def test_evaluate_rule_returns_sentinel_on_search_exception() -> None:
+def test_evaluate_rule_returns_none_on_search_exception() -> None:
+    """SDK errors collapse to None — same outcome as no-match, just with a
+    WARNING log so ops can tell a quiet stream from a broken SDK."""
     rule = {
         "name": "t",
         "tier": 2,
@@ -133,6 +134,4 @@ def test_evaluate_rule_returns_sentinel_on_search_exception() -> None:
         raise RuntimeError("SDK exploded")
 
     result = evaluate_rule(rule, boom, 2000.0)
-    # Distinct from None (legitimate no-match) so the operator can tell a
-    # quiet stream from a broken SDK.
-    assert result is SEARCH_ERROR
+    assert result is None

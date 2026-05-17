@@ -99,7 +99,7 @@ def _ensure_events(conn, state: dict) -> dict[str, str]:
 
 
 def _read_ws_connection_id() -> str | None:
-    """Read ws_connection_id written by wildwatch/ws_listener.py.
+    """Read ws_connection_id written by scripts/ws_listener.py.
 
     Per VideoDB skills' rtstream-reference.md, alerts and indexes should
     forward ``ws_connection_id`` so events also flow through the WebSocket
@@ -220,7 +220,7 @@ def main() -> int:
     ap.add_argument(
         "--ws",
         action="store_true",
-        help="forward ws_connection_id from wildwatch/ws_listener.py to indexes + alerts",
+        help="forward ws_connection_id from scripts/ws_listener.py to indexes + alerts",
     )
     args = ap.parse_args()
 
@@ -254,7 +254,7 @@ def main() -> int:
         else:
             print(
                 "[ws] no ws_connection_id found at "
-                "$VIDEODB_EVENTS_DIR/videodb_ws_id — start wildwatch/ws_listener.py first"
+                "$VIDEODB_EVENTS_DIR/videodb_ws_id — start scripts/ws_listener.py first"
             )
 
     # 1. Events — idempotent on label.

@@ -32,7 +32,6 @@ from dotenv import load_dotenv  # noqa: E402
 
 from wildwatch.correlation import (  # noqa: E402
     CORRELATION_RULES,
-    SEARCH_ERROR,
     CorrelationState,
     evaluate_rule,
 )
@@ -187,7 +186,6 @@ def main() -> int:
     sweep = 0
     fires = 0
     post_failures = 0
-    search_errors = 0
     try:
         while time.time() < deadline:
             sweep += 1
@@ -199,10 +197,6 @@ def main() -> int:
                 if not state_engine.should_fire(rule["name"], now, cooldown=args.cooldown):
                     continue
                 hit = evaluate_rule(rule, search_fn, now)
-                if hit is SEARCH_ERROR:
-                    print(f"  ! SDK ERROR on {rule['name']} (see logger.warning)")
-                    search_errors += 1
-                    continue
                 if hit is not None:
                     print(f"  FIRE  {hit.rule_name} -> {hit.synthesis_label} (tier {hit.tier})")
                     for (kind, _query), shots in hit.evidence.items():
@@ -225,10 +219,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\ninterrupted.")
 
-    print(
-        f"\ntotal sweeps: {sweep}  fires: {fires}  "
-        f"post_failures: {post_failures}  search_errors: {search_errors}"
-    )
+    print(f"\ntotal sweeps: {sweep}  fires: {fires}  post_failures: {post_failures}")
     return 0
 
 
