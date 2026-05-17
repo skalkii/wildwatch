@@ -35,6 +35,21 @@ class DigestResult(TypedDict):
     summary: str | None
 
 
+class _DigestEventInput(TypedDict, total=False):
+    """Minimal shape `build_timeline` reads from each event dict.
+
+    `total=False` marks both keys OPTIONAL (TypedDicts always tolerate
+    extra keys at runtime — that's a Python TypedDict semantic, not
+    something this declaration controls). Used at the synthetic fallback
+    site below to document which keys downstream actually consumes;
+    real event-log dicts carry many additional fields (event_id,
+    confidence, received_at, etc.) and flow through fine.
+    """
+
+    tier: int
+    label: str | None
+
+
 # Eager import of the editor surface so an import error surfaces at module
 # load (e.g. application startup) rather than when an operator triggers a
 # digest build mid-demo. Wrapped in try/except so test environments without
@@ -284,7 +299,11 @@ def build_digest(
         # ev.get("label") see the expected key (rather than relying on
         # `or ""` everywhere).
         logger.info("digest: event log empty; synthesising default montage")
-        picked = [{"tier": 3, "label": ""}, {"tier": 2, "label": ""}, {"tier": 1, "label": ""}]
+        picked = [
+            _DigestEventInput(tier=3, label=""),
+            _DigestEventInput(tier=2, label=""),
+            _DigestEventInput(tier=1, label=""),
+        ]
 
     timeline, n_clips = build_timeline(
         picked,
