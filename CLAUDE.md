@@ -133,10 +133,13 @@ wildwatch/
 │   ├── digest.py             # Daily summary reel + compute_analytics + length-sync helpers
 │   ├── prompts.py            # Prompt loader + per-stream context formatter
 │   ├── sandbox.py            # Shared sandbox lifecycle
-│   ├── event_log.py          # Append-only JSONL alert log
+│   ├── sdk_pool.py           # Process-wide VideoDB conn cache (RLock-guarded)
+│   ├── event_log.py          # Streaming append-only JSONL alert log
 │   ├── state_io.py           # Atomic .state.json writes (O_NOFOLLOW + fsync)
 │   ├── telegram.py           # Bot API: send_alert + send_digest + QuickChart chart URLs
-│   └── post_upload_analysis.py   # Path-B sweep — synthesised alerts for uploaded clips
+│   ├── post_upload_analysis.py   # Path-B sweep — synthesised alerts for uploaded clips
+│   └── static/
+│       └── dashboard.html    # Single-page UI (HTML+CSS+JS, loaded via importlib.resources)
 ├── scripts/
 │   ├── bootstrap.py          # One-shot: connect streams, create events/indexes/alerts
 │   ├── build_digest.py       # CLI fallback for the daily reel

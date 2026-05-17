@@ -33,20 +33,23 @@ wildwatch/
 ├── config.py                  # Stream registry + fallback URLs (the only place URLs live)
 │
 ├── wildwatch/                 # The Python package — the actual app
-│   ├── webhooks.py            # FastAPI server: dashboard, API, alert receiver
-│   ├── dashboard.py           # The single-page HTML dashboard + live event broadcaster
-│   ├── sources.py             # "Source" = anything we're watching; CRUD layer
-│   ├── ingest.py              # Pulls a Source into VideoDB (file / URL / RTSP)
+│   ├── webhooks.py            # FastAPI server: dashboard, API, alert receiver (+ SSRF validator, optional webhook auth)
+│   ├── dashboard.py           # SSE broadcaster + thin loader for static/dashboard.html
+│   ├── sources.py             # "Source" = anything we're watching; CRUD layer (lock-guarded)
+│   ├── ingest.py              # Pulls a Source into VideoDB (file / URL / RTSP) + circuit-broken broadcast logs
 │   ├── events.py              # 18 alert definitions + which index gets which event
 │   ├── wiring.py              # Connects an index to an event with a callback URL
 │   ├── correlation.py         # Cross-modal reasoning ("audio + visual = confirmed event")
 │   ├── digest.py              # Daily summary reel + compute_analytics + length-sync (loop / tail-music)
 │   ├── prompts.py             # Loads the 4 AI prompts from prompts/
 │   ├── sandbox.py             # Lifecycle helper for the VideoDB AI sandbox
-│   ├── event_log.py           # Append-only log of every alert that fired
-│   ├── state_io.py            # Crash-safe JSON file writes
+│   ├── sdk_pool.py            # Process-wide VideoDB conn cache (_get_conn / _get_coll)
+│   ├── event_log.py           # Append-only streaming JSONL log of every alert that fired
+│   ├── state_io.py            # Crash-safe JSON file writes (O_NOFOLLOW + fsync)
 │   ├── telegram.py            # send_alert + send_digest (Telegram album via QuickChart.io)
-│   └── post_upload_analysis.py# Path-B: post-upload audio+visual sweep → synthesised webhooks
+│   ├── post_upload_analysis.py# Path-B: post-upload audio+visual sweep → synthesised webhooks
+│   └── static/
+│       └── dashboard.html     # The whole single-page UI: HTML+CSS+JS (loaded via importlib.resources)
 │
 ├── prompts/                   # The four AI prompts that drive every observation
 │   ├── species.txt            # "What animals do you see?"
@@ -74,10 +77,12 @@ wildwatch/
 │   └── sdk_integration_smoke.py # End-to-end VideoDB integration check
 │
 ├── bridge/                    # YouTube → RTSP bridging (so VideoDB can read a YouTube live)
-│   ├── docker-compose.yml     # Spins up mediamtx (RTSP relay)
-│   ├── mediamtx.yml           # mediamtx config
-│   ├── watch_bore.sh          # Watches the bore.pub tunnel
-│   └── watch_bridges.sh       # Watches the bridge container
+│   ├── README.md              # Single source of truth for the bridge workaround (read this first)
+│   ├── docker-compose.yml     # Spins up mediamtx + bore (public TCP tunnel)
+│   ├── mediamtx.yml           # mediamtx config (TCP-only RTSP)
+│   ├── start_bridge.sh        # streamlink + ffmpeg pump (H.264 Main@720p re-encode)
+│   ├── watch_bore.sh          # Prints the rotating bore.pub remote port
+│   └── watch_bridges.sh       # Health probe across running bridges
 │
 ├── samples/                   # Curated reference clips
 │   └── triggers/              # 29 Africam YouTube URLs grouped by what alert they should trigger
@@ -110,14 +115,14 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Why it exists | VideoDB needs a public URL to POST alerts to. The same server also powers the dashboard so we don't run two processes. |
 | Key technology | FastAPI (Python web framework), `aiofiles` (async file uploads), `videodb` Python SDK. |
 | Who runs it | `uvicorn wildwatch.webhooks:app --port 8000` — what `docker-compose up` and the quickstart `Path B` both invoke. |
-| Notable bits | `_get_conn()` / `_get_coll()` cache the VideoDB connection (process-wide, RLock-guarded). `_async_sdk()` wraps every blocking SDK call in a 4-worker thread pool + per-call `asyncio.wait_for` deadline. Pool tracks `_sdk_in_flight`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. CancelledError (client disconnect) defers the slot release via `cf_fut.add_done_callback` so the counter doesn't leak. Origin/CSRF middleware blocks cross-origin mutating requests. Upload route adds magic-byte sniff + per-IP rate-limit + 413/415 `source_deleted` broadcast. `/` dashboard route serves with `Cache-Control: no-store` so a hard-refresh always picks up fresh JS. **Scene endpoints:** `GET /api/videos/{id}/scenes/{index_id}` lists indexes first and short-circuits when status ≠ `done`, dodging the SDK hang on a still-processing index. `POST /api/videos/{id}/reindex` triggers a fresh `index_scenes` without deleting prior indexes. `GET /api/videos/{id}/clip?start=&end=` returns a playable HLS manifest via `video.generate_stream(timeline=[(start,end)])` for the dashboard's scene-card click-to-play. `DELETE /api/videos/{id}` calls `coll.delete_video` (removes the video + all its indexes from VideoDB), busts the videos cache, and broadcasts a `video_deleted` SSE so every open dashboard refreshes. **Search fan-out:** `POST /api/search` with `scope=collection` no longer calls `coll.search` (which only hits the spoken-word index and returns 0 for transcript-less wildlife clips). Instead it enumerates `coll.get_videos()`, filters to videos with a `done` scene index, and fans out concurrent per-video `v.search(index_type=scene, score_threshold=0.3)` calls — merging + ranking by score. **Daily-summary endpoint:** `POST /api/digest/build` wraps the sync `digest.build_digest` in `asyncio.to_thread` (since the chain runs generate_text → generate_voice synchronously, ~30-90s); on success calls `telegram.send_digest` when `notify_telegram=true`. Response carries `analytics`, `player_url`, `summary`, `telegram_sent`. **AlertPayload** carries an optional `video_id` field — Path-B sweeps send it so the digest reel can pull the actual triggering scene instead of a stand-in. |
+| Notable bits | **SDK pool:** `_get_conn` / `_get_coll` re-exported from `wildwatch.sdk_pool` (process-wide, RLock-guarded). `_async_sdk()` wraps every blocking SDK call in a 4-worker thread pool + per-call `asyncio.wait_for` deadline. Pool tracks `_sdk_in_flight`; at 2× saturation new calls raise `SDKPoolSaturated → 503` rather than queueing forever. CancelledError (client disconnect) defers the slot release via `cf_fut.add_done_callback` so the counter doesn't leak. **CSRF / SSRF:** Origin middleware blocks cross-origin mutating requests; `_validate_source_input` enforces per-kind URL schemes + blocks private + link-local hosts so an LAN/tunneled caller can't make our SDK fetch internal resources. `AlertPayload` + `SourceCreate` carry length caps (label 256, explanation 8000, etc.) so a single attacker payload can't flood the event log + SSE. **Webhook auth:** `WILDWATCH_WEBHOOK_SECRET` env var enables shared-secret auth on `/webhook/{tier}` via `X-WildWatch-Secret` header (verified via `hmac.compare_digest`). Unset → loud startup WARNING; set → trusted local callers (Path-B sweep, correlation runner) forward the header. **Upload route:** magic-byte sniff + per-IP rate-limit + 413/415 `source_deleted` broadcast; tempfile is written to `.partial`, renamed to `.mp4` only after the sniff passes. **Scene endpoints:** `GET /api/videos/{id}/scenes/{index_id}` lists indexes first and short-circuits when status ≠ `done`. `POST /api/videos/{id}/reindex` triggers a fresh `index_scenes` without deleting prior indexes. `GET /api/videos/{id}/clip?start=&end=` returns a playable HLS manifest via `video.generate_stream(timeline=[(start,end)])`. `DELETE /api/videos/{id}` calls `coll.delete_video` + busts cache + broadcasts `video_deleted` SSE. **Search fan-out:** `POST /api/search` with `scope=collection` enumerates `coll.get_videos()`, filters to videos with a `done` scene index, and fans out concurrent per-video `v.search(index_type=scene, score_threshold=0.3)` calls. **Daily-summary endpoint:** `POST /api/digest/build` wraps the sync `digest.build_digest` in `asyncio.to_thread` (~30-90s); on success calls `telegram.send_digest` when `notify_telegram=true`. Response carries `analytics`, `player_url`, `summary`, `telegram_sent`. |
 
-### 3.2 `dashboard.py` — the live single-page UI
+### 3.2 `dashboard.py` — SSE broadcaster + HTML loader
 
-| What it is | The entire HTML, CSS, and JavaScript for the operator dashboard, served as one big string from a single endpoint. |
+| What it is | The **server-side** half of the dashboard: SSE broadcaster (`broadcast` + `subscribe`), in-memory event counters (`_total`, `_tier_counts`, `_recent_events`), and a thin loader that serves the static HTML. The big UI string moved to `static/dashboard.html` during the size-split refactor; `dashboard.py` is now ~200 lines. |
 | --- | --- |
 | Why it exists | Real-time operators (rangers, ecologists, judges) need a window into what the AI is seeing right now. A single-page app means no build step, no separate front-end repo. |
-| Key technology | Tailwind CSS via CDN, **hls.js** for in-modal HLS playback, **Chart.js** via CDN for the digest-modal analytics charts, vanilla JavaScript, Server-Sent Events (SSE) for live push. Inline SVG favicon. Dark/light theme with CSS variables. |
+| Key technology | `asyncio.Queue` fan-out + SSE for push, `importlib.resources` + `@lru_cache` for the static-HTML load. Static asset uses Tailwind CSS via CDN, **hls.js** for in-modal HLS playback, **Chart.js** via CDN for the digest-modal analytics charts, vanilla JS. Inline SVG favicon. Dark/light theme via CSS variables on `:root`. |
 | Who reads it | Anyone who opens `http://localhost:8000/`. |
 | Notable bits | Four tabs (Alerts, Sources, Indexed Content, Usage). Tab state persists in `localStorage` + URL hash. Every label is rewritten in plain English for non-tech viewers. The Usage tab does the live `cost_metric × usage` math so you can see exactly where credits went. **Scene card renderer (visual + audio):** `_parseSceneText` understands BOTH bracket-tag families — visuals (`[SCENE] [ANIMAL] [NOTES]`) and audio (`[SOUND] [SIGNAL] [SUMMARY]`). `_renderSceneCard` picks the right layout per parsed structure: visual cards show light-mode pill + scene-state pill + per-animal rows, audio cards show category pills (🦁 Biophony / 💨 Geophony / ⚠️ Anthropogenic) + signal pills (Alarm call / Distress call / Predator vocal / Abnormal silence) + per-sound rows. Border colour escalates for anthropogenic audio events. Same renderer is reused inside the Indexed Content tab AND inside the search results so search hits look identical. Every scene card is clickable → opens a modal HLS player via `_openClipPlayer(url)` that uses Safari-native HLS or falls back to hls.js. **Index kind pill:** every index card shows its kind (Visual / Audio / Environment / Behavior) inferred from the index name so operators can see at a glance which AI lens fired. **Library toolbar:** the Indexed Content tab's Library panel has a sticky header with a name/id filter, a sort dropdown (name/length/id × asc/desc), and a kind filter (all/clip/uploaded/stream/reel). Filter + sort run client-side against `_libraryVids` so toolbar changes don't hit the API. The list scrolls inside the card with the header pinned at the top. **Library shows only ACTIVE rtstreams:** entries from `coll.list_rtstreams()` are cross-referenced with the operator's source rows (`/api/sources`). An rtstream appears only when (a) `rtstream.status` is in the running-set AND (b) a source row with that `rtstream_id` has `status='ready'`. Either signal alone is unreliable (VideoDB sometimes reports stale 'connected' on dead streams); both together = "actively ingesting RIGHT NOW". **Per-index collapse:** every index card carries a `Collapse / Expand` toggle so when a visual index's auto-loaded scene pane is long, the operator can hide it and see the audio index's scenes without scrolling. **Audio-blocked surface:** the backend annotates any audio-named index in `processing` state with `audio_blocked: 'no_speech'` when `get_transcript` probes report "no spoken data found"; the dashboard renders an amber "no speech — skipped" pill + Remove button (calls `DELETE /api/videos/{id}/indexes/{idx_id}`) instead of a misleading "processing" status. **Search clear-x:** small ✕ inside the right edge of the search input clears both the input and the results pane on click. **Per-source-kind actions:** `renderSource` only shows Reconnect/Disconnect for `rtsp`/`rtmp` (where reconnect actually re-establishes a live feed). Uploads and URL sources show Re-index instead (re-runs the AI scene index on the existing video — re-uploading would duplicate the file). Delete is always available. **Toast system:** `showToast(msg, {variant})` (info/success/warn/error) and `confirmToast(msg, {title, danger})` replace `window.alert`/`window.confirm` — used by re-index, delete, clip-fetch, and any future async UX. **Daily summary modal:** `_openDigestModal(d)` is a full-screen overlay opened from the Alerts tab's "Daily summary → Build" card. `_digestTheme()` reads CSS vars off `:root` (`--bg`, `--bg-elev`, `--border`, `--text`, `--accent`) so the modal flips with the dashboard's light/dark toggle; tier colours stay fixed because they encode severity. Layout: 4-up KPI strip (total + tier 1/2/3) → 2×2 charts grid (Chart.js: hourly bar, top-species donut, event-mix-by-type donut, top-labels horizontal bar) → inline HLS reel player (same hls.js path as scene cards) → transcript paragraph. Chart instances are tracked in a module list and destroyed on close so re-opening doesn't leak canvases. Outside the modal the digest card retains a "▶ Reopen reel" button for re-display without re-running the build. |
 
@@ -183,6 +188,15 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | Key technology | `str.format`. |
 | Who calls it | `bootstrap.py` and any script that creates an index. |
 
+### 3.9b `sdk_pool.py` — process-wide VideoDB connection cache
+
+| What it is | The single source of truth for the cached ``videodb.connect()`` handle + the default Collection. Exposes ``_get_conn()`` + ``_get_coll()`` + a ``reset_cache()`` test helper. |
+| --- | --- |
+| Why it exists | ``videodb.connect()`` does an auth round-trip on every call. Without a cache, each FastAPI route handler would re-authenticate against VideoDB and the dashboard would feel like molasses. |
+| Key technology | ``threading.RLock`` for double-checked locking (recursive so ``_get_coll`` can call ``_get_conn`` without deadlocking). Lazy ``import videodb`` so callers that only need other parts of the package don't pay the SDK import cost. |
+| Who calls it | ``webhooks.py`` re-exports ``_get_conn`` / ``_get_coll`` / ``_conn_cache`` so every route handler keeps working and ``conftest.py`` monkeypatches stay valid. |
+| Notable bits | Extracted from ``webhooks.py`` during the size-split refactor — keeps the connection-cache concern out of the FastAPI route module. ``reset_cache()`` is for tests only; production code never calls it. |
+
 ### 3.10 `sandbox.py` — the VideoDB sandbox lifecycle
 
 | What it is | A helper that creates or reuses one shared "sandbox" — the dedicated GPU compute slot that VideoDB charges hourly for. Enforces the rule "one sandbox, status-gated, context-managed teardown." |
@@ -197,9 +211,9 @@ This is the Python package. Everything the FastAPI server, dashboard, and CLI sc
 | What it is | Every alert the webhook receives is written as one JSON line to `data/live_event_log.jsonl`. |
 | --- | --- |
 | Why it exists | The digest builder needs a tamper-evident, restart-safe record. Append-only JSONL is the simplest format that survives crashes. |
-| Key technology | Plain Python file IO with `aiofiles` for async writes. |
-| Who reads it | `digest.py` (to pick the top-N events). |
-| Notable bits | `read_since(min_ts)` tolerates malformed `received_at` values rather than crashing the whole digest — a bug-fix from earlier in the build. |
+| Key technology | Plain Python file IO with line-by-line streaming reads. |
+| Who reads it | `digest.py:build_digest` + `digest.py:compute_analytics`. |
+| Notable bits | **Streaming reads:** `_iter_records()` yields one parsed dict per line via `open() + for line in f:` instead of slurping the whole file. Prevents OOM on a 24/7 deployment where the log grows unboundedly. `read_all()` calls `list(...)` on it for the existing contract; `read_since()` filters inline. **Tolerant parse:** corrupt lines are skipped + counted in an aggregate WARNING. **Path override:** `WILDWATCH_LOG_FILE` env var redirects the path so tests + Docker volume mounts don't need monkeypatching. |
 
 ### 3.12 `state_io.py` — durable JSON writes
 
