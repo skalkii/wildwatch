@@ -511,9 +511,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
     <aside class="space-y-4">
       <div class="card p-4">
-        <h2 class="text-sm font-semibold tracking-tight">Live cameras</h2>
-        <p class="text-[11px] faint mb-2.5 mt-0.5">Streams currently being watched by VideoDB.</p>
-        <div id="rtstreams" class="text-xs space-y-1.5">loading…</div>
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="text-sm font-semibold tracking-tight">Live cameras</h2>
+          <label class="text-[10.5px] faint inline-flex items-center gap-1 cursor-pointer select-none" title="When checked, only running streams (connected / running / ingesting / indexing / ready) are shown. Stopped rtstreams stay registered on VideoDB — the SDK has no delete API.">
+            <input id="rtstreams-hide-stopped" type="checkbox" checked class="align-middle" style="margin:0;">
+            hide stopped
+          </label>
+        </div>
+        <p class="text-[11px] faint mb-2.5 mt-0.5">Streams VideoDB has on file. Connected ones at top.</p>
+        <div id="rtstreams" class="text-xs space-y-1.5 max-h-[300px] overflow-y-auto pr-1">loading…</div>
       </div>
       <div class="card p-4">
         <h2 class="text-sm font-semibold tracking-tight">Indexes running</h2>
@@ -1026,12 +1032,36 @@ function applyStats(s) {
   }
 }
 
-function applyRtstreams(d) {
+// Cached so the "hide stopped" checkbox can re-render without an API call.
+let _rtstreamsCache = [];
+
+const _RTSTREAM_RUNNING_STATUSES = new Set([
+  'connected', 'running', 'ingesting', 'indexing', 'ready', 'active',
+]);
+
+function _renderRtstreams() {
   const c = $('rtstreams');
-  if (!d || !d.rtstreams) { c.innerHTML = '<span class="faint">n/a</span>'; return; }
-  if (!d.rtstreams.length) { c.innerHTML = '<span class="faint">none</span>'; return; }
-  c.innerHTML = d.rtstreams.map(r => {
-    const ok = r.status === 'connected';
+  if (!c) return;
+  const hide = ($('rtstreams-hide-stopped') || {}).checked;
+  let rows = _rtstreamsCache.slice();
+  if (hide) {
+    rows = rows.filter(r => _RTSTREAM_RUNNING_STATUSES.has(String(r.status || '').toLowerCase()));
+  }
+  // Running streams first, then by name. Within each group keep VideoDB's
+  // order (newest first).
+  rows.sort((a, b) => {
+    const ra = _RTSTREAM_RUNNING_STATUSES.has(String(a.status || '').toLowerCase()) ? 0 : 1;
+    const rb = _RTSTREAM_RUNNING_STATUSES.has(String(b.status || '').toLowerCase()) ? 0 : 1;
+    return ra - rb;
+  });
+  if (rows.length === 0) {
+    c.innerHTML = hide
+      ? '<span class="faint">no running streams — uncheck "hide stopped" to see all</span>'
+      : '<span class="faint">none</span>';
+    return;
+  }
+  c.innerHTML = rows.map(r => {
+    const ok = _RTSTREAM_RUNNING_STATUSES.has(String(r.status || '').toLowerCase());
     const idBit = r.id ? `<span class="ml-2 inline-block align-middle">${_idPill(r.id, {truncate: true})}</span>` : '';
     return `<div class="flex items-center justify-between gap-2">
       <span class="truncate" title="${escapeHtml(r.name)}">
@@ -1042,6 +1072,12 @@ function applyRtstreams(d) {
       <span class="faint mono text-[10.5px]">${escapeHtml(r.status)}</span>
     </div>`;
   }).join('');
+}
+
+function applyRtstreams(d) {
+  if (!d || !d.rtstreams) { _rtstreamsCache = []; }
+  else { _rtstreamsCache = d.rtstreams; }
+  _renderRtstreams();
 }
 
 function applySandboxes(d) {
@@ -2039,6 +2075,12 @@ async function showVideoScenes(videoId, indexId) {
 
 // search
 // Library toolbar — client-side filter/sort/kind controls, re-render only.
+// Rtstreams "hide stopped" toggle — re-render only, no API call.
+(() => {
+  const cb = $('rtstreams-hide-stopped');
+  if (cb) cb.addEventListener('change', _renderRtstreams);
+})();
+
 ['library-filter','library-sort','library-kind'].forEach(id => {
   const el = $(id);
   if (!el) return;
