@@ -292,19 +292,12 @@ async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
     loop = asyncio.get_running_loop()
     call = functools.partial(fn, *args, **kwargs)
     fut = loop.run_in_executor(_get_executor(), call)
-    timed_out = False
+    slot_deferred = False  # True means worker may still be pinned; defer release
     try:
         return await asyncio.wait_for(fut, timeout=timeout_s)
     except TimeoutError as e:
-        timed_out = True
+        slot_deferred = True
         fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
-        # Read the saturation counter under the lock so the log is
-        # consistent. Don't try to distinguish "cancel succeeded" vs
-        # "worker still running" — `asyncio.wait_for` cancels the asyncio
-        # wrapper, not the concurrent.futures.Future underneath, so the
-        # state is unreliable. Always release the slot via done-callback
-        # below; max(0, ...) in _release_in_flight_slot absorbs any
-        # over-decrement.
         with _executor_lock:
             in_flight_snapshot = _sdk_in_flight
         logger.warning(
@@ -314,12 +307,22 @@ async def _async_sdk(fn, *args, timeout_s: float = 5.0, **kwargs):
             in_flight_snapshot,
         )
         raise TimeoutError(f"SDK call {fn_name!r} timed out after {timeout_s}s") from e
+    except asyncio.CancelledError:
+        # Client disconnect (FastAPI cancels the coroutine) or shutdown.
+        # Crucially `asyncio.CancelledError` is NOT a subclass of
+        # `TimeoutError` in 3.11+. Treat identically to timeout — the
+        # executor worker is still pinned, so DEFER the slot release.
+        # Without this, the success path's decrement fired immediately on
+        # every cancelled request, leaking the saturation counter and
+        # eventually letting traffic through when the pool was full.
+        slot_deferred = True
+        raise
     finally:
-        if timed_out:
-            # On timeout we can't tell if the executor worker is still
-            # pinned (asyncio wraps the future). Defer the decrement to
-            # whenever the underlying future resolves — _release_in_
-            # flight_slot is idempotent-with-floor.
+        if slot_deferred:
+            # On timeout / cancel we can't tell if the executor worker is
+            # still pinned (asyncio wraps the future). Defer the decrement
+            # to whenever the underlying future resolves —
+            # _release_in_flight_slot is idempotent-with-floor.
             fut.add_done_callback(_release_in_flight_slot)
         else:
             with _executor_lock:
