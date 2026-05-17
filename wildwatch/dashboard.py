@@ -713,7 +713,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <span id="usage-breakdown-count" class="text-[11px] faint">0 resources</span>
       </div>
       <p class="text-[11.5px] faint mb-2">Each row: <span class="muted">resource units &times; price per unit = cost</span>. Sorted biggest spend first.</p>
-      <div id="usage-breakdown" class="space-y-1.5"></div>
+      <div id="usage-breakdown" class="space-y-1.5 overflow-y-auto pr-1" style="max-height:360px;"></div>
     </section>
 
     <!-- HOW IT BREAKS DOWN -->
