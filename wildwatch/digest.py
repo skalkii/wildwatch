@@ -420,7 +420,14 @@ def build_timeline(
                 music_track = Track()
                 music_track.add_clip(
                     0,
-                    Clip(asset=AudioAsset(id=music_id, start=0, volume=0.25), duration=total),
+                    Clip(
+                        asset=AudioAsset(
+                            id=music_id,
+                            start=0,
+                            disable_other_tracks=False,
+                        ),
+                        duration=total,
+                    ),
                 )
                 timeline.add_track(music_track)
                 logger.info("digest: added generated music track id=%s (%ss)", music_id, total)
@@ -490,13 +497,18 @@ def build_digest(
         n_t2 = sum(1 for e in events if int(e.get("tier", 0)) == 2)
         n_t3 = sum(1 for e in events if int(e.get("tier", 0)) == 3)
         prompt = (
-            "Summarise this wildlife monitoring digest in ONE short paragraph "
-            "for a non-technical conservation audience (rangers, donors). "
-            "Lead with the most urgent finding. Use plain English, no jargon, "
-            "no event-engine terminology, no bracket tags. 45-65 words. "
+            "You are a wildlife documentary narrator. Summarise this 24h "
+            "monitoring digest as ONE flowing paragraph of 130-170 words, "
+            "to be read aloud over a highlight reel by a deep, slow voice. "
+            "Open with the day's most urgent finding, then weave in the "
+            "notable behaviours and routine sightings, and close with one "
+            "line on what rangers should watch for tonight. Use plain "
+            "English suitable for non-technical donors and field staff. "
+            "No bracket tags, no event-engine terminology, no bullet "
+            "points, no headings — just continuous prose. "
             f"Window: last {since_hours}h. Counts: {n_t1} routine sightings, "
             f"{n_t2} notable events, {n_t3} urgent events. Top events: "
-            + "; ".join((ev.get("label") or "").replace("_", " ") for ev in picked[:5])
+            + "; ".join((ev.get("label") or "").replace("_", " ") for ev in picked[:8])
             + "."
         )
         if hasattr(coll, "generate_text"):
@@ -512,19 +524,36 @@ def build_digest(
     # corpus clips themselves are usually silent or near-silent.
     if add_voiceover and summary and hasattr(coll, "generate_voice"):
         try:
-            audio = coll.generate_voice(
-                text=summary,
-                voice_name="Default",
-                wait=True,
-            )
+            # Deep, slow narration. ``George`` is a low/resonant
+            # ElevenLabs voice that suits documentary pacing. ``speed``
+            # < 1 slows delivery; ``stability`` high keeps the tone
+            # steady rather than dramatic. Wrapped in try/except in
+            # case the model rejects unknown config keys — fall back
+            # to defaults on TypeError.
+            voice_config = {"speed": 0.85, "stability": 0.75}
+            try:
+                audio = coll.generate_voice(
+                    text=summary,
+                    voice_name="George",
+                    config=voice_config,
+                    wait=True,
+                )
+            except Exception as cfg_err:
+                logger.warning(
+                    "digest: generate_voice rejected slow-deep config (%s); retrying with defaults",
+                    cfg_err,
+                )
+                audio = coll.generate_voice(text=summary, voice_name="George", wait=True)
             audio_id = getattr(audio, "id", None)
             if audio_id:
-                # The generated narration is a fixed length per the text
-                # we passed; VideoDB rejects ``Clip duration > audio
-                # length``. Use the asset's actual length, capped at
-                # the reel length so the narration doesn't extend past
-                # the final visual cut. If the SDK omits .length we
-                # fall back to clip_seconds (one slot's worth).
+                # The narration is a fixed length per the text we
+                # passed; VideoDB rejects ``Clip duration > audio
+                # length``. Cap clip duration at min(audio_length,
+                # reel_length). ``disable_other_tracks=True`` is the
+                # default on AudioAsset and mutes the underlying clip
+                # audio for the span the narration plays — combined
+                # with the 130-170 word target that means the entire
+                # reel is muted under the voiceover.
                 reel_seconds = n_clips * clip_seconds
                 audio_len = getattr(audio, "length", None) or clip_seconds
                 vo_duration = min(float(audio_len), float(reel_seconds))
@@ -532,7 +561,11 @@ def build_digest(
                 vo_track.add_clip(
                     0,
                     Clip(
-                        asset=AudioAsset(id=audio_id, start=0, volume=0.9),
+                        asset=AudioAsset(
+                            id=audio_id,
+                            start=0,
+                            disable_other_tracks=True,
+                        ),
                         duration=vo_duration,
                     ),
                 )
