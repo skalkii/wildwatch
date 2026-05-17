@@ -4,6 +4,23 @@
 
 ---
 
+## 0. TL;DR for humans (read this first if you're new)
+
+WildWatch is an "always-on observer" for protected-area wildlife cameras. It plugs into any live video stream (RTSP camera, YouTube live, MP4 file) and runs four AI prompts continuously — one watching for species, one for behaviour, one for environment / threats, one listening to audio. When something matches a 18-rule library of "things worth alerting on," it pushes a colour-coded notification (green/yellow/red) to a Telegram bot and a live web dashboard, with a tappable clip of the moment. A nightly script stitches the day's highlights into a 90-second video reel.
+
+The differentiator is **cross-modal reasoning**: instead of firing on single noisy signals, the system waits for two independent signals (audio + visual, behaviour + environment) to agree before escalating to "urgent." That's the demo-video gold moment.
+
+There's no in-house ML training. The project leans entirely on VideoDB's vision-and-language perception model — we steer it with prompt engineering. That's a deliberate choice that maps to the hackathon's "depth of VideoDB SDK usage" scoring axis (30% of the score).
+
+**Where to look first:**
+- 📁 [`docs/REPO_MAP.md`](docs/REPO_MAP.md) — every file in the repo explained in plain English with tech labels.
+- 🔀 [`docs/FEATURE_FLOWS.md`](docs/FEATURE_FLOWS.md) — Mermaid diagrams + step-by-step walkthroughs of every feature.
+- 🟢 [`README.md`](README.md) — pitch + quickstart + architecture diagram.
+
+If you're an LLM coding agent picking up this project, the rest of this file (sections 1–19) is your detailed brief. Sections 17–18 are particularly load-bearing: they encode "what NOT to do" lessons accumulated during the build.
+
+---
+
 ## 1. Project identity
 
 **Name:** WildWatch

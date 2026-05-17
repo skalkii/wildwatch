@@ -8,6 +8,25 @@ WildWatch turns continuous wildlife livestreams into structured ecological obser
 
 ---
 
+## WildWatch in 60 seconds — for everyone
+
+Imagine a single ranger trying to protect a 100 km² reserve with three or four wildlife cameras streaming day and night. There's no human way to watch every frame, and yet the meaningful moments — a leopard at the waterhole, a herd of elephants in distress, the sound of a chainsaw at 2 a.m. — are exactly the moments a ranger needs to know about right away.
+
+**WildWatch is the always-on observer that watches and listens for them.** A team of four AI "lenses" (one for species, one for behaviour, one for the surrounding environment, one for audio) sits on top of every livestream we plug in. The moment any of them spots something noteworthy, an alert lands on the ranger's phone within seconds — colour-coded by urgency, with a tappable clip of the actual moment. At the end of every day a 90-second highlight reel summarises what happened.
+
+The smartest part is **cross-modal reasoning**: instead of firing on a single signal (which is often noise), the system waits for two independent signals to agree. *"An alarm call AND fleeing animals within 90 seconds"* is far more likely to be a real predator event than either signal alone, so that's what gets escalated to red.
+
+It works because we don't train any of our own AI — we use carefully written prompts to steer VideoDB's general-purpose perception model into a wildlife specialist. That makes the project cheap to run, easy to extend (drop a new prompt file in to add a new "lens"), and accurate enough for real-world conservation work.
+
+**Two diagrams that explain everything visually:**
+
+- 📁 [`docs/REPO_MAP.md`](docs/REPO_MAP.md) — every folder and file in plain English. Read this first if you're new.
+- 🔀 [`docs/FEATURE_FLOWS.md`](docs/FEATURE_FLOWS.md) — step-by-step diagrams of every feature, from "AI sees a leopard" to "phone buzzes" to "daily reel is built."
+
+If you're a non-technical reader, **start with the two docs above** — they avoid jargon and explain each step with file references for anyone who wants to follow up in code.
+
+---
+
 ## The problem
 
 Existing conservation AI (SpeciesNet, Wildlife Insights, MegaDetector) processes **single camera-trap images** for **species classification only**. The unsolved problems in the conservation tech literature:
