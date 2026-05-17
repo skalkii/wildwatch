@@ -1126,7 +1126,7 @@ function renderSource(s) {
     ? `<button data-action="reconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Re-establish the live stream connection on VideoDB.">Reconnect</button>`
     : '';
   const reindexBtn = reindexable
-    ? `<button data-action="reindex-video" data-id="${escapeHtml(s.video_id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Re-run the AI scene index on this video without re-uploading.">&#8634; Re-index</button>`
+    ? `<button data-action="reindex-video" data-id="${escapeHtml(s.video_id)}" data-kind="both" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Re-run the AI scene + audio indexes on this video and re-fire alerts.">&#8634; Re-index</button>`
     : '';
   const disconnectBtn = isStreamKind
     ? `<button data-action="disconnect" data-id="${escapeHtml(s.id)}" class="btn btn-ghost text-[11px] !py-1 !px-2" title="Stop the live rtstream on VideoDB. Keeps the source row.">Disconnect</button>`
@@ -1405,7 +1405,11 @@ async function showVideoDetail(videoId) {
     const r = await fetch(`/api/videos/${videoId}/indexes`);
     const d = await r.json();
     const idxs = d.indexes || [];
-    const reindexBtn = `<button data-action="reindex-video" data-id="${escapeHtml(videoId)}" class="btn btn-ghost text-[11.5px]">↻ Re-index</button>`;
+    const reindexBtn = `<div class="inline-flex items-center gap-1 flex-wrap">
+      <button data-action="reindex-video" data-id="${escapeHtml(videoId)}" data-kind="video" class="btn btn-ghost text-[11.5px]" title="Re-run the visual scene index only (species + scene description).">&#8634; Re-index video</button>
+      <button data-action="reindex-video" data-id="${escapeHtml(videoId)}" data-kind="audio" class="btn btn-ghost text-[11.5px]" title="Purge stuck audio indexes and rebuild — only works if the clip has a transcript.">&#8634; Re-index audio</button>
+      <button data-action="reindex-video" data-id="${escapeHtml(videoId)}" data-kind="both" class="btn btn-primary text-[11.5px]" title="Re-run BOTH visual + audio analysis, then fire alerts on every event detected.">&#8634; Both</button>
+    </div>`;
     if (idxs.length === 0) {
       el.innerHTML = `<div class="card-soft p-4">
         <div class="flex items-center justify-between gap-2 mb-1">
@@ -1466,25 +1470,28 @@ async function showVideoDetail(videoId) {
   } catch (e) { el.innerHTML = `<span style="color:#ef4444">error: ${escapeHtml(String(e))}</span>`; }
 }
 
-async function reindexVideo(videoId) {
+async function reindexVideo(videoId, kind) {
+  kind = (kind || 'both').toLowerCase();
+  const labelByKind = {
+    video: ['Re-run visual scene index?', 'VideoDB will re-read every frame and fire visual-event alerts (rare species, weapon visible, vehicle, carcass, ...).', 'Re-index video'],
+    audio: ['Re-build audio index?', 'Purges every audio-named index on this video (including stuck `processing` ones) and rebuilds — only works if the clip has a transcript. VideoDB`s index_audio is transcript-based; silent / SFX-only clips will skip audio entirely and fall back to visual analysis.', 'Re-index audio'],
+    both:  ['Re-run analysis + alerts?', 'VideoDB will re-read every frame + listen to the audio. Telegram alerts will re-fire for every event detected (gunshot, alarm calls, rare species, etc.). Costs credits.', 'Re-index + alert'],
+  }[kind] || ['Re-index?', 'Re-run analysis.', 'Re-index'];
   const ok = await confirmToast(
-    'VideoDB will re-read every frame + listen to the audio on this video. ' +
-    'Telegram alerts will re-fire for every event detected (gunshot, ' +
-    'alarm calls, rare species, etc.). Costs credits.',
-    { title: 'Re-run analysis + alerts?', confirmLabel: 'Re-index + alert', cancelLabel: 'Cancel' }
+    labelByKind[1],
+    { title: labelByKind[0], confirmLabel: labelByKind[2], cancelLabel: 'Cancel' }
   );
   if (!ok) return;
-  const progress = showToast(`Requesting fresh scene index for ${videoId.slice(0, 12)}…`, { variant: 'info', duration: 0 });
+  const progress = showToast(`Requesting fresh ${kind === 'both' ? '' : kind + ' '}index for ${videoId.slice(0, 12)}…`, { variant: 'info', duration: 0 });
   try {
-    const r = await fetch(`/api/videos/${videoId}/reindex`, { method: 'POST' });
+    const r = await fetch(`/api/videos/${videoId}/reindex?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
     const d = await r.json();
     progress.dismiss();
     if (!r.ok) {
       showToast(`Re-index failed: ${d.detail || JSON.stringify(d)}`, { variant: 'error', duration: 6000 });
       return;
     }
-    showToast(d.message || 'Fresh scene index requested. Indexing runs in the background.', { variant: 'success', duration: 5000 });
-    // Reload the detail panel so the new processing index appears.
+    showToast(d.message || 'Fresh index requested. Running in the background.', { variant: 'success', duration: 5000 });
     showVideoDetail(videoId);
   } catch (e) {
     progress.dismiss();
@@ -2222,7 +2229,7 @@ document.addEventListener('click', (e) => {
     case 'delete':          deleteSource(id);        break;
     case 'show-video':      showVideoDetail(id);     break;
     case 'show-scenes':     showVideoScenes(id, idx); break;
-    case 'reindex-video':   reindexVideo(id); break;
+    case 'reindex-video':   reindexVideo(id, t.dataset.kind); break;
     case 'delete-video':    deleteVideo(id, t.dataset.name); break;
     case 'open-add-modal':  $('add-source-btn').click(); break;
     case 'copy-id':         copyIdToClipboard(t.dataset.id, t); break;

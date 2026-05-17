@@ -544,6 +544,10 @@ flowchart TD
 
 > **Why polling instead of a callback?** `video.index_scenes` and `video.index_audio` both accept a `callback_url` param, which VideoDB will POST to when the index finishes. We don't use it because (a) it requires a public webhook URL — the whole point of Path B is to work *without* a cloudflared tunnel, and (b) we want to fire alerts for hits, not just "index done." A callback would still need a subsequent search loop.
 
+> **Audio index gotcha (verified from SDK source + VideoDB skill docs):** Both `video.index_audio` and `rtstream.index_audio` use `extraction_type=SceneExtractionType.transcript` — they process the transcript through an LLM with the audio prompt. They do NOT run direct waveform classification. For a clip with no spoken words (e.g. a 10s gunshot YouTube clip with no narration), there's no transcript → no segments → the audio index sits in `processing` forever. `kick_off_audio_index` gates the kickoff on `_has_transcript(video)` and short-circuits on silent clips. The sweep then falls back to running audio-event queries against the visual scene index instead. **There is no native non-speech audio classification in VideoDB** (confirmed by surveying skills, notebooks, and llms.txt); the Path-B workaround is the closest we can get without leaving the SDK.
+
+> **Stuck audio indexes** can pile up if the operator re-uploads or re-indexes a silent clip multiple times before this gating shipped. `purge_stuck_audio_indexes(video, source_id)` deletes every audio-named index in `processing/queued/pending/initiated` state. It runs implicitly on every kickoff and can be triggered manually via the dashboard's "Re-index audio" CTA (which calls `POST /api/videos/{id}/reindex?kind=audio` → `kick_off_audio_index(..., force=True)`).
+
 > **Operational hint:** if no alerts fire, run `python scripts/index_corpus.py --slug <yourclip>` to verify the indexes actually have content, then check the uvicorn logs for `post-analysis:` lines.
 
 ---

@@ -1195,24 +1195,30 @@ async def api_video_scenes(video_id: str, index_id: str, limit: int = 20) -> dic
 
 
 @app.post("/api/videos/{video_id}/reindex")
-async def api_video_reindex(video_id: str) -> dict:
+async def api_video_reindex(video_id: str, kind: str = "both") -> dict:
     """Re-run the AI pass on a video AND re-fire Path-B alerts.
 
-    Three things happen here, in order:
-      1. If the video has no visual scene index, create one (species prompt).
-         This handles backfill for old uploads from before auto-indexing.
-      2. If the video has no audio index, create one (audio prompt).
-         Idempotent — `kick_off_audio_index` skips if any audio-named
-         index already exists.
-      3. Spawn the post-upload analysis sweep against whatever indexes
-         exist (newly-created or pre-existing). This re-runs the event
-         queries and fires Telegram + dashboard SSE on hits.
+    Query parameter ``kind`` controls which indexes to rebuild:
+      - ``video`` (or ``visual``) — rebuild the visual scene index only.
+      - ``audio`` — purge every audio-named index on the video and kick
+        off a fresh one (transcript-gated). Use when an earlier audio
+        index got stuck in ``processing`` because the clip is silent /
+        SFX-only — ``video.index_audio`` is transcript-based and never
+        finishes without dialogue.
+      - ``both`` (default) — do both, in order.
 
-    Why also run the sweep on already-indexed videos? Because the
-    operator clicked "Re-index" — they want fresh alerts. If they only
-    wanted to ensure the indexes exist, they wouldn't bother. The
-    confirmToast on the dashboard explicitly warns "alerts may re-fire."
+    In all cases the post-upload analysis sweep is spawned afterwards
+    so Telegram + dashboard alerts re-fire on event hits.
     """
+    kind = (kind or "both").lower().strip()
+    if kind in ("video", "visual"):
+        kind = "video"
+    if kind not in ("video", "audio", "both"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"kind must be one of video|audio|both (got {kind!r})",
+        )
+
     from wildwatch.ingest import _DEFAULT_SCENE_PROMPT_CONTEXT
     from wildwatch.post_upload_analysis import (
         kick_off_audio_index,
@@ -1226,57 +1232,79 @@ async def api_video_reindex(video_id: str) -> dict:
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"video not found: {e}") from e
 
-    # Inspect existing indexes — only create what's missing.
-    try:
-        existing = await _async_sdk(video.list_scene_index, timeout_s=10.0) or []
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"list_scene_index failed: {e}") from e
-
-    has_visual = any("audio" not in str(i.get("name", "")).lower() for i in existing)
-
     new_visual_id: str | None = None
-    if not has_visual:
+    if kind in ("video", "both"):
         try:
-            prompt = format_prompt("species", **_DEFAULT_SCENE_PROMPT_CONTEXT)
+            existing = await _async_sdk(video.list_scene_index, timeout_s=10.0) or []
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"prompt format failed: {e}") from e
-        try:
-            new_visual_id = await _async_sdk(
-                video.index_scenes,
-                timeout_s=30.0,
-                prompt=prompt,
-                # Keep the "wildwatch-auto" prefix so post_upload_analysis's
-                # poller picks this index up by substring match.
-                name=f"wildwatch-auto-reindex-{int(time.time())}",
-            )
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"index_scenes failed: {e}") from e
+            raise HTTPException(status_code=502, detail=f"list_scene_index failed: {e}") from e
+        has_visual = any("audio" not in str(i.get("name", "")).lower() for i in existing)
+        # For explicit "video": always create a fresh one. For "both":
+        # only create if missing — avoid piling duplicate visual indexes
+        # on every click.
+        if not has_visual or kind == "video":
+            try:
+                prompt = format_prompt("species", **_DEFAULT_SCENE_PROMPT_CONTEXT)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"prompt format failed: {e}") from e
+            try:
+                new_visual_id = await _async_sdk(
+                    video.index_scenes,
+                    timeout_s=30.0,
+                    prompt=prompt,
+                    name=f"wildwatch-auto-reindex-{int(time.time())}",
+                )
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=f"index_scenes failed: {e}") from e
 
-    # Unique source_id per click so synthesised event_ids don't collide
-    # if the operator re-indexes the same video twice in quick succession.
     source_id = f"reindex-{video_id[:8]}-{int(time.time())}"
 
-    # Best-effort audio index kickoff (skips if one already exists).
-    try:
-        await _async_sdk(kick_off_audio_index, video, source_id, timeout_s=15.0)
-    except Exception as e:
-        logger.warning("reindex: audio index kickoff failed for video=%s: %r", video_id, e)
+    if kind in ("audio", "both"):
+        # `force=True` purges every audio-named index first (including
+        # stuck `processing` ones) so a silent clip's dead index doesn't
+        # haunt the dashboard. The kickoff then transcript-gates the
+        # rebuild — no transcript → no audio index.
+        force_audio = kind == "audio"
+        try:
+            await _async_sdk(
+                kick_off_audio_index,
+                video,
+                source_id,
+                timeout_s=15.0,
+                force=force_audio,
+            )
+        except Exception as e:
+            logger.warning("reindex: audio index kickoff failed for video=%s: %r", video_id, e)
 
-    # Spawn the sweep. Fire-and-forget — task tracked via local set so
-    # the GC can't drop it mid-run.
     task = asyncio.create_task(run_post_upload_analysis(video, source_id))
     _reindex_sweep_tasks.add(task)
     task.add_done_callback(_reindex_sweep_tasks.discard)
 
+    msg = {
+        "video": (
+            "Visual index rebuilding. Telegram alerts will fire on every "
+            "visual event the AI detects (rare species, weapon, vehicle, "
+            "carcass, ...). Allow 1-3 minutes."
+        ),
+        "audio": (
+            "Stuck audio indexes purged. Audio index will rebuild only if "
+            "the clip has a transcript (VideoDB's index_audio is "
+            "transcript-based — silent / SFX-only clips skip audio and "
+            "fall back to visual analysis)."
+        ),
+        "both": (
+            "Re-running analysis. Telegram alerts will fire on every event "
+            "the AI detects. Allow 1-3 minutes if new indexes are still "
+            "processing."
+        ),
+    }[kind]
+
     return {
         "video_id": video_id,
+        "kind": kind,
         "scene_index_id": str(new_visual_id) if new_visual_id else None,
         "status": "processing",
-        "message": (
-            "Re-running analysis. Telegram alerts will fire on every event "
-            "the AI detects (gunshot, alarm calls, rare species, ...). Allow "
-            "1-3 minutes if new indexes are still processing."
-        ),
+        "message": msg,
     }
 
 

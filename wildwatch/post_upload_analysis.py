@@ -190,18 +190,68 @@ def _has_transcript(video: Any, source_id: str) -> bool:
     return False
 
 
-def kick_off_audio_index(video: Any, source_id: str) -> None:
+def _audio_indexes(video: Any) -> list[dict]:
+    """Return all audio-named scene indexes on the video (best-effort)."""
+    try:
+        idxs = video.list_scene_index() or []
+    except Exception as e:
+        logger.warning("post-analysis: list_scene_index failed: %r", e)
+        return []
+    return [i for i in idxs if "audio" in str(i.get("name", "")).lower()]
+
+
+def purge_stuck_audio_indexes(video: Any, source_id: str) -> int:
+    """Delete every audio-named index in `processing` state on the video.
+
+    VideoDB's `video.index_audio` is transcript-based — for a clip with
+    no spoken words it never finishes, leaving the index stuck in
+    `processing` indefinitely. There is no native API to "cancel" the
+    job, but `video.delete_scene_index(idx_id)` does remove it. Without
+    this purge, the dashboard's index list grows a new stuck audio
+    index every time the operator clicks Re-index.
+
+    Returns the count of indexes deleted. Logs each removal so the
+    operator can see what happened in the uvicorn output.
+    """
+    removed = 0
+    for idx in _audio_indexes(video):
+        status = str(idx.get("status", "")).lower()
+        if status not in ("processing", "queued", "pending", "initiated"):
+            continue
+        idx_id = idx.get("scene_index_id") or idx.get("id")
+        if not idx_id:
+            continue
+        try:
+            video.delete_scene_index(idx_id)
+            removed += 1
+            logger.info(
+                "post-analysis: deleted stuck audio index source=%s id=%s status=%s",
+                source_id,
+                idx_id,
+                status,
+            )
+        except Exception as e:
+            logger.warning("post-analysis: delete_scene_index failed for id=%s: %r", idx_id, e)
+    return removed
+
+
+def kick_off_audio_index(video: Any, source_id: str, *, force: bool = False) -> None:
     """Fire-and-forget audio index on a freshly-uploaded video.
 
-    Three things happen:
-      1. List existing scene indexes; if any audio-named index already
-         exists, no-op (idempotent).
-      2. Verify the clip has a transcript. VideoDB's `index_audio` is
-         transcript-based — for a silent clip it would hang in
-         `processing` forever. We skip audio kickoff entirely on
-         silent clips and let the post-analysis sweep fall back to
-         the visual index.
-      3. Otherwise, kick off `video.index_audio` with the audio prompt.
+    Five things happen, in order:
+      1. List existing audio-named indexes on the video.
+      2. If `force=True`, purge any audio indexes regardless of status
+         (used by the explicit "Re-index Audio" CTA).
+      3. If a ready audio index already exists AND `force` is False,
+         no-op (idempotent).
+      4. Purge stuck `processing` audio indexes — VideoDB will never
+         finish them if there's no transcript, and they clutter the UI.
+      5. Verify the clip has a transcript. VideoDB's `index_audio` is
+         transcript-based (`extraction_type=SceneExtractionType.transcript`,
+         confirmed in the SDK source) — for a silent clip it would hang
+         in `processing` forever. Skip audio kickoff on silent clips
+         and let the post-analysis sweep fall back to the visual index.
+      6. Otherwise, call `video.index_audio` with the audio prompt.
 
     Synchronous worker — call from a thread via `asyncio.to_thread`.
     """
@@ -213,15 +263,38 @@ def kick_off_audio_index(video: Any, source_id: str) -> None:
         logger.warning("post-analysis: audio prompt format failed for %s: %r", source_id, e)
         return
 
-    try:
-        existing = video.list_scene_index() or []
-    except Exception as e:
-        logger.warning("post-analysis: list_scene_index failed for %s: %r", source_id, e)
-        existing = []
-    has_audio = any("audio" in str(i.get("name", "")).lower() for i in existing)
-    if has_audio:
-        logger.info("post-analysis: source=%s already has an audio index; skipping", source_id)
-        return
+    audio_idxs = _audio_indexes(video)
+
+    if force:
+        # Purge ALL audio indexes (ready + processing) so the rebuild starts clean.
+        for idx in audio_idxs:
+            idx_id = idx.get("scene_index_id") or idx.get("id")
+            if not idx_id:
+                continue
+            try:
+                video.delete_scene_index(idx_id)
+                logger.info(
+                    "post-analysis: deleted audio index source=%s id=%s (force=True)",
+                    source_id,
+                    idx_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "post-analysis: force delete_scene_index failed id=%s: %r", idx_id, e
+                )
+        audio_idxs = []
+    else:
+        # Already have a ready audio index? Idempotent skip.
+        for idx in audio_idxs:
+            status = str(idx.get("status", "")).lower()
+            if status in _READY:
+                logger.info(
+                    "post-analysis: source=%s already has a ready audio index; skipping",
+                    source_id,
+                )
+                return
+        # Otherwise, purge stuck ones before deciding.
+        purge_stuck_audio_indexes(video, source_id)
 
     # Gate on transcript — VideoDB's index_audio is transcript-based, so
     # a silent / SFX-only clip will leave the index stuck in `processing`
