@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -235,6 +236,66 @@ def build_message(
     return "\n".join(parts)
 
 
+def _genai_friendly_explanation(
+    coll: Any,
+    tier: int,
+    label: str,
+    raw_explanation: str,
+) -> str | None:
+    """Use VideoDB's generate_text API to rewrite a Path-B explanation as a
+    natural-language sentence the operator can read at a glance.
+
+    Returns None on any failure — caller falls back to the bracket-parser
+    in ``humanise_explanation``. Synchronous; called from a thread by
+    ``send_alert`` via ``asyncio.to_thread``.
+
+    Budget: ``model_name='basic'`` is cheap (~$0.0016 per 1000 tokens).
+    Hard timeout via httpx in the SDK; if it stalls the alert ships with
+    the parser-rendered fallback instead.
+    """
+    try:
+        # Local import — never block module load on the SDK.
+        prompt = (
+            "You are a wildlife-monitoring assistant. Rewrite the following "
+            "system-generated alert as ONE short, plain-English sentence for "
+            "a park ranger reading it on their phone. Lead with WHAT was "
+            "detected and WHERE in the clip (use 'around <start>s'). Drop "
+            "internal jargon like 'post-upload analysis', 'Query:', bracket "
+            "tags, scene state codes. No emoji. No markdown. Max 200 chars.\n\n"
+            f"Severity tier: {tier} (1=info, 2=notable, 3=urgent)\n"
+            f"Event label: {label}\n"
+            f"Raw alert text: {raw_explanation[:1500]}"
+        )
+        out = coll.generate_text(prompt=prompt, model_name="basic")
+        if isinstance(out, dict):
+            out = out.get("text") or out.get("response") or ""
+        out = (out or "").strip()
+        if not out:
+            return None
+        # Defensive trim — genai may sometimes ignore the 200-char cap.
+        if len(out) > 400:
+            out = out[:400].rstrip() + "..."
+        return out
+    except Exception as e:
+        logger.debug("genai_friendly_explanation failed: %r", e)
+        return None
+
+
+# Module-level coll handle — webhooks.py wires this in at import time so
+# send_alert can call generate_text without re-creating the SDK client
+# on every alert. None means "skip the genai rewrite; use parser only".
+_COLL_GETTER: Any = None
+
+
+def configure_coll_getter(getter: Any) -> None:
+    """Webhooks calls this once at import to give send_alert a way to fetch
+    the cached VideoDB collection. ``getter`` is a sync callable returning
+    a collection-like object exposing ``generate_text``.
+    """
+    global _COLL_GETTER
+    _COLL_GETTER = getter
+
+
 async def send_alert(
     tier: int,
     label: str,
@@ -243,12 +304,19 @@ async def send_alert(
     *,
     bot_token: str | None = None,
     chat_id: str | None = None,
+    use_genai: bool = True,
 ) -> dict:
     """Send a Markdown alert via Telegram Bot API.
 
     Raises ``RuntimeError`` with an explicit message if the bot token or chat
     id are unset, rather than the opaque ``KeyError`` ``os.environ[...]``
     would otherwise raise.
+
+    When ``use_genai`` is True (default) AND ``configure_coll_getter`` was
+    called AND the explanation is bracket-tagged Path-B output, we ask
+    VideoDB's generate_text API to rewrite it as one human sentence
+    before assembling the message. Fail-soft: any error falls back to
+    the local bracket-parser via ``humanise_explanation``.
     """
     token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
@@ -262,7 +330,31 @@ async def send_alert(
             "TELEGRAM_CHAT_ID is unset; alert cannot be sent. "
             "Configure it in .env or pass chat_id explicitly."
         )
-    text = build_message(tier=tier, label=label, explanation=explanation, stream_url=stream_url)
+
+    # Optional GenAI rewrite of the explanation. Only worth the round-
+    # trip when the raw text contains bracket-tagged AI dump — manual /
+    # rtstream-fired alerts already have clean explanations and bypass.
+    final_explanation = explanation
+    has_brackets = bool(explanation) and "[" in (explanation or "")
+    if use_genai and has_brackets and _COLL_GETTER is not None:
+        try:
+            import asyncio as _asyncio
+
+            coll = await _asyncio.wait_for(_asyncio.to_thread(_COLL_GETTER), timeout=5.0)
+            rewritten = await _asyncio.wait_for(
+                _asyncio.to_thread(
+                    _genai_friendly_explanation, coll, tier, label, explanation or ""
+                ),
+                timeout=8.0,
+            )
+            if rewritten:
+                final_explanation = rewritten
+        except Exception as e:
+            logger.debug("send_alert: genai rewrite skipped: %r", e)
+
+    text = build_message(
+        tier=tier, label=label, explanation=final_explanation, stream_url=stream_url
+    )
     url = SEND_MESSAGE_URL_TEMPLATE.format(token=token)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -272,7 +364,10 @@ async def send_alert(
                     "chat_id": chat,
                     "text": text,
                     "parse_mode": "Markdown",
-                    "disable_web_page_preview": False,
+                    # Disable Telegram's link-preview card on the console
+                    # player URL — it renders an ugly empty box on mobile
+                    # because the page is a JS-loaded SPA with no OG tags.
+                    "disable_web_page_preview": True,
                 },
             )
     except httpx.TransportError as e:

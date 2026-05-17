@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 from wildwatch import dashboard, event_log, ingest, sources  # noqa: E402
-from wildwatch.telegram import send_alert  # noqa: E402
+from wildwatch.telegram import configure_coll_getter, send_alert  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +784,12 @@ def _get_coll() -> Any:
             if _conn_cache["coll"] is None:
                 _conn_cache["coll"] = _get_conn().get_collection()
     return _conn_cache["coll"]
+
+
+# Wire telegram.send_alert's optional GenAI rewriter to our cached
+# collection. send_alert calls `_get_coll` in a worker thread so it
+# stays off the asyncio event loop.
+configure_coll_getter(_get_coll)
 
 
 @app.get("/api/sources")
