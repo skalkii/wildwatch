@@ -5,6 +5,7 @@
 Continuous wildlife livestreams (and uploaded clips) → structured ecological observations — species, behavior, environment, threats — with tiered alerts, cross-modal reasoning, and a one-click daily narrated reel. Built end-to-end on the [VideoDB](https://videodb.io) SDK for the **Eyes & Ears** hackathon.
 
 **Read next:**
+- 🚀 [`docs/SETUP.md`](docs/SETUP.md) — **start here** — zero-to-first-alert walkthrough (15–30 min). Non-tech friendly. AI-tool friendly.
 - 📁 [`docs/REPO_MAP.md`](docs/REPO_MAP.md) — every folder + file in one page.
 - 🔀 [`docs/FEATURE_FLOWS.md`](docs/FEATURE_FLOWS.md) — diagrams of every feature.
 - ⚠️ [`docs/GENAI_ROADMAP.md`](docs/GENAI_ROADMAP.md) — what's wired + the one platform limitation.
@@ -89,16 +90,14 @@ One shared Medium `SandboxTier`, status-gated, 600s idle timeout. Built with the
 
 ## Local setup
 
-macOS 14+ (Apple Silicon + Intel) and Ubuntu 22.04.
+→ **[`docs/SETUP.md`](docs/SETUP.md)** — full 16-step walkthrough for non-tech / first-time setup. 15–30 min from zero to first Telegram alert. Includes:
+- Per-OS terminal + Homebrew + Python install
+- Step-by-step Telegram bot creation + `chat_id` extraction
+- VideoDB API-key flow
+- Cloudflare tunnel setup
+- 11-row troubleshooting table
 
-| Tool | Why | Install |
-|---|---|---|
-| Python 3.12 | the app | `brew install python@3.12` |
-| Docker Desktop | RTSP relay + tunnel (live feeds only) | https://docs.docker.com/desktop/ |
-| ffmpeg + streamlink | YouTube → RTSP bridge (live feeds only) | `brew install ffmpeg streamlink` |
-| `cloudflared` | public webhook URL | `brew install cloudflare/cloudflare/cloudflared` |
-| VideoDB account | the AI brain | https://console.videodb.io |
-| Telegram bot | alerts | [@BotFather](https://t.me/BotFather) → `/newbot` |
+**TL;DR for engineers** (Mac, Homebrew + Python 3.12 already installed):
 
 ```bash
 git clone https://github.com/skalkii/wildwatch.git && cd wildwatch
@@ -106,15 +105,14 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env   # fill VIDEO_DB_API_KEY + TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 uvicorn wildwatch.webhooks:app --host 127.0.0.1 --port 8000 --reload
+# (optional, in second terminal) cloudflared tunnel --url http://localhost:8000
 ```
 
-Public webhook (separate terminal):
-```bash
-cloudflared tunnel --url http://localhost:8000
-# Copy printed *.trycloudflare.com URL into .env as WEBHOOK_BASE_URL, restart uvicorn.
-```
+**TL;DR for AI tools** (Claude Code, Cursor, etc.) — paste in repo root:
 
-Skip the tunnel for the upload-only demo flow — Path-B sweep fires locally.
+> Read `CLAUDE.md` + `docs/SETUP.md`. Install all prereqs for my OS, walk me through creating a Telegram bot, get my VideoDB API key, fill `.env`, start uvicorn + cloudflared in background, set `WEBHOOK_BASE_URL` to the tunnel URL, restart uvicorn, then fire a `/webhook/2` smoke test and confirm Telegram delivery.
+
+Skip the tunnel for the upload-only demo — Path-B sweep fires locally.
 
 ---
 
