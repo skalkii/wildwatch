@@ -245,8 +245,10 @@ In the **first terminal** (where uvicorn runs), press `Ctrl+C` then re-run the `
 
 **Check:** Telegram shows at least one alert message from your bot.
 
+> ⏱ **Expected delay: ~3–10 seconds per alert.** Every alert is rewritten by VideoDB's `generate_text` before delivery so the message reads as one ranger-friendly sentence instead of raw bracket-tagged AI output. Webhook POST timeout is 30s to cover the full chain (rewrite + Telegram API). On rewrite timeout (8s cap) the system falls back to a local bracket-parser — alert still ships, just with less natural prose. See [`docs/FEATURE_FLOWS.md`](FEATURE_FLOWS.md) Flow 1.
+
 If the alerts don't fire automatically (e.g. the clip has no detectable threats):
-- Alerts tab → scroll to **Test the alert system** → click 🟢 / 🟡 / 🔴 buttons. Each fires a synthetic test alert through the same pipeline. Telegram should buzz immediately.
+- Alerts tab → scroll to **Test the alert system** → click 🟢 / 🟡 / 🔴 buttons. Each fires a synthetic test alert through the same pipeline. Telegram should buzz within ~5s.
 
 ---
 
@@ -272,6 +274,7 @@ Once you have a few alerts in the feed:
 | `VIDEO_DB_API_KEY: api key is invalid` | Wrong key or expired | Re-generate at https://console.videodb.io → API Keys |
 | `getUpdates` returns `{"ok":true,"result":[]}` | You haven't messaged the bot yet | Open Telegram → message your bot → re-run curl |
 | Telegram bot silent after webhook fires | Wrong `TELEGRAM_CHAT_ID` | Re-run step 9. ID should be a number, no quotes around it in `.env` |
+| Telegram alert arrives 5–10 s after dashboard shows it | Normal — GenAI rewrite pipeline | Each alert goes through `coll.generate_text` (~3–8 s) to convert raw bracket-tagged AI output into one human-readable sentence. Dashboard shows the raw event instantly via SSE; Telegram waits for the rewrite. On timeout (8 s) the system falls back to a local parser and ships anyway. |
 | `cloudflared` exits immediately | Free quick-tunnel transient | Just re-run — Cloudflare assigns a new URL |
 | Tunnel URL works but webhook 401s | `WILDWATCH_WEBHOOK_SECRET` set without forwarding header | Either unset it in `.env`, or configure VideoDB alerts to send the matching `X-WildWatch-Secret` header |
 | Dashboard loads but Sources tab empty | `.state.json` got reset | That's fine. Add a new source. |

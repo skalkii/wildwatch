@@ -120,7 +120,7 @@ Skip the tunnel for the upload-only demo — Path-B sweep fires locally.
 
 1. Dashboard → Sources → **+ Add source** → upload file OR paste YouTube URL.
 2. Wait for `ready` (1–3 min). Card pulses `queued → connecting → ingesting → indexing → ready`. Auto scene + audio indexing starts on upload completion.
-3. Watch Alerts feed. Path-B sweep searches each index for gunshot / chainsaw / rare-species / alarm-call / human-intrusion and fires synthesised webhooks. Telegram buzzes; dashboard fills.
+3. Watch Alerts feed. Path-B sweep searches each index for gunshot / chainsaw / rare-species / alarm-call / human-intrusion and fires synthesised webhooks. Dashboard fills instantly via SSE; **Telegram lands ~3–10 s later** because each alert goes through `coll.generate_text` to rewrite raw bracket-tagged AI output into a human-readable sentence (8 s timeout → falls back to local parser).
 4. (Optional) Alerts tab → **Test the alert system** → 🟢/🟡/🔴 buttons sanity-check Telegram.
 5. Alerts tab → **Daily summary → Build** (30–90s):
    - Reads last 24h from `data/live_event_log.jsonl`

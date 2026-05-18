@@ -36,7 +36,7 @@ flowchart TD
 4. **Four indexes in parallel** — `rt.index_visuals(prompt=…)` × 3 + `rt.index_audio(prompt=…)`. Code: `scripts/bootstrap.py:_bootstrap_stream` L158–180.
 5. **18 event rules** — `wildwatch/events.py:EVENT_DEFINITIONS` evaluated by VideoDB's event engine. Wired by `wildwatch/wiring.py:wire_alerts`.
 6. **Alert POST** — VideoDB calls `https://<tunnel>/webhook/{tier}`. `wildwatch/webhooks.py:receive_alert` validates against `AlertPayload`. Optional `WILDWATCH_WEBHOOK_SECRET` via `X-WildWatch-Secret` header (`hmac.compare_digest`); unset → loud WARNING + open access.
-7. **Fan-out** — `event_log.py:append` (JSONL), `telegram.py:send_alert` (HTML message + clip URL), `dashboard.py:broadcast` (SSE).
+7. **Fan-out** — `event_log.py:append` (JSONL), `dashboard.py:broadcast` (SSE — instant), `telegram.py:send_alert` (HTML message + clip URL). **Telegram path goes through a GenAI rewrite**: `coll.generate_text(model_name='basic')` converts raw bracket-tagged AI prose into one ranger-friendly sentence (`telegram.genai_friendly_explanation`). Adds ~3–8 s latency vs the SSE feed. On timeout (8 s cap) or any exception, falls back to local `humanise_explanation` bracket-parser so the alert still ships. Webhook POST timeout is 30 s to accommodate the full chain. Rewrites are sha256-cached by `(label, raw)` so re-fires hit cache instantly.
 
 ---
 
